@@ -19,6 +19,11 @@ pub struct Product {
     pub fulfillment_mode: String,
     pub stock_location: String,
     pub condition_code: String,
+    pub publication_status: Option<String>,
+    pub sales_policy: Option<String>,
+    pub supplier_source_status: Option<String>,
+    pub supplier_last_verified_at: Option<String>,
+    pub availability_eta: Option<String>,
     pub active: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -43,6 +48,11 @@ pub struct ProductInput {
     pub fulfillment_mode: Option<String>,
     pub stock_location: Option<String>,
     pub condition_code: Option<String>,
+    pub publication_status: Option<String>,
+    pub sales_policy: Option<String>,
+    pub supplier_source_status: Option<String>,
+    pub supplier_last_verified_at: Option<String>,
+    pub availability_eta: Option<String>,
     pub active: Option<bool>,
 }
 

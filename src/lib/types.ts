@@ -28,6 +28,10 @@ export type ProductCondition = "new" | "open_box" | "refurbished" | "used" | "pr
 export type Supplier = { id: number; company_id?: number; name: string; contact: string; email: string; phone: string; ordering_method: string; notes: string; active: boolean; created_at: string; updated_at: string };
 export type SupplierInput = { id?: number | null; name: string; contact?: string; email?: string; phone?: string; ordering_method?: string; notes?: string; active?: boolean };
 
+export type PublicationStatus = "draft" | "ready_for_review" | "published" | "paused" | "archived";
+export type SalesPolicy = "not_sellable" | "own_stock" | "dropship" | "preorder" | "make_to_order";
+export type SupplierSourceStatus = "not_applicable" | "negotiating" | "approved" | "suspended";
+
 export type Product = {
   id: number;
   company_id?: number;
@@ -48,6 +52,14 @@ export type Product = {
   fulfillment_mode?: FulfillmentMode;
   stock_location?: string;
   condition_code?: ProductCondition;
+  
+  // Publicación y abastecimiento
+  publication_status?: PublicationStatus;
+  sales_policy?: SalesPolicy;
+  supplier_source_status?: SupplierSourceStatus;
+  supplier_last_verified_at?: string | null;
+  availability_eta?: string | null;
+
   active: boolean;
   created_at: string;
   updated_at: string;
@@ -71,6 +83,13 @@ export type ProductInput = {
   fulfillment_mode?: FulfillmentMode;
   stock_location?: string;
   condition_code?: ProductCondition;
+  
+  publication_status?: PublicationStatus;
+  sales_policy?: SalesPolicy;
+  supplier_source_status?: SupplierSourceStatus;
+  supplier_last_verified_at?: string | null;
+  availability_eta?: string | null;
+
   active?: boolean;
 };
 

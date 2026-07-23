@@ -10,6 +10,9 @@
     Product,
     ProductCondition,
     ProductInput,
+    PublicationStatus,
+    SalesPolicy,
+    SupplierSourceStatus,
     StockBalance,
     StockLocation,
     Supplier,
@@ -87,6 +90,11 @@
     fulfillment_mode: "own_stock" as FulfillmentMode,
     stock_location: "Almacén principal",
     condition_code: "new" as ProductCondition,
+    publication_status: "draft" as PublicationStatus,
+    sales_policy: "not_sellable" as SalesPolicy,
+    supplier_source_status: "not_applicable" as SupplierSourceStatus,
+    supplier_last_verified_at: "",
+    availability_eta: "",
   });
 
   // Supplier modal
@@ -238,6 +246,58 @@
     })),
   ]);
 
+  let publicationFilter = $state("");
+
+  const publicationStatusOptions = [
+    { value: "draft", label: "Borrador" },
+    { value: "ready_for_review", label: "Listo para revisión" },
+    { value: "published", label: "Publicado" },
+    { value: "paused", label: "Pausado" },
+    { value: "archived", label: "Archivado" },
+  ];
+
+  const publicationFilterOptions = [
+    { value: "", label: "Todos los estados de publicación" },
+    ...publicationStatusOptions,
+  ];
+
+  const salesPolicyOptions = [
+    { value: "not_sellable", label: "No vendible (interno)" },
+    { value: "own_stock", label: "Stock propio (TPV/Web)" },
+    { value: "dropship", label: "Dropshipping" },
+    { value: "preorder", label: "Preventa" },
+    { value: "make_to_order", label: "Bajo pedido" },
+  ];
+
+  const supplierSourceStatusOptions = [
+    { value: "not_applicable", label: "No aplica" },
+    { value: "negotiating", label: "En negociación" },
+    { value: "approved", label: "Aprobado" },
+    { value: "suspended", label: "Suspendido" },
+  ];
+
+  function salesPolicyLabel(policy?: string) {
+    return salesPolicyOptions.find((i) => i.value === policy)?.label ?? "Stock propio";
+  }
+
+  function publicationBadge(status?: string, policy?: string) {
+    const s = status ?? "published";
+    const p = policy ?? "own_stock";
+    if (s === "published") {
+      return { label: `Publicado · ${salesPolicyLabel(p)}`, tone: "ok" as const };
+    }
+    if (s === "draft") {
+      return { label: "Borrador", tone: "neutral" as const };
+    }
+    if (s === "ready_for_review") {
+      return { label: "En revisión", tone: "warn" as const };
+    }
+    if (s === "paused") {
+      return { label: "Pausado", tone: "warn" as const };
+    }
+    return { label: "Archivado", tone: "danger" as const };
+  }
+
   const categories = $derived(
     [...new Set(products.map((p) => p.category).filter(Boolean))].sort((a, b) =>
       a.localeCompare(b, "es")
@@ -258,7 +318,8 @@
       const matchSupply = !supplyFilter || (p.fulfillment_mode ?? "own_stock") === supplyFilter;
       const normalizedCondition = p.condition_code === "preowned" ? "used" : (p.condition_code ?? "used");
       const matchCondition = !conditionFilter || normalizedCondition === conditionFilter;
-      return matchQ && matchCat && matchSupply && matchCondition;
+      const matchPub = !publicationFilter || (p.publication_status ?? "published") === publicationFilter;
+      return matchQ && matchCat && matchSupply && matchCondition && matchPub;
     })
   );
 
@@ -537,6 +598,11 @@
       fulfillment_mode: "own_stock",
       stock_location: "Almacén principal",
       condition_code: "new",
+      publication_status: "draft",
+      sales_policy: "not_sellable",
+      supplier_source_status: "not_applicable",
+      supplier_last_verified_at: "",
+      availability_eta: "",
     };
     selectedSupplier = NO_SUPPLIER;
     modalOpen = true;
@@ -561,6 +627,11 @@
       fulfillment_mode: p.fulfillment_mode ?? "own_stock",
       stock_location: p.stock_location ?? "Almacén principal",
       condition_code: p.condition_code === "preowned" ? "used" : (p.condition_code ?? "used"),
+      publication_status: (p.publication_status ?? "published") as PublicationStatus,
+      sales_policy: (p.sales_policy ?? "own_stock") as SalesPolicy,
+      supplier_source_status: (p.supplier_source_status ?? "not_applicable") as SupplierSourceStatus,
+      supplier_last_verified_at: p.supplier_last_verified_at ? p.supplier_last_verified_at.slice(0, 10) : "",
+      availability_eta: p.availability_eta ? p.availability_eta.slice(0, 10) : "",
     };
     selectedSupplier = productSupplierSelection(p, suppliers);
     modalOpen = true;
@@ -591,6 +662,11 @@
       fulfillment_mode: form.fulfillment_mode,
       stock_location: form.stock_location.trim(),
       condition_code: form.condition_code,
+      publication_status: form.publication_status,
+      sales_policy: form.sales_policy,
+      supplier_source_status: form.supplier_source_status,
+      supplier_last_verified_at: form.supplier_last_verified_at || null,
+      availability_eta: form.availability_eta || null,
       active: true,
     };
     try {
@@ -598,8 +674,8 @@
       modalOpen = false;
       showToast(editing ? "Producto actualizado" : "Producto creado correctamente");
       await load();
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : "Error al guardar producto", "err");
+    } catch (e: any) {
+      showToast(e?.message || "Error al guardar el producto", "err");
     }
   }
 
@@ -1105,6 +1181,11 @@
           bind:value={conditionFilter}
           options={[{ value: "", label: "Todo estado" }, ...conditionOptions.filter((item) => item.value !== "preowned")]}
         />
+        <Select
+          class="w-full max-w-[13rem]"
+          bind:value={publicationFilter}
+          options={publicationFilterOptions}
+        />
         <div class="ml-auto flex flex-wrap gap-2">
           <Button variant="secondary" onclick={downloadTemplate} disabled={importing}>
             Plantilla CSV
@@ -1195,6 +1276,7 @@
                   <th class="px-4 py-3 font-medium">Categoría</th>
                   <th class="px-4 py-3 font-medium">Proveedor / contacto</th>
                   <th class="px-4 py-3 font-medium">Abastecimiento</th>
+                  <th class="px-4 py-3 font-medium">Publicación</th>
                   <th class="px-4 py-3 font-medium">Estado</th>
                   <th class="px-4 py-3 font-medium">Stock</th>
                   <th class="px-4 py-3 font-medium">Cobertura</th>
@@ -1207,6 +1289,7 @@
               <tbody>
                 {#each filteredProducts as p (p.id)}
                   {@const cover = coverFor(p)}
+                  {@const pubInfo = publicationBadge(p.publication_status, p.sales_policy)}
                   <tr class="border-b border-[var(--color-border-soft)] transition hover:bg-[var(--color-purple-mist)]">
                     <td class="px-4 py-3">
                       <p class="font-medium text-[var(--color-text)]">{p.name}</p>
@@ -1224,6 +1307,9 @@
                       {/if}
                     </td>
                     <td class="px-4 py-3 text-xs text-[var(--color-muted)]">{fulfillmentLabel(p.fulfillment_mode)}</td>
+                    <td class="px-4 py-3">
+                      <Badge tone={pubInfo.tone}>{pubInfo.label}</Badge>
+                    </td>
                     <td class="px-4 py-3">
                       <Badge tone={p.condition_code === "new" ? "ok" : p.condition_code === "for_parts" ? "danger" : "warn"}>
                         {conditionLabel(p.condition_code)}
@@ -1612,6 +1698,31 @@
       </div>
       {#if form.fulfillment_mode === "supplier_dropship"}
         <p class="mt-2 text-xs text-amber-200">Dropshipping: el proveedor envía al cliente; no uses este dato como stock propio disponible.</p>
+      {/if}
+    </div>
+    <div class="mt-3 border-t border-[var(--color-border-soft)] pt-3">
+      <p class="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Estado comercial y publicación</p>
+      <div class="grid gap-3 sm:grid-cols-2">
+        <Select label="Estado de publicación" bind:value={form.publication_status} options={publicationStatusOptions} />
+        <Select label="Política comercial" bind:value={form.sales_policy} options={salesPolicyOptions} />
+        {#if form.sales_policy === "dropship"}
+          <Select label="Estado fuente proveedor" bind:value={form.supplier_source_status} options={supplierSourceStatusOptions} />
+          <Input label="Última verificación proveedor" type="date" bind:value={form.supplier_last_verified_at} />
+        {/if}
+        {#if form.sales_policy === "preorder" || form.sales_policy === "make_to_order"}
+          <Input label="ETA disponibilidad" type="date" bind:value={form.availability_eta} />
+        {/if}
+      </div>
+      {#if form.publication_status === "published"}
+        {#if form.sales_policy === "not_sellable"}
+          <p class="mt-2 text-xs text-rose-300">⚠️ No se puede publicar un producto con política 'No vendible'.</p>
+        {:else if form.sales_policy === "own_stock" && (Number(form.stock) || 0) <= 0}
+          <p class="mt-2 text-xs text-rose-300">⚠️ Publicar con stock propio requiere existencias > 0.</p>
+        {:else if form.sales_policy === "dropship" && (form.supplier_source_status !== "approved" || !form.supplier_last_verified_at)}
+          <p class="mt-2 text-xs text-rose-300">⚠️ Dropshipping publicado requiere proveedor aprobado y verificado.</p>
+        {:else if (form.sales_policy === "preorder" || form.sales_policy === "make_to_order") && !form.availability_eta}
+          <p class="mt-2 text-xs text-rose-300">⚠️ Preventa/bajo pedido publicado requiere fecha ETA.</p>
+        {/if}
       {/if}
     </div>
     <div class="mt-2 flex justify-end gap-2">

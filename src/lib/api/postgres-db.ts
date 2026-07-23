@@ -85,6 +85,10 @@ import {
   testDatabasePlugin,
   testStripePlugin,
 } from "../plugins/runtime.server";
+import {
+  validateProductPublicationInvariants,
+  resolveDefaultsForNewProduct,
+} from "../inventory/publication-rules";
 
 // Prefer Vite/SvelteKit private env; fall back to process.env and local Docker defaults.
 function resolveDatabaseUrl(): string {
@@ -464,7 +468,15 @@ export async function initDb() {
   await sql`ALTER TABLE order_lines ADD COLUMN IF NOT EXISTS vat_rate INTEGER NOT NULL DEFAULT 21`;
   await sql`ALTER TABLE sales ADD COLUMN IF NOT EXISTS order_id UUID UNIQUE REFERENCES orders(id) ON DELETE SET NULL`;
   await sql`ALTER TABLE products DROP CONSTRAINT IF EXISTS products_publication_status_check`;
-  await sql`ALTER TABLE products ADD CONSTRAINT products_publication_status_check CHECK (publication_status IN ('draft', 'published', 'archived'))`;
+  await sql`ALTER TABLE products ADD CONSTRAINT products_publication_status_check CHECK (publication_status IN ('draft', 'ready_for_review', 'published', 'paused', 'archived'))`;
+  await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS sales_policy TEXT NOT NULL DEFAULT 'own_stock'`;
+  await sql`ALTER TABLE products DROP CONSTRAINT IF EXISTS products_sales_policy_check`;
+  await sql`ALTER TABLE products ADD CONSTRAINT products_sales_policy_check CHECK (sales_policy IN ('not_sellable', 'own_stock', 'dropship', 'preorder', 'make_to_order'))`;
+  await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS supplier_source_status TEXT NOT NULL DEFAULT 'not_applicable'`;
+  await sql`ALTER TABLE products DROP CONSTRAINT IF EXISTS products_supplier_source_status_check`;
+  await sql`ALTER TABLE products ADD CONSTRAINT products_supplier_source_status_check CHECK (supplier_source_status IN ('not_applicable', 'negotiating', 'approved', 'suspended'))`;
+  await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS supplier_last_verified_at TIMESTAMP WITH TIME ZONE`;
+  await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS availability_eta TIMESTAMP WITH TIME ZONE`;
   await sql`
     CREATE TABLE IF NOT EXISTS integration_events (
       id BIGSERIAL PRIMARY KEY,
@@ -672,6 +684,7 @@ export async function initDb() {
   await sql`INSERT INTO schema_migrations (version) VALUES ('0016_inventory_foundation') ON CONFLICT (version) DO NOTHING`;
   await sql`INSERT INTO schema_migrations (version) VALUES ('0017_stripe_secret_vault') ON CONFLICT (version) DO NOTHING`;
   await sql`INSERT INTO schema_migrations (version) VALUES ('0018_integration_events') ON CONFLICT (version) DO NOTHING`;
+  await sql`INSERT INTO schema_migrations (version) VALUES ('0019_publication_and_sales_policy') ON CONFLICT (version) DO NOTHING`;
 }
 
 async function seedInventoryFoundation() {
@@ -1606,7 +1619,7 @@ export const postgresApi = {
     if (!token) throw new Error("Sesión no iniciada");
     const cid = await resolveActiveCompanyId(token, user.id);
     const products = active_only
-      ? await sql`SELECT * FROM products WHERE active = TRUE AND company_id = ${cid} ORDER BY name ASC`
+      ? await sql`SELECT * FROM products WHERE active = TRUE AND company_id = ${cid} AND publication_status = 'published' AND sales_policy != 'not_sellable' ORDER BY name ASC`
       : await sql`SELECT * FROM products WHERE company_id = ${cid} ORDER BY name ASC`;
 
     return products.map((p) => ({
@@ -1628,6 +1641,11 @@ export const postgresApi = {
       fulfillment_mode: p.fulfillment_mode || "own_stock",
       stock_location: p.stock_location || "Almacén principal",
       condition_code: p.condition_code || "used",
+      publication_status: p.publication_status || "published",
+      sales_policy: p.sales_policy || "own_stock",
+      supplier_source_status: p.supplier_source_status || "not_applicable",
+      supplier_last_verified_at: toIso(p.supplier_last_verified_at) || null,
+      availability_eta: toIso(p.availability_eta) || null,
       active: !!p.active,
       created_at: toIso(p.created_at),
       updated_at: toIso(p.updated_at),
@@ -1642,6 +1660,29 @@ export const postgresApi = {
 
     if (input.id) {
       // Update
+      const existingRes = await sql`SELECT * FROM products WHERE id = ${input.id} AND company_id = ${cid}`;
+      if (existingRes.length === 0) throw new Error("Producto no encontrado");
+      const existing = existingRes[0];
+
+      const publication_status = input.publication_status ?? existing.publication_status ?? "published";
+      const sales_policy = input.sales_policy ?? existing.sales_policy ?? "own_stock";
+      const supplier_source_status = input.supplier_source_status ?? existing.supplier_source_status ?? (sales_policy === "dropship" ? "negotiating" : "not_applicable");
+      const supplier_last_verified_at = input.supplier_last_verified_at !== undefined ? input.supplier_last_verified_at : toIso(existing.supplier_last_verified_at);
+      const availability_eta = input.availability_eta !== undefined ? input.availability_eta : toIso(existing.availability_eta);
+      const stock = input.stock ?? existing.stock ?? 0;
+
+      const invariantCheck = validateProductPublicationInvariants(
+        publication_status,
+        sales_policy,
+        supplier_source_status,
+        supplier_last_verified_at,
+        availability_eta,
+        stock,
+      );
+      if (!invariantCheck.valid) {
+        throw new Error(invariantCheck.error);
+      }
+
       const res = await sql`
         UPDATE products
         SET 
@@ -1660,6 +1701,11 @@ export const postgresApi = {
           fulfillment_mode = ${input.fulfillment_mode ?? "own_stock"},
           stock_location = ${input.stock_location ?? "Almacén principal"},
           condition_code = ${input.condition_code ?? "used"},
+          publication_status = ${publication_status},
+          sales_policy = ${sales_policy},
+          supplier_source_status = ${supplier_source_status},
+          supplier_last_verified_at = ${supplier_last_verified_at ? new Date(supplier_last_verified_at) : null},
+          availability_eta = ${availability_eta ? new Date(availability_eta) : null},
           active = ${input.active ?? true},
           updated_at = ${now}
         WHERE id = ${input.id} AND company_id = ${cid}
@@ -1686,21 +1732,46 @@ export const postgresApi = {
         fulfillment_mode: p.fulfillment_mode || "own_stock",
         stock_location: p.stock_location || "Almacén principal",
         condition_code: p.condition_code || "used",
+        publication_status: p.publication_status,
+        sales_policy: p.sales_policy,
+        supplier_source_status: p.supplier_source_status,
+        supplier_last_verified_at: toIso(p.supplier_last_verified_at) || null,
+        availability_eta: toIso(p.availability_eta) || null,
         active: !!p.active,
         created_at: toIso(p.created_at),
         updated_at: toIso(p.updated_at),
       };
     } else {
       // Create
+      const defaults = resolveDefaultsForNewProduct(input);
+      const publication_status = defaults.publication_status;
+      const sales_policy = defaults.sales_policy;
+      const supplier_source_status = defaults.supplier_source_status;
+      const supplier_last_verified_at = defaults.supplier_last_verified_at;
+      const availability_eta = defaults.availability_eta;
+      const stock = input.stock ?? 0;
+
+      const invariantCheck = validateProductPublicationInvariants(
+        publication_status,
+        sales_policy,
+        supplier_source_status,
+        supplier_last_verified_at,
+        availability_eta,
+        stock,
+      );
+      if (!invariantCheck.valid) {
+        throw new Error(invariantCheck.error);
+      }
+
       const res = await sql`
-        INSERT INTO products (company_id, sku, name, description, category, stock, min_stock, cost_cents, price_cents, vat_rate, supplier_name, supplier_contact, supplier_email, supplier_phone, fulfillment_mode, stock_location, condition_code, active)
+        INSERT INTO products (company_id, sku, name, description, category, stock, min_stock, cost_cents, price_cents, vat_rate, supplier_name, supplier_contact, supplier_email, supplier_phone, fulfillment_mode, stock_location, condition_code, active, publication_status, sales_policy, supplier_source_status, supplier_last_verified_at, availability_eta)
         VALUES (
           ${cid},
           ${input.sku},
           ${input.name},
           ${input.description ?? ""},
           ${input.category ?? ""},
-          ${input.stock ?? 0},
+          ${stock},
           ${input.min_stock ?? 0},
           ${input.cost_cents},
           ${input.price_cents},
@@ -1712,7 +1783,12 @@ export const postgresApi = {
           ${input.fulfillment_mode ?? "own_stock"},
           ${input.stock_location ?? "Almacén principal"},
           ${input.condition_code ?? "used"},
-          ${input.active ?? true}
+          ${input.active ?? true},
+          ${publication_status},
+          ${sales_policy},
+          ${supplier_source_status},
+          ${supplier_last_verified_at ? new Date(supplier_last_verified_at) : null},
+          ${availability_eta ? new Date(availability_eta) : null}
         )
         RETURNING *
       `;
@@ -1745,6 +1821,11 @@ export const postgresApi = {
         fulfillment_mode: p.fulfillment_mode || "own_stock",
         stock_location: p.stock_location || "Almacén principal",
         condition_code: p.condition_code || "used",
+        publication_status: p.publication_status,
+        sales_policy: p.sales_policy,
+        supplier_source_status: p.supplier_source_status,
+        supplier_last_verified_at: toIso(p.supplier_last_verified_at) || null,
+        availability_eta: toIso(p.availability_eta) || null,
         active: !!p.active,
         created_at: toIso(p.created_at),
         updated_at: toIso(p.updated_at),
@@ -1888,7 +1969,7 @@ export const postgresApi = {
 
       // Obtener todos los productos implicados para verificar stock e IVA
       const productIds = lines.map((l) => l.product_id);
-      const prods = await tx`SELECT id, name, price_cents, vat_rate, stock, company_id FROM products WHERE id IN ${tx(productIds)} AND company_id = ${cid}`;
+      const prods = await tx`SELECT id, name, price_cents, vat_rate, stock, company_id, publication_status, sales_policy FROM products WHERE id IN ${tx(productIds)} AND company_id = ${cid}`;
       const prodMap = new Map(prods.map((p) => [p.id, p]));
 
       const calculatedLines = [];
@@ -1897,6 +1978,17 @@ export const postgresApi = {
         const prod = prodMap.get(line.product_id);
         if (!prod) throw new Error(`Producto ${line.product_id} no encontrado`);
         if (line.qty <= 0) throw new Error(`Cantidad inválida para ${prod.name}`);
+
+        const pubStatus = prod.publication_status || "published";
+        const salesPolicy = prod.sales_policy || "own_stock";
+
+        if (pubStatus !== "published" || salesPolicy === "not_sellable") {
+          throw new Error(`El producto '${prod.name}' no está publicado o no es vendible`);
+        }
+        if (salesPolicy === "dropship" || salesPolicy === "preorder" || salesPolicy === "make_to_order") {
+          throw new Error(`La modalidad '${salesPolicy}' para '${prod.name}' no admite cobro directo en TPV local en esta versión`);
+        }
+
         if (prod.stock < line.qty) {
           throw new Error(`Stock insuficiente para ${prod.name}. Disponible: ${prod.stock}, Solicitado: ${line.qty}`);
         }
@@ -3294,7 +3386,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   async create_inventory_movement(input: CreateInventoryMovementInput | any, token?: string | null): Promise<InventoryMovement> {
     const user = await requireSession(token ?? null);
     if (!token) throw new Error("Sesión no iniciada");
-    const cid = input.company_id ? Number(input.company_id) : await resolveActiveCompanyId(token, user.id);
+    const cid = await resolveActiveCompanyId(token, user.id);
 
     const productId = Number(input.product_id);
     if (!productId) throw new Error("product_id es requerido");

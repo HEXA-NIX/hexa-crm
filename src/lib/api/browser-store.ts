@@ -100,6 +100,11 @@ const LEGACY_STORE_KEYS = [
 ] as const;
 
 /** In-memory fallback when localStorage is unavailable (tests / SSR). */
+import {
+  validateProductPublicationInvariants,
+  resolveDefaultsForNewProduct,
+} from "../inventory/publication-rules";
+
 let memoryStore: Store | null = null;
 
 type StoredUser = AuthUser & { pin_hash: string };
@@ -1073,7 +1078,12 @@ export const browserApi = {
     ensureCompanies(s);
     const cid = sessionCompanyId(s, token);
     return filterByCompanyId(s.products, cid)
-      .filter((p) => (activeOnly ? p.active : true))
+      .filter((p) => {
+        if (!activeOnly) return true;
+        const pub = p.publication_status ?? "published";
+        const pol = p.sales_policy ?? "own_stock";
+        return p.active && pub === "published" && pol !== "not_sellable";
+      })
       .sort((a, b) => a.name.localeCompare(b.name, "es"));
   },
 
@@ -1089,6 +1099,19 @@ export const browserApi = {
       const i = s.products.findIndex((p) => p.id === input.id && (p.company_id ?? 1) === cid);
       if (i < 0) throw new Error("Producto no encontrado");
       const prev = s.products[i];
+
+      const pubStatus = input.publication_status ?? prev.publication_status ?? "published";
+      const salesPolicy = input.sales_policy ?? prev.sales_policy ?? "own_stock";
+      const sourceStatus = input.supplier_source_status ?? prev.supplier_source_status ?? (salesPolicy === "dropship" ? "negotiating" : "not_applicable");
+      const lastVerified = input.supplier_last_verified_at !== undefined ? input.supplier_last_verified_at : (prev.supplier_last_verified_at ?? null);
+      const eta = input.availability_eta !== undefined ? input.availability_eta : (prev.availability_eta ?? null);
+      const stock = input.stock ?? prev.stock ?? 0;
+
+      const invariantCheck = validateProductPublicationInvariants(pubStatus, salesPolicy, sourceStatus, lastVerified, eta, stock);
+      if (!invariantCheck.valid) {
+        throw new Error(invariantCheck.error);
+      }
+
       s.products[i] = {
         ...prev,
         company_id: prev.company_id ?? cid,
@@ -1108,11 +1131,29 @@ export const browserApi = {
         fulfillment_mode: input.fulfillment_mode ?? prev.fulfillment_mode ?? "own_stock",
         stock_location: input.stock_location ?? prev.stock_location ?? "Almacén principal",
         condition_code: input.condition_code ?? prev.condition_code ?? "used",
+        publication_status: pubStatus,
+        sales_policy: salesPolicy,
+        supplier_source_status: sourceStatus,
+        supplier_last_verified_at: lastVerified,
+        availability_eta: eta,
         active: input.active ?? prev.active,
         updated_at: t,
       };
       save(s);
       return s.products[i];
+    }
+
+    const defaults = resolveDefaultsForNewProduct(input);
+    const pubStatus = defaults.publication_status;
+    const salesPolicy = defaults.sales_policy;
+    const sourceStatus = defaults.supplier_source_status;
+    const lastVerified = defaults.supplier_last_verified_at;
+    const eta = defaults.availability_eta;
+    const stock = input.stock ?? 0;
+
+    const invariantCheck = validateProductPublicationInvariants(pubStatus, salesPolicy, sourceStatus, lastVerified, eta, stock);
+    if (!invariantCheck.valid) {
+      throw new Error(invariantCheck.error);
     }
 
     s.seq.product += 1;
@@ -1123,7 +1164,7 @@ export const browserApi = {
       name: input.name,
       description: input.description ?? "",
       category: input.category ?? "",
-      stock: input.stock ?? 0,
+      stock,
       min_stock: input.min_stock ?? 0,
       cost_cents: input.cost_cents,
       price_cents: input.price_cents,
@@ -1135,6 +1176,11 @@ export const browserApi = {
       fulfillment_mode: input.fulfillment_mode ?? "own_stock",
       stock_location: input.stock_location ?? "Almacén principal",
       condition_code: input.condition_code ?? "used",
+      publication_status: pubStatus,
+      sales_policy: salesPolicy,
+      supplier_source_status: sourceStatus,
+      supplier_last_verified_at: lastVerified,
+      availability_eta: eta,
       active: input.active ?? true,
       created_at: t,
       updated_at: t,
@@ -1557,6 +1603,17 @@ export const browserApi = {
         (p) => p.id === line.product_id && (p.company_id ?? 1) === cid,
       );
       if (!product || !product.active) throw new Error("Producto no válido");
+
+      const pubStatus = product.publication_status ?? "published";
+      const salesPolicy = product.sales_policy ?? "own_stock";
+
+      if (pubStatus !== "published" || salesPolicy === "not_sellable") {
+        throw new Error(`El producto '${product.name}' no está publicado o no es vendible`);
+      }
+      if (salesPolicy === "dropship" || salesPolicy === "preorder" || salesPolicy === "make_to_order") {
+        throw new Error(`La modalidad '${salesPolicy}' para '${product.name}' no admite cobro directo en TPV local en esta versión`);
+      }
+
       if (product.stock < line.qty) {
         throw new Error(`Stock insuficiente de ${product.name}`);
       }

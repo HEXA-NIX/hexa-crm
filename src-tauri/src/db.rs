@@ -210,6 +210,11 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     let _ = conn.execute("ALTER TABLE products ADD COLUMN fulfillment_mode TEXT NOT NULL DEFAULT 'own_stock'", []);
     let _ = conn.execute("ALTER TABLE products ADD COLUMN stock_location TEXT NOT NULL DEFAULT 'Almacén principal'", []);
     let _ = conn.execute("ALTER TABLE products ADD COLUMN condition_code TEXT NOT NULL DEFAULT 'used'", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN publication_status TEXT NOT NULL DEFAULT 'published'", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN sales_policy TEXT NOT NULL DEFAULT 'own_stock'", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN supplier_source_status TEXT NOT NULL DEFAULT 'not_applicable'", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN supplier_last_verified_at TEXT", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN availability_eta TEXT", []);
 
     seed_users_if_empty(conn)?;
     Ok(())
