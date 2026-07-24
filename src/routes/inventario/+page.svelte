@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { page } from "$app/stores";
+  import { goto } from "$app/navigation";
   import { api } from "$lib/api/client";
   import type {
     FulfillmentMode,
@@ -606,108 +607,13 @@
     }
   }
 
-  // Product functions
+  // Product navigation
   function openCreate() {
-    editing = null;
-    form = {
-      sku: "",
-      name: "",
-      description: "",
-      category: "",
-      stock: "0",
-      min_stock: "5",
-      cost: "",
-      price: "",
-      vat_rate: "21",
-      supplier_name: "",
-      supplier_contact: "",
-      supplier_email: "",
-      supplier_phone: "",
-      fulfillment_mode: "own_stock",
-      stock_location: "Almacén principal",
-      condition_code: "new",
-      publication_status: "draft",
-      sales_policy: "not_sellable",
-      supplier_source_status: "not_applicable",
-      supply_status: "not_applicable",
-      supplier_last_verified_at: "",
-      availability_eta: "",
-    };
-    selectedSupplier = NO_SUPPLIER;
-    modalOpen = true;
+    goto("/inventario/nuevo");
   }
 
   function openEdit(p: Product) {
-    editing = p;
-    form = {
-      sku: p.sku,
-      name: p.name,
-      description: p.description,
-      category: p.category || "",
-      stock: String(p.stock),
-      min_stock: String(p.min_stock),
-      cost: (p.cost_cents / 100).toFixed(2),
-      price: (p.price_cents / 100).toFixed(2),
-      vat_rate: String(p.vat_rate),
-      supplier_name: p.supplier_name ?? "",
-      supplier_contact: p.supplier_contact ?? "",
-      supplier_email: p.supplier_email ?? "",
-      supplier_phone: p.supplier_phone ?? "",
-      fulfillment_mode: p.fulfillment_mode ?? "own_stock",
-      stock_location: p.stock_location ?? "Almacén principal",
-      condition_code: p.condition_code === "preowned" ? "used" : (p.condition_code ?? "used"),
-      publication_status: (p.publication_status ?? "published") as PublicationStatus,
-      sales_policy: (p.sales_policy ?? "own_stock") as SalesPolicy,
-      supplier_source_status: (p.supplier_source_status ?? "not_applicable") as SupplierSourceStatus,
-      supply_status: (p.supply_status ?? "not_applicable") as SupplyStatus,
-      supplier_last_verified_at: p.supplier_last_verified_at ? p.supplier_last_verified_at.slice(0, 10) : "",
-      availability_eta: p.availability_eta ? p.availability_eta.slice(0, 10) : "",
-    };
-    selectedSupplier = productSupplierSelection(p, suppliers);
-    modalOpen = true;
-  }
-
-  async function saveProduct() {
-    const cost = parseEurosInput(form.cost);
-    const price = parseEurosInput(form.price);
-    if (cost === null || price === null) {
-      showToast("Precio o coste no válidos", "err");
-      return;
-    }
-    const input: ProductInput = {
-      id: editing?.id,
-      sku: form.sku.trim(),
-      name: form.name.trim(),
-      description: form.description,
-      category: form.category.trim(),
-      stock: Number(form.stock) || 0,
-      min_stock: Number(form.min_stock) || 0,
-      cost_cents: cost,
-      price_cents: price,
-      vat_rate: Number(form.vat_rate) as VatRate,
-      supplier_name: form.supplier_name.trim(),
-      supplier_contact: form.supplier_contact.trim(),
-      supplier_email: form.supplier_email.trim(),
-      supplier_phone: form.supplier_phone.trim(),
-      fulfillment_mode: form.fulfillment_mode,
-      stock_location: form.stock_location.trim(),
-      condition_code: form.condition_code,
-      publication_status: form.publication_status,
-      sales_policy: form.sales_policy,
-      supplier_source_status: form.supplier_source_status,
-      supply_status: form.supply_status,
-      supplier_last_verified_at: form.supplier_last_verified_at || null,
-      availability_eta: form.availability_eta || null,
-      active: true,
-    };
-    try {
-      await api.upsertProduct(input);
-      modalOpen = false;
-      showToast(editing ? "Producto actualizado" : "Producto creado correctamente");
-      await load();
-    } catch (e: any) {
-      showToast(e?.message || "Error al guardar el producto", "err");
-    }
+    goto(`/inventario/${p.id}`);
   }
 
   // Reorder export
@@ -1675,117 +1581,7 @@
   {/if}
 </section>
 
-<!-- MODAL: Crear/Editar Producto -->
-<Modal open={modalOpen} title={editing ? "Editar producto" : "Nuevo producto"} size="fluid" onclose={() => (modalOpen = false)}>
-  <form
-    class="flex flex-col gap-4"
-    onsubmit={(e) => {
-      e.preventDefault();
-      saveProduct();
-    }}
-  >
-    <!-- Sección: Datos principales -->
-    <div class="grid gap-3.5 sm:grid-cols-2 lg:grid-cols-4">
-      <Input label="SKU" bind:value={form.sku} required />
-      <Input label="Nombre" bind:value={form.name} required class="sm:col-span-2 lg:col-span-2" />
-      <Select
-        label="IVA"
-        bind:value={form.vat_rate}
-        options={VAT_RATES.map((r) => ({ value: String(r), label: vatLabel(r) }))}
-      />
-      <Input label="Categoría" bind:value={form.category} placeholder="Alimentación, Tecnología…" />
-      <Input label="Descripción" bind:value={form.description} class="sm:col-span-2 lg:col-span-3" />
-    </div>
 
-    <!-- Sección: Precios e Inventario -->
-    <div class="border-t border-[var(--color-border-soft)] pt-3.5">
-      <p class="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Precios e Inventario</p>
-      <div class="grid gap-3.5 sm:grid-cols-2 lg:grid-cols-4">
-        <Input label="PVP (€, IVA incl.)" bind:value={form.price} required />
-        <Input label="Coste (€)" bind:value={form.cost} required />
-        <Input label="Stock disponible" type="number" bind:value={form.stock} />
-        <Input label="Stock mínimo" type="number" bind:value={form.min_stock} />
-      </div>
-    </div>
-
-    <!-- Sección: Abastecimiento y Proveedor -->
-    <div class="border-t border-[var(--color-border-soft)] pt-3.5">
-      <p class="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Abastecimiento y Proveedor</p>
-      <div class="grid gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
-        <Select label="Cómo se sirve" bind:value={form.fulfillment_mode} options={fulfillmentOptions} />
-        <Select label="Condición" bind:value={form.condition_code} options={conditionOptions.filter((item) => item.value !== "preowned")} />
-        <Input label="Ubicación / origen" bind:value={form.stock_location} placeholder="Almacén principal, proveedor…" />
-        <div class="grid gap-2 sm:col-span-2 lg:col-span-3">
-          <div class="flex flex-col items-stretch gap-2 sm:flex-row sm:items-end">
-            <Select
-              class="min-w-0 flex-1"
-              label="Proveedor guardado"
-              value={selectedSupplier}
-              options={supplierOptions}
-              onvaluechange={chooseSupplier}
-            />
-            <Button type="button" variant="secondary" class="w-full shrink-0 sm:w-auto" onclick={openSupplierFromProduct}>
-              + Nuevo proveedor
-            </Button>
-          </div>
-          {#if selectedSupplierRecord}
-            <div class="rounded-xl border border-[var(--color-border-soft)] bg-white/[0.025] px-3 py-2 text-xs text-[var(--color-muted)]">
-              <p class="font-medium text-[var(--color-text)]">{selectedSupplierRecord.name}</p>
-              <p class="mt-0.5">
-                {[selectedSupplierRecord.contact, selectedSupplierRecord.email, selectedSupplierRecord.phone].filter(Boolean).join(" · ") || "Sin datos de contacto"}
-              </p>
-            </div>
-          {:else if selectedSupplier === LEGACY_SUPPLIER}
-            <p class="rounded-xl border border-amber-400/20 bg-amber-400/[0.06] px-3 py-2 text-xs text-amber-100">
-              Este artículo conserva un proveedor histórico que no está en el directorio. Puedes mantenerlo o elegir uno de la lista.
-            </p>
-          {:else if activeSuppliers.length === 0}
-            <p class="text-xs text-[var(--color-muted-dim)]">Aún no hay proveedores guardados. Créalo aquí y volverás al artículo sin perder los datos.</p>
-          {/if}
-        </div>
-      </div>
-      {#if form.fulfillment_mode === "supplier_dropship"}
-        <p class="mt-2 text-xs text-amber-200">Dropshipping: el proveedor envía al cliente; no uses este dato como stock propio disponible.</p>
-      {/if}
-    </div>
-
-    <!-- Sección: Estado comercial y publicación -->
-    <div class="border-t border-[var(--color-border-soft)] pt-3.5">
-      <p class="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Estado comercial y publicación</p>
-      <div class="grid gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
-        <Select label="Estado de publicación" bind:value={form.publication_status} options={publicationStatusOptions} />
-        <Select label="Política comercial" bind:value={form.sales_policy} options={salesPolicyOptions} />
-        <Select label="Estado de abastecimiento" bind:value={form.supply_status} options={supplyStatusOptions} />
-        {#if form.sales_policy === "dropship"}
-          <Select label="Estado fuente proveedor" bind:value={form.supplier_source_status} options={supplierSourceStatusOptions} />
-          <Input label="Última verificación proveedor" type="date" bind:value={form.supplier_last_verified_at} />
-        {/if}
-        {#if form.sales_policy === "preorder" || form.sales_policy === "make_to_order"}
-          <Input label="ETA disponibilidad" type="date" bind:value={form.availability_eta} />
-        {/if}
-      </div>
-      {#if form.publication_status === "published"}
-        {#if form.sales_policy === "not_sellable"}
-          <p class="mt-2 text-xs text-rose-300">⚠️ No se puede publicar un producto con política 'No vendible'.</p>
-        {:else if ["ordered", "in_transit", "negotiating", "quality_hold"].includes(form.supply_status)}
-          <p class="mt-2 text-xs text-rose-300">⚠️ No se puede publicar un producto en estado '{form.supply_status === "ordered" ? "Pedido confirmado" : form.supply_status === "in_transit" ? "En tránsito" : form.supply_status === "negotiating" ? "En negociación" : "Cuarentena"}'.</p>
-        {:else if form.sales_policy === "own_stock" && (Number(form.stock) || 0) <= 0}
-          <p class="mt-2 text-xs text-rose-300">⚠️ Publicar con stock propio requiere existencias > 0.</p>
-        {:else if form.sales_policy === "dropship" && (form.supplier_source_status !== "approved" || !form.supplier_last_verified_at)}
-          <p class="mt-2 text-xs text-rose-300">⚠️ Dropshipping publicado requiere proveedor aprobado y verificado.</p>
-        {:else if (form.sales_policy === "preorder" || form.sales_policy === "make_to_order") && !form.availability_eta}
-          <p class="mt-2 text-xs text-rose-300">⚠️ Preventa/bajo pedido publicado requiere fecha ETA.</p>
-        {/if}
-      {/if}
-    </div>
-
-    <!-- Pie de acciones sticky -->
-    <div class="sticky bottom-0 z-20 -mx-5 -mb-5 sm:-mx-6 sm:-mb-6 border-t border-[var(--color-border-soft)] bg-[var(--color-surface-glass,#120e1b)]/95 px-6 py-3.5 backdrop-blur-md flex items-center justify-end gap-3">
-      <Button variant="ghost" type="button" onclick={() => (modalOpen = false)}>Cancelar</Button>
-      <Button type="submit">Guardar producto</Button>
-    </div>
-  </form>
-</Modal>
 
 <!-- MODAL: Crear/Editar Proveedor -->
 <Modal open={supplierModal} title={editingSupplier ? "Editar proveedor" : "Nuevo proveedor"} onclose={closeSupplierModal}>
