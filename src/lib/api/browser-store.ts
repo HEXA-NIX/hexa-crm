@@ -1082,7 +1082,8 @@ export const browserApi = {
         if (!activeOnly) return true;
         const pub = p.publication_status ?? "published";
         const pol = p.sales_policy ?? "own_stock";
-        return p.active && pub === "published" && pol !== "not_sellable";
+        const sup = p.supply_status ?? "not_applicable";
+        return p.active && pub === "published" && pol !== "not_sellable" && !["ordered", "in_transit", "negotiating", "quality_hold"].includes(sup);
       })
       .sort((a, b) => a.name.localeCompare(b.name, "es"));
   },
@@ -1103,11 +1104,12 @@ export const browserApi = {
       const pubStatus = input.publication_status ?? prev.publication_status ?? "published";
       const salesPolicy = input.sales_policy ?? prev.sales_policy ?? "own_stock";
       const sourceStatus = input.supplier_source_status ?? prev.supplier_source_status ?? (salesPolicy === "dropship" ? "negotiating" : "not_applicable");
+      const supplyStatus = input.supply_status ?? prev.supply_status ?? "not_applicable";
       const lastVerified = input.supplier_last_verified_at !== undefined ? input.supplier_last_verified_at : (prev.supplier_last_verified_at ?? null);
       const eta = input.availability_eta !== undefined ? input.availability_eta : (prev.availability_eta ?? null);
       const stock = input.stock ?? prev.stock ?? 0;
 
-      const invariantCheck = validateProductPublicationInvariants(pubStatus, salesPolicy, sourceStatus, lastVerified, eta, stock);
+      const invariantCheck = validateProductPublicationInvariants(pubStatus, salesPolicy, sourceStatus, lastVerified, eta, stock, supplyStatus);
       if (!invariantCheck.valid) {
         throw new Error(invariantCheck.error);
       }
@@ -1134,6 +1136,7 @@ export const browserApi = {
         publication_status: pubStatus,
         sales_policy: salesPolicy,
         supplier_source_status: sourceStatus,
+        supply_status: supplyStatus,
         supplier_last_verified_at: lastVerified,
         availability_eta: eta,
         active: input.active ?? prev.active,
@@ -1147,11 +1150,12 @@ export const browserApi = {
     const pubStatus = defaults.publication_status;
     const salesPolicy = defaults.sales_policy;
     const sourceStatus = defaults.supplier_source_status;
+    const supplyStatus = defaults.supply_status;
     const lastVerified = defaults.supplier_last_verified_at;
     const eta = defaults.availability_eta;
     const stock = input.stock ?? 0;
 
-    const invariantCheck = validateProductPublicationInvariants(pubStatus, salesPolicy, sourceStatus, lastVerified, eta, stock);
+    const invariantCheck = validateProductPublicationInvariants(pubStatus, salesPolicy, sourceStatus, lastVerified, eta, stock, supplyStatus);
     if (!invariantCheck.valid) {
       throw new Error(invariantCheck.error);
     }
@@ -1179,6 +1183,7 @@ export const browserApi = {
       publication_status: pubStatus,
       sales_policy: salesPolicy,
       supplier_source_status: sourceStatus,
+      supply_status: supplyStatus,
       supplier_last_verified_at: lastVerified,
       availability_eta: eta,
       active: input.active ?? true,
@@ -1606,6 +1611,11 @@ export const browserApi = {
 
       const pubStatus = product.publication_status ?? "published";
       const salesPolicy = product.sales_policy ?? "own_stock";
+      const supplyStatus = product.supply_status ?? "not_applicable";
+
+      if (["ordered", "in_transit", "negotiating", "quality_hold"].includes(supplyStatus)) {
+        throw new Error(`El producto '${product.name}' está en estado de abastecimiento '${supplyStatus}' y no admite venta`);
+      }
 
       if (pubStatus !== "published" || salesPolicy === "not_sellable") {
         throw new Error(`El producto '${product.name}' no está publicado o no es vendible`);

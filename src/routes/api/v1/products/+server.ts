@@ -29,16 +29,16 @@ export const GET: RequestHandler = async ({ request, url }) => {
     if (sku) {
       return tx`
         SELECT id, sku, name, description, category, stock, min_stock, price_cents, vat_rate, currency,
-               condition_code, image_url, evidence, publication_status, sales_policy, supplier_source_status, availability_eta, updated_at
+               condition_code, image_url, evidence, publication_status, sales_policy, supplier_source_status, supply_status, availability_eta, updated_at
         FROM products
-        WHERE company_id = ${tenant[0].id} AND active = TRUE AND publication_status = 'published' AND sales_policy != 'not_sellable' AND sku = ${sku}
+        WHERE company_id = ${tenant[0].id} AND active = TRUE AND publication_status = 'published' AND sales_policy != 'not_sellable' AND supply_status NOT IN ('ordered', 'in_transit', 'negotiating', 'quality_hold') AND sku = ${sku}
         ORDER BY id ASC LIMIT 2
       `;
     }
     return tx`
       SELECT id, sku, name, description, category, stock, min_stock, price_cents, vat_rate, currency,
-             condition_code, image_url, evidence, publication_status, sales_policy, supplier_source_status, availability_eta, updated_at
-      FROM products WHERE company_id = ${tenant[0].id} AND active = TRUE AND publication_status = 'published' AND sales_policy != 'not_sellable' AND id > ${cursor}
+             condition_code, image_url, evidence, publication_status, sales_policy, supplier_source_status, supply_status, availability_eta, updated_at
+      FROM products WHERE company_id = ${tenant[0].id} AND active = TRUE AND publication_status = 'published' AND sales_policy != 'not_sellable' AND supply_status NOT IN ('ordered', 'in_transit', 'negotiating', 'quality_hold') AND id > ${cursor}
       ORDER BY id ASC LIMIT ${limit + 1}
     `;
   });

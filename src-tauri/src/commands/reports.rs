@@ -94,7 +94,7 @@ pub fn dashboard_stats(db: State<'_, Db>, token: Option<String>) -> Result<Dashb
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, sku, name, description, COALESCE(category,''), stock, min_stock, cost_cents, price_cents, vat_rate, COALESCE(supplier_name,''), COALESCE(supplier_contact,''), COALESCE(supplier_email,''), COALESCE(supplier_phone,''), COALESCE(fulfillment_mode,'own_stock'), COALESCE(stock_location,'Almacén principal'), COALESCE(condition_code,'used'), COALESCE(publication_status,'published'), COALESCE(sales_policy,'own_stock'), COALESCE(supplier_source_status,'not_applicable'), supplier_last_verified_at, availability_eta, active, created_at, updated_at
+            "SELECT id, sku, name, description, COALESCE(category,''), stock, min_stock, cost_cents, price_cents, vat_rate, COALESCE(supplier_name,''), COALESCE(supplier_contact,''), COALESCE(supplier_email,''), COALESCE(supplier_phone,''), COALESCE(fulfillment_mode,'own_stock'), COALESCE(stock_location,'Almacén principal'), COALESCE(condition_code,'used'), COALESCE(publication_status,'published'), COALESCE(sales_policy,'own_stock'), COALESCE(supplier_source_status,'not_applicable'), COALESCE(supply_status,'not_applicable'), supplier_last_verified_at, availability_eta, active, created_at, updated_at
              FROM products WHERE active=1 AND stock <= min_stock ORDER BY stock ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -121,11 +121,12 @@ pub fn dashboard_stats(db: State<'_, Db>, token: Option<String>) -> Result<Dashb
                 publication_status: row.get(17)?,
                 sales_policy: row.get(18)?,
                 supplier_source_status: row.get(19)?,
-                supplier_last_verified_at: row.get(20)?,
-                availability_eta: row.get(21)?,
-                active: row.get::<_, i64>(22)? == 1,
-                created_at: row.get(23)?,
-                updated_at: row.get(24)?,
+                supply_status: row.get(20)?,
+                supplier_last_verified_at: row.get(21)?,
+                availability_eta: row.get(22)?,
+                active: row.get::<_, i64>(23)? == 1,
+                created_at: row.get(24)?,
+                updated_at: row.get(25)?,
             })
         })
         .map_err(|e| e.to_string())?

@@ -1,9 +1,10 @@
-import type { ProductInput, PublicationStatus, SalesPolicy, SupplierSourceStatus } from "../types";
+import type { ProductInput, PublicationStatus, SalesPolicy, SupplierSourceStatus, SupplyStatus } from "../types";
 
 export interface ResolvedProductPublication {
   publication_status: PublicationStatus;
   sales_policy: SalesPolicy;
   supplier_source_status: SupplierSourceStatus;
+  supply_status: SupplyStatus;
   supplier_last_verified_at: string | null;
   availability_eta: string | null;
 }
@@ -15,10 +16,15 @@ export function validateProductPublicationInvariants(
   supplierLastVerifiedAt: string | null | undefined,
   availabilityEta: string | null | undefined,
   stock: number,
+  supplyStatus?: SupplyStatus,
 ): { valid: boolean; error?: string } {
   if (publicationStatus === "published") {
     if (salesPolicy === "not_sellable") {
       return { valid: false, error: "No se puede publicar un producto con política comercial 'No vendible'" };
+    }
+    const currentSupplyStatus = supplyStatus ?? "not_applicable";
+    if (["ordered", "in_transit", "negotiating", "quality_hold"].includes(currentSupplyStatus)) {
+      return { valid: false, error: `No se puede publicar un producto en estado de abastecimiento '${currentSupplyStatus}'` };
     }
     if (salesPolicy === "own_stock") {
       if (stock <= 0) {
@@ -51,6 +57,11 @@ export function resolveDefaultsForNewProduct(input: ProductInput): ResolvedProdu
     supplier_source_status = "negotiating";
   }
 
+  let supply_status: SupplyStatus = input.supply_status ?? "not_applicable";
+  if (sales_policy === "dropship" && !input.supply_status) {
+    supply_status = "negotiating";
+  }
+
   const supplier_last_verified_at = input.supplier_last_verified_at ? String(input.supplier_last_verified_at) : null;
   const availability_eta = input.availability_eta ? String(input.availability_eta) : null;
 
@@ -58,6 +69,7 @@ export function resolveDefaultsForNewProduct(input: ProductInput): ResolvedProdu
     publication_status,
     sales_policy,
     supplier_source_status,
+    supply_status,
     supplier_last_verified_at,
     availability_eta,
   };

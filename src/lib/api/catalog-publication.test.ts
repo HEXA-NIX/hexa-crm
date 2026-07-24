@@ -106,6 +106,32 @@ describe("Catalog & Supply Chain P0 - Unit & Integration Tests", () => {
       expect(res.error).toContain("sin ETA de disponibilidad");
     });
 
+    it("rejects publishing products in ordered or in_transit supply status", () => {
+      const res1 = validateProductPublicationInvariants(
+        "published",
+        "own_stock",
+        "not_applicable",
+        null,
+        null,
+        10,
+        "ordered",
+      );
+      expect(res1.valid).toBe(false);
+      expect(res1.error).toContain("No se puede publicar un producto en estado de abastecimiento 'ordered'");
+
+      const res2 = validateProductPublicationInvariants(
+        "published",
+        "own_stock",
+        "not_applicable",
+        null,
+        null,
+        10,
+        "in_transit",
+      );
+      expect(res2.valid).toBe(false);
+      expect(res2.error).toContain("No se puede publicar un producto en estado de abastecimiento 'in_transit'");
+    });
+
     it("accepts publishing when all invariants are satisfied", () => {
       const res = validateProductPublicationInvariants(
         "published",
@@ -138,6 +164,7 @@ describe("Catalog & Supply Chain P0 - Unit & Integration Tests", () => {
 
       expect(created.publication_status).toBe("draft");
       expect(created.sales_policy).toBe("not_sellable");
+      expect(created.supply_status).toBe("not_applicable");
 
       // Should not show up in active/published list
       const activeProds = browserApi.list_products(true, token);
@@ -163,6 +190,74 @@ describe("Catalog & Supply Chain P0 - Unit & Integration Tests", () => {
       }).toThrow(/no está publicado o no es vendible/);
     });
 
+    it("blocks sales and publication for ordered/in_transit products", () => {
+      const prod = browserApi.upsert_product({
+        sku: "ORDERED-1",
+        name: "Producto en tránsito",
+        cost_cents: 1000,
+        price_cents: 2000,
+        vat_rate: 21,
+        stock: 10,
+        sales_policy: "own_stock",
+        supply_status: "in_transit",
+      }, token);
+
+      expect(prod.publication_status).toBe("draft");
+
+      // Attempting to force publication should fail
+      expect(() => {
+        browserApi.upsert_product({
+          id: prod.id,
+          sku: "ORDERED-1",
+          name: "Producto en tránsito",
+          cost_cents: 1000,
+          price_cents: 2000,
+          vat_rate: 21,
+          stock: 10,
+          publication_status: "published",
+          sales_policy: "own_stock",
+          supply_status: "in_transit",
+        }, token);
+      }).toThrow(/No se puede publicar un producto en estado de abastecimiento 'in_transit'/);
+
+      // Attempting sale should be blocked
+      expect(() => {
+        browserApi.create_sale([{ product_id: prod.id, qty: 1 }], null, undefined, token);
+      }).toThrow(/estado de abastecimiento 'in_transit'/);
+    });
+
+    it("transitioning to received does NOT automatically publish product", () => {
+      const prod = browserApi.upsert_product({
+        sku: "RECV-1",
+        name: "Producto recibido de proveedor",
+        cost_cents: 1500,
+        price_cents: 3000,
+        vat_rate: 21,
+        stock: 50,
+        sales_policy: "own_stock",
+        supply_status: "ordered",
+      }, token);
+
+      expect(prod.publication_status).toBe("draft");
+
+      // Transition supply_status to received
+      const updated = browserApi.upsert_product({
+        id: prod.id,
+        sku: "RECV-1",
+        name: "Producto recibido de proveedor",
+        cost_cents: 1500,
+        price_cents: 3000,
+        vat_rate: 21,
+        stock: 50,
+        sales_policy: "own_stock",
+        supply_status: "received",
+      }, token);
+
+      // Must remain draft until explicit publication
+      expect(updated.publication_status).toBe("draft");
+      expect(updated.supply_status).toBe("received");
+    });
+
     it("blocks direct TPV sales for dropship/preorder/make_to_order with explicit error", () => {
       // Create and publish a dropship product
       const prod = browserApi.upsert_product({
@@ -175,6 +270,7 @@ describe("Catalog & Supply Chain P0 - Unit & Integration Tests", () => {
         publication_status: "published",
         sales_policy: "dropship",
         supplier_source_status: "approved",
+        supply_status: "not_applicable",
         supplier_last_verified_at: "2026-07-24",
       }, token);
 

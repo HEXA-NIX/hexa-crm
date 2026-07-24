@@ -3,14 +3,14 @@ import { operatorFromAuthorization } from "$lib/api/operator-auth";
 import { sql } from "$lib/api/postgres-db";
 import { setTenantRls } from "$lib/api/tenant-rls";
 import { validateProductPublicationInvariants, resolveDefaultsForNewProduct } from "$lib/inventory/publication-rules";
-import type { PublicationStatus, SalesPolicy, SupplierSourceStatus } from "$lib/types";
+import type { PublicationStatus, SalesPolicy, SupplierSourceStatus, SupplyStatus } from "$lib/types";
 
 export const GET: RequestHandler = async ({ request }) => {
   const operator = await operatorFromAuthorization(request.headers.get("authorization"));
   if (!operator) return json({ error: "Sesión de operador no válida", code: "operator_unauthorized" }, { status: 401 });
   const products = await sql.begin(async (tx) => {
     await setTenantRls(tx, operator.companyId);
-    return tx`SELECT id, sku, name, description, category, stock, min_stock, cost_cents, price_cents, vat_rate, active, publication_status, sales_policy, supplier_source_status, supplier_last_verified_at, availability_eta, currency, condition_code, image_url, evidence, updated_at FROM products WHERE company_id = ${operator.companyId} ORDER BY updated_at DESC`;
+    return tx`SELECT id, sku, name, description, category, stock, min_stock, cost_cents, price_cents, vat_rate, active, publication_status, sales_policy, supplier_source_status, supply_status, supplier_last_verified_at, availability_eta, currency, condition_code, image_url, evidence, updated_at FROM products WHERE company_id = ${operator.companyId} ORDER BY updated_at DESC`;
   });
   return json({ data: products });
 };
@@ -35,6 +35,7 @@ export const POST: RequestHandler = async ({ request }) => {
     publication_status?: PublicationStatus;
     sales_policy?: SalesPolicy;
     supplier_source_status?: SupplierSourceStatus;
+    supply_status?: SupplyStatus;
     supplier_last_verified_at?: string | null;
     availability_eta?: string | null;
   };
@@ -61,13 +62,14 @@ export const POST: RequestHandler = async ({ request }) => {
         const pubStatus = input.publication_status ?? prev.publication_status ?? "published";
         const salesPolicy = input.sales_policy ?? prev.sales_policy ?? "own_stock";
         const sourceStatus = input.supplier_source_status ?? prev.supplier_source_status ?? (salesPolicy === "dropship" ? "negotiating" : "not_applicable");
+        const supplyStatus = input.supply_status ?? prev.supply_status ?? "not_applicable";
         const lastVerified = input.supplier_last_verified_at !== undefined ? input.supplier_last_verified_at : prev.supplier_last_verified_at;
         const eta = input.availability_eta !== undefined ? input.availability_eta : prev.availability_eta;
 
-        const validation = validateProductPublicationInvariants(pubStatus, salesPolicy, sourceStatus, lastVerified, eta, stock);
+        const validation = validateProductPublicationInvariants(pubStatus, salesPolicy, sourceStatus, lastVerified, eta, stock, supplyStatus);
         if (!validation.valid) throw new Error(validation.error);
 
-        const rows = await tx`UPDATE products SET sku = ${sku}, name = ${name}, description = ${input.description ?? ""}, category = ${input.category ?? ""}, stock = ${stock}, min_stock = ${minStock}, cost_cents = ${costCents}, price_cents = ${priceCents}, vat_rate = ${vatRate}, active = ${active}, publication_status = ${pubStatus}, sales_policy = ${salesPolicy}, supplier_source_status = ${sourceStatus}, supplier_last_verified_at = ${lastVerified ? new Date(lastVerified) : null}, availability_eta = ${eta ? new Date(eta) : null}, updated_at = NOW() WHERE id = ${input.id} AND company_id = ${operator.companyId} RETURNING *`;
+        const rows = await tx`UPDATE products SET sku = ${sku}, name = ${name}, description = ${input.description ?? ""}, category = ${input.category ?? ""}, stock = ${stock}, min_stock = ${minStock}, cost_cents = ${costCents}, price_cents = ${priceCents}, vat_rate = ${vatRate}, active = ${active}, publication_status = ${pubStatus}, sales_policy = ${salesPolicy}, supplier_source_status = ${sourceStatus}, supply_status = ${supplyStatus}, supplier_last_verified_at = ${lastVerified ? new Date(lastVerified) : null}, availability_eta = ${eta ? new Date(eta) : null}, updated_at = NOW() WHERE id = ${input.id} AND company_id = ${operator.companyId} RETURNING *`;
         const delta = stock - prev.stock;
         if (delta) await tx`INSERT INTO stock_movements (product_id, company_id, delta, reason, ref_type, ref_key) VALUES (${input.id}, ${operator.companyId}, ${delta}, 'Ajuste de operador', 'operator', ${operator.accountId})`;
         return rows[0];
@@ -76,13 +78,14 @@ export const POST: RequestHandler = async ({ request }) => {
       const pubStatus = defaults.publication_status;
       const salesPolicy = defaults.sales_policy;
       const sourceStatus = defaults.supplier_source_status;
+      const supplyStatus = defaults.supply_status;
       const lastVerified = defaults.supplier_last_verified_at;
       const eta = defaults.availability_eta;
 
-      const validation = validateProductPublicationInvariants(pubStatus, salesPolicy, sourceStatus, lastVerified, eta, stock);
+      const validation = validateProductPublicationInvariants(pubStatus, salesPolicy, sourceStatus, lastVerified, eta, stock, supplyStatus);
       if (!validation.valid) throw new Error(validation.error);
 
-      const rows = await tx`INSERT INTO products (company_id, sku, name, description, category, stock, min_stock, cost_cents, price_cents, vat_rate, active, publication_status, sales_policy, supplier_source_status, supplier_last_verified_at, availability_eta) VALUES (${operator.companyId}, ${sku}, ${name}, ${input.description ?? ""}, ${input.category ?? ""}, ${stock}, ${minStock}, ${costCents}, ${priceCents}, ${vatRate}, ${active}, ${pubStatus}, ${salesPolicy}, ${sourceStatus}, ${lastVerified ? new Date(lastVerified) : null}, ${eta ? new Date(eta) : null}) RETURNING *`;
+      const rows = await tx`INSERT INTO products (company_id, sku, name, description, category, stock, min_stock, cost_cents, price_cents, vat_rate, active, publication_status, sales_policy, supplier_source_status, supply_status, supplier_last_verified_at, availability_eta) VALUES (${operator.companyId}, ${sku}, ${name}, ${input.description ?? ""}, ${input.category ?? ""}, ${stock}, ${minStock}, ${costCents}, ${priceCents}, ${vatRate}, ${active}, ${pubStatus}, ${salesPolicy}, ${sourceStatus}, ${supplyStatus}, ${lastVerified ? new Date(lastVerified) : null}, ${eta ? new Date(eta) : null}) RETURNING *`;
       if (stock) await tx`INSERT INTO stock_movements (product_id, company_id, delta, reason, ref_type, ref_key) VALUES (${rows[0].id}, ${operator.companyId}, ${stock}, 'Alta de operador', 'operator', ${operator.accountId})`;
       return rows[0];
     });

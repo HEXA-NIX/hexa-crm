@@ -31,6 +31,7 @@ export type SupplierInput = { id?: number | null; name: string; contact?: string
 export type PublicationStatus = "draft" | "ready_for_review" | "published" | "paused" | "archived";
 export type SalesPolicy = "not_sellable" | "own_stock" | "dropship" | "preorder" | "make_to_order";
 export type SupplierSourceStatus = "not_applicable" | "negotiating" | "approved" | "suspended";
+export type SupplyStatus = "not_applicable" | "negotiating" | "ordered" | "in_transit" | "received" | "quality_hold";
 
 export type Product = {
   id: number;
@@ -57,6 +58,7 @@ export type Product = {
   publication_status?: PublicationStatus;
   sales_policy?: SalesPolicy;
   supplier_source_status?: SupplierSourceStatus;
+  supply_status?: SupplyStatus;
   supplier_last_verified_at?: string | null;
   availability_eta?: string | null;
 
@@ -87,6 +89,7 @@ export type ProductInput = {
   publication_status?: PublicationStatus;
   sales_policy?: SalesPolicy;
   supplier_source_status?: SupplierSourceStatus;
+  supply_status?: SupplyStatus;
   supplier_last_verified_at?: string | null;
   availability_eta?: string | null;
 

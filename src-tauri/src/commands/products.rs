@@ -4,7 +4,7 @@ use crate::models::{Product, ProductInput};
 use rusqlite::params;
 use tauri::State;
 
-const PRODUCT_COLS: &str = "id, sku, name, description, COALESCE(category,''), stock, min_stock, cost_cents, price_cents, vat_rate, COALESCE(supplier_name,''), COALESCE(supplier_contact,''), COALESCE(supplier_email,''), COALESCE(supplier_phone,''), COALESCE(fulfillment_mode,'own_stock'), COALESCE(stock_location,'Almacén principal'), COALESCE(condition_code,'used'), COALESCE(publication_status,'published'), COALESCE(sales_policy,'own_stock'), COALESCE(supplier_source_status,'not_applicable'), supplier_last_verified_at, availability_eta, active, created_at, updated_at";
+const PRODUCT_COLS: &str = "id, sku, name, description, COALESCE(category,''), stock, min_stock, cost_cents, price_cents, vat_rate, COALESCE(supplier_name,''), COALESCE(supplier_contact,''), COALESCE(supplier_email,''), COALESCE(supplier_phone,''), COALESCE(fulfillment_mode,'own_stock'), COALESCE(stock_location,'Almacén principal'), COALESCE(condition_code,'used'), COALESCE(publication_status,'published'), COALESCE(sales_policy,'own_stock'), COALESCE(supplier_source_status,'not_applicable'), COALESCE(supply_status,'not_applicable'), supplier_last_verified_at, availability_eta, active, created_at, updated_at";
 
 fn map_product(row: &rusqlite::Row<'_>) -> rusqlite::Result<Product> {
     Ok(Product {
@@ -28,11 +28,12 @@ fn map_product(row: &rusqlite::Row<'_>) -> rusqlite::Result<Product> {
         publication_status: row.get(17)?,
         sales_policy: row.get(18)?,
         supplier_source_status: row.get(19)?,
-        supplier_last_verified_at: row.get(20)?,
-        availability_eta: row.get(21)?,
-        active: row.get::<_, i64>(22)? == 1,
-        created_at: row.get(23)?,
-        updated_at: row.get(24)?,
+        supply_status: row.get(20)?,
+        supplier_last_verified_at: row.get(21)?,
+        availability_eta: row.get(22)?,
+        active: row.get::<_, i64>(23)? == 1,
+        created_at: row.get(24)?,
+        updated_at: row.get(25)?,
     })
 }
 
@@ -46,7 +47,7 @@ pub fn list_products(
     require_session(&conn, &token)?;
     let only = active_only.unwrap_or(true);
     let sql = if only {
-        format!("SELECT {PRODUCT_COLS} FROM products WHERE active = 1 AND COALESCE(publication_status, 'published') = 'published' AND COALESCE(sales_policy, 'own_stock') != 'not_sellable' ORDER BY name COLLATE NOCASE")
+        format!("SELECT {PRODUCT_COLS} FROM products WHERE active = 1 AND COALESCE(publication_status, 'published') = 'published' AND COALESCE(sales_policy, 'own_stock') != 'not_sellable' AND COALESCE(supply_status, 'not_applicable') NOT IN ('ordered', 'in_transit', 'negotiating', 'quality_hold') ORDER BY name COLLATE NOCASE")
     } else {
         format!("SELECT {PRODUCT_COLS} FROM products ORDER BY name COLLATE NOCASE")
     };
@@ -83,23 +84,24 @@ pub fn upsert_product(
     let active = input.active.unwrap_or(true) as i64;
 
     let is_update = input.id.is_some();
-    let (prev_pub, prev_pol, prev_src, prev_ver, prev_eta, prev_stock) = if let Some(id) = input.id {
-        let row: Result<(String, String, String, Option<String>, Option<String>, i64), _> = conn.query_row(
-            "SELECT COALESCE(publication_status, 'published'), COALESCE(sales_policy, 'own_stock'), COALESCE(supplier_source_status, 'not_applicable'), supplier_last_verified_at, availability_eta, stock FROM products WHERE id=?1",
+    let (prev_pub, prev_pol, prev_src, prev_sup, prev_ver, prev_eta, prev_stock) = if let Some(id) = input.id {
+        let row: Result<(String, String, String, String, Option<String>, Option<String>, i64), _> = conn.query_row(
+            "SELECT COALESCE(publication_status, 'published'), COALESCE(sales_policy, 'own_stock'), COALESCE(supplier_source_status, 'not_applicable'), COALESCE(supply_status, 'not_applicable'), supplier_last_verified_at, availability_eta, stock FROM products WHERE id=?1",
             params![id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
         );
         match row {
-            Ok(tuple) => (Some(tuple.0), Some(tuple.1), Some(tuple.2), tuple.3, tuple.4, tuple.5),
+            Ok(tuple) => (Some(tuple.0), Some(tuple.1), Some(tuple.2), Some(tuple.3), tuple.4, tuple.5, tuple.6),
             Err(_) => return Err("Producto no encontrado".into()),
         }
     } else {
-        (None, None, None, None, None, 0)
+        (None, None, None, None, None, None, 0)
     };
 
     let pub_status = input.publication_status.or(prev_pub).unwrap_or_else(|| if is_update { "published".into() } else { "draft".into() });
     let sales_policy = input.sales_policy.or(prev_pol).unwrap_or_else(|| if is_update { "own_stock".into() } else { "not_sellable".into() });
     let supplier_source_status = input.supplier_source_status.or(prev_src).unwrap_or_else(|| if sales_policy == "dropship" { "negotiating".into() } else { "not_applicable".into() });
+    let supply_status = input.supply_status.or(prev_sup).unwrap_or_else(|| if sales_policy == "dropship" { "negotiating".into() } else { "not_applicable".into() });
     let supplier_last_verified_at = input.supplier_last_verified_at.or(prev_ver);
     let availability_eta = input.availability_eta.or(prev_eta);
     let stock = input.stock.unwrap_or(if is_update { prev_stock } else { 0 });
@@ -107,6 +109,9 @@ pub fn upsert_product(
     if pub_status == "published" {
         if sales_policy == "not_sellable" {
             return Err("No se puede publicar un producto con política comercial 'No vendible'".into());
+        }
+        if ["ordered", "in_transit", "negotiating", "quality_hold"].contains(&supply_status.as_str()) {
+            return Err(format!("No se puede publicar un producto en estado de abastecimiento '{supply_status}'"));
         }
         if sales_policy == "own_stock" && stock <= 0 {
             return Err("No se puede publicar un producto de stock propio sin existencias disponibles".into());
@@ -129,7 +134,7 @@ pub fn upsert_product(
     if let Some(id) = input.id {
         conn.execute(
             "UPDATE products SET sku=?1, name=?2, description=?3, category=?4, stock=COALESCE(?5, stock), min_stock=COALESCE(?6, min_stock),
-             cost_cents=?7, price_cents=?8, vat_rate=?9, supplier_name=?10, supplier_contact=?11, supplier_email=?12, supplier_phone=?13, fulfillment_mode=?14, stock_location=?15, condition_code=?16, publication_status=?17, sales_policy=?18, supplier_source_status=?19, supplier_last_verified_at=?20, availability_eta=?21, active=?22, updated_at=?23 WHERE id=?24",
+             cost_cents=?7, price_cents=?8, vat_rate=?9, supplier_name=?10, supplier_contact=?11, supplier_email=?12, supplier_phone=?13, fulfillment_mode=?14, stock_location=?15, condition_code=?16, publication_status=?17, sales_policy=?18, supplier_source_status=?19, supply_status=?20, supplier_last_verified_at=?21, availability_eta=?22, active=?23, updated_at=?24 WHERE id=?25",
             params![
                 input.sku,
                 input.name,
@@ -150,6 +155,7 @@ pub fn upsert_product(
                 pub_status,
                 sales_policy,
                 supplier_source_status,
+                supply_status,
                 supplier_last_verified_at,
                 availability_eta,
                 active,
@@ -166,8 +172,8 @@ pub fn upsert_product(
         .map_err(|e| e.to_string())
     } else {
         conn.execute(
-            "INSERT INTO products (sku, name, description, category, stock, min_stock, cost_cents, price_cents, vat_rate, supplier_name, supplier_contact, supplier_email, supplier_phone, fulfillment_mode, stock_location, condition_code, publication_status, sales_policy, supplier_source_status, supplier_last_verified_at, availability_eta, active, created_at, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?23)",
+            "INSERT INTO products (sku, name, description, category, stock, min_stock, cost_cents, price_cents, vat_rate, supplier_name, supplier_contact, supplier_email, supplier_phone, fulfillment_mode, stock_location, condition_code, publication_status, sales_policy, supplier_source_status, supply_status, supplier_last_verified_at, availability_eta, active, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?24)",
             params![
                 input.sku,
                 input.name,
@@ -188,6 +194,7 @@ pub fn upsert_product(
                 pub_status,
                 sales_policy,
                 supplier_source_status,
+                supply_status,
                 supplier_last_verified_at,
                 availability_eta,
                 active,

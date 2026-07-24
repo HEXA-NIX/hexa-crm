@@ -475,6 +475,9 @@ export async function initDb() {
   await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS supplier_source_status TEXT NOT NULL DEFAULT 'not_applicable'`;
   await sql`ALTER TABLE products DROP CONSTRAINT IF EXISTS products_supplier_source_status_check`;
   await sql`ALTER TABLE products ADD CONSTRAINT products_supplier_source_status_check CHECK (supplier_source_status IN ('not_applicable', 'negotiating', 'approved', 'suspended'))`;
+  await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS supply_status TEXT NOT NULL DEFAULT 'not_applicable'`;
+  await sql`ALTER TABLE products DROP CONSTRAINT IF EXISTS products_supply_status_check`;
+  await sql`ALTER TABLE products ADD CONSTRAINT products_supply_status_check CHECK (supply_status IN ('not_applicable', 'negotiating', 'ordered', 'in_transit', 'received', 'quality_hold'))`;
   await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS supplier_last_verified_at TIMESTAMP WITH TIME ZONE`;
   await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS availability_eta TIMESTAMP WITH TIME ZONE`;
   await sql`
@@ -685,6 +688,7 @@ export async function initDb() {
   await sql`INSERT INTO schema_migrations (version) VALUES ('0017_stripe_secret_vault') ON CONFLICT (version) DO NOTHING`;
   await sql`INSERT INTO schema_migrations (version) VALUES ('0018_integration_events') ON CONFLICT (version) DO NOTHING`;
   await sql`INSERT INTO schema_migrations (version) VALUES ('0019_publication_and_sales_policy') ON CONFLICT (version) DO NOTHING`;
+  await sql`INSERT INTO schema_migrations (version) VALUES ('0020_supply_status') ON CONFLICT (version) DO NOTHING`;
 }
 
 async function seedInventoryFoundation() {
@@ -1619,7 +1623,7 @@ export const postgresApi = {
     if (!token) throw new Error("Sesión no iniciada");
     const cid = await resolveActiveCompanyId(token, user.id);
     const products = active_only
-      ? await sql`SELECT * FROM products WHERE active = TRUE AND company_id = ${cid} AND publication_status = 'published' AND sales_policy != 'not_sellable' ORDER BY name ASC`
+      ? await sql`SELECT * FROM products WHERE active = TRUE AND company_id = ${cid} AND publication_status = 'published' AND sales_policy != 'not_sellable' AND supply_status NOT IN ('ordered', 'in_transit', 'negotiating', 'quality_hold') ORDER BY name ASC`
       : await sql`SELECT * FROM products WHERE company_id = ${cid} ORDER BY name ASC`;
 
     return products.map((p) => ({
@@ -1644,6 +1648,7 @@ export const postgresApi = {
       publication_status: p.publication_status || "published",
       sales_policy: p.sales_policy || "own_stock",
       supplier_source_status: p.supplier_source_status || "not_applicable",
+      supply_status: p.supply_status || "not_applicable",
       supplier_last_verified_at: toIso(p.supplier_last_verified_at) || null,
       availability_eta: toIso(p.availability_eta) || null,
       active: !!p.active,
@@ -1667,6 +1672,7 @@ export const postgresApi = {
       const publication_status = input.publication_status ?? existing.publication_status ?? "published";
       const sales_policy = input.sales_policy ?? existing.sales_policy ?? "own_stock";
       const supplier_source_status = input.supplier_source_status ?? existing.supplier_source_status ?? (sales_policy === "dropship" ? "negotiating" : "not_applicable");
+      const supply_status = input.supply_status ?? existing.supply_status ?? "not_applicable";
       const supplier_last_verified_at = input.supplier_last_verified_at !== undefined ? input.supplier_last_verified_at : toIso(existing.supplier_last_verified_at);
       const availability_eta = input.availability_eta !== undefined ? input.availability_eta : toIso(existing.availability_eta);
       const stock = input.stock ?? existing.stock ?? 0;
@@ -1678,6 +1684,7 @@ export const postgresApi = {
         supplier_last_verified_at,
         availability_eta,
         stock,
+        supply_status,
       );
       if (!invariantCheck.valid) {
         throw new Error(invariantCheck.error);
@@ -1704,6 +1711,7 @@ export const postgresApi = {
           publication_status = ${publication_status},
           sales_policy = ${sales_policy},
           supplier_source_status = ${supplier_source_status},
+          supply_status = ${supply_status},
           supplier_last_verified_at = ${supplier_last_verified_at ? new Date(supplier_last_verified_at) : null},
           availability_eta = ${availability_eta ? new Date(availability_eta) : null},
           active = ${input.active ?? true},
@@ -1735,6 +1743,7 @@ export const postgresApi = {
         publication_status: p.publication_status,
         sales_policy: p.sales_policy,
         supplier_source_status: p.supplier_source_status,
+        supply_status: p.supply_status,
         supplier_last_verified_at: toIso(p.supplier_last_verified_at) || null,
         availability_eta: toIso(p.availability_eta) || null,
         active: !!p.active,
@@ -1747,6 +1756,7 @@ export const postgresApi = {
       const publication_status = defaults.publication_status;
       const sales_policy = defaults.sales_policy;
       const supplier_source_status = defaults.supplier_source_status;
+      const supply_status = defaults.supply_status;
       const supplier_last_verified_at = defaults.supplier_last_verified_at;
       const availability_eta = defaults.availability_eta;
       const stock = input.stock ?? 0;
@@ -1758,13 +1768,14 @@ export const postgresApi = {
         supplier_last_verified_at,
         availability_eta,
         stock,
+        supply_status,
       );
       if (!invariantCheck.valid) {
         throw new Error(invariantCheck.error);
       }
 
       const res = await sql`
-        INSERT INTO products (company_id, sku, name, description, category, stock, min_stock, cost_cents, price_cents, vat_rate, supplier_name, supplier_contact, supplier_email, supplier_phone, fulfillment_mode, stock_location, condition_code, active, publication_status, sales_policy, supplier_source_status, supplier_last_verified_at, availability_eta)
+        INSERT INTO products (company_id, sku, name, description, category, stock, min_stock, cost_cents, price_cents, vat_rate, supplier_name, supplier_contact, supplier_email, supplier_phone, fulfillment_mode, stock_location, condition_code, active, publication_status, sales_policy, supplier_source_status, supply_status, supplier_last_verified_at, availability_eta)
         VALUES (
           ${cid},
           ${input.sku},
@@ -1787,6 +1798,7 @@ export const postgresApi = {
           ${publication_status},
           ${sales_policy},
           ${supplier_source_status},
+          ${supply_status},
           ${supplier_last_verified_at ? new Date(supplier_last_verified_at) : null},
           ${availability_eta ? new Date(availability_eta) : null}
         )
@@ -1824,6 +1836,7 @@ export const postgresApi = {
         publication_status: p.publication_status,
         sales_policy: p.sales_policy,
         supplier_source_status: p.supplier_source_status,
+        supply_status: p.supply_status,
         supplier_last_verified_at: toIso(p.supplier_last_verified_at) || null,
         availability_eta: toIso(p.availability_eta) || null,
         active: !!p.active,
@@ -1969,7 +1982,7 @@ export const postgresApi = {
 
       // Obtener todos los productos implicados para verificar stock e IVA
       const productIds = lines.map((l) => l.product_id);
-      const prods = await tx`SELECT id, name, price_cents, vat_rate, stock, company_id, publication_status, sales_policy FROM products WHERE id IN ${tx(productIds)} AND company_id = ${cid}`;
+      const prods = await tx`SELECT id, name, price_cents, vat_rate, stock, company_id, publication_status, sales_policy, supply_status FROM products WHERE id IN ${tx(productIds)} AND company_id = ${cid}`;
       const prodMap = new Map(prods.map((p) => [p.id, p]));
 
       const calculatedLines = [];
@@ -1981,6 +1994,11 @@ export const postgresApi = {
 
         const pubStatus = prod.publication_status || "published";
         const salesPolicy = prod.sales_policy || "own_stock";
+        const supplyStatus = prod.supply_status || "not_applicable";
+
+        if (["ordered", "in_transit", "negotiating", "quality_hold"].includes(supplyStatus)) {
+          throw new Error(`El producto '${prod.name}' está en estado de abastecimiento '${supplyStatus}' y no admite venta`);
+        }
 
         if (pubStatus !== "published" || salesPolicy === "not_sellable") {
           throw new Error(`El producto '${prod.name}' no está publicado o no es vendible`);

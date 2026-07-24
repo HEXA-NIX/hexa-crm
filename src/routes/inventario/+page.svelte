@@ -13,6 +13,7 @@
     PublicationStatus,
     SalesPolicy,
     SupplierSourceStatus,
+    SupplyStatus,
     StockBalance,
     StockLocation,
     Supplier,
@@ -93,6 +94,7 @@
     publication_status: "draft" as PublicationStatus,
     sales_policy: "not_sellable" as SalesPolicy,
     supplier_source_status: "not_applicable" as SupplierSourceStatus,
+    supply_status: "not_applicable" as SupplyStatus,
     supplier_last_verified_at: "",
     availability_eta: "",
   });
@@ -276,6 +278,31 @@
     { value: "suspended", label: "Suspendido" },
   ];
 
+  let supplyStatusFilter = $state("");
+
+  const supplyStatusOptions = [
+    { value: "not_applicable", label: "No aplica (Estándar/Local)" },
+    { value: "negotiating", label: "En negociación" },
+    { value: "ordered", label: "Pedido confirmado" },
+    { value: "in_transit", label: "En tránsito" },
+    { value: "received", label: "Recibido en almacén" },
+    { value: "quality_hold", label: "Cuarentena / Calidad" },
+  ];
+
+  const supplyStatusFilterOptions = [
+    { value: "", label: "Todos los estados de abastecimiento" },
+    ...supplyStatusOptions,
+  ];
+
+  function supplyBadge(status?: string) {
+    if (status === "ordered") return { label: "Pedido confirmado", tone: "warn" as const };
+    if (status === "in_transit") return { label: "En tránsito", tone: "warn" as const };
+    if (status === "received") return { label: "Recibido", tone: "ok" as const };
+    if (status === "quality_hold") return { label: "Cuarentena", tone: "danger" as const };
+    if (status === "negotiating") return { label: "En negociación", tone: "neutral" as const };
+    return null;
+  }
+
   function salesPolicyLabel(policy?: string) {
     return salesPolicyOptions.find((i) => i.value === policy)?.label ?? "Stock propio";
   }
@@ -319,7 +346,8 @@
       const normalizedCondition = p.condition_code === "preowned" ? "used" : (p.condition_code ?? "used");
       const matchCondition = !conditionFilter || normalizedCondition === conditionFilter;
       const matchPub = !publicationFilter || (p.publication_status ?? "published") === publicationFilter;
-      return matchQ && matchCat && matchSupply && matchCondition && matchPub;
+      const matchSupplyStatus = !supplyStatusFilter || (p.supply_status ?? "not_applicable") === supplyStatusFilter;
+      return matchQ && matchCat && matchSupply && matchCondition && matchPub && matchSupplyStatus;
     })
   );
 
@@ -601,6 +629,7 @@
       publication_status: "draft",
       sales_policy: "not_sellable",
       supplier_source_status: "not_applicable",
+      supply_status: "not_applicable",
       supplier_last_verified_at: "",
       availability_eta: "",
     };
@@ -630,6 +659,7 @@
       publication_status: (p.publication_status ?? "published") as PublicationStatus,
       sales_policy: (p.sales_policy ?? "own_stock") as SalesPolicy,
       supplier_source_status: (p.supplier_source_status ?? "not_applicable") as SupplierSourceStatus,
+      supply_status: (p.supply_status ?? "not_applicable") as SupplyStatus,
       supplier_last_verified_at: p.supplier_last_verified_at ? p.supplier_last_verified_at.slice(0, 10) : "",
       availability_eta: p.availability_eta ? p.availability_eta.slice(0, 10) : "",
     };
@@ -665,6 +695,7 @@
       publication_status: form.publication_status,
       sales_policy: form.sales_policy,
       supplier_source_status: form.supplier_source_status,
+      supply_status: form.supply_status,
       supplier_last_verified_at: form.supplier_last_verified_at || null,
       availability_eta: form.availability_eta || null,
       active: true,
@@ -1186,6 +1217,11 @@
           bind:value={publicationFilter}
           options={publicationFilterOptions}
         />
+        <Select
+          class="w-full max-w-[14rem]"
+          bind:value={supplyStatusFilter}
+          options={supplyStatusFilterOptions}
+        />
         <div class="ml-auto flex flex-wrap gap-2">
           <Button variant="secondary" onclick={downloadTemplate} disabled={importing}>
             Plantilla CSV
@@ -1290,6 +1326,7 @@
                 {#each filteredProducts as p (p.id)}
                   {@const cover = coverFor(p)}
                   {@const pubInfo = publicationBadge(p.publication_status, p.sales_policy)}
+                  {@const supInfo = supplyBadge(p.supply_status)}
                   <tr class="border-b border-[var(--color-border-soft)] transition hover:bg-[var(--color-purple-mist)]">
                     <td class="px-4 py-3">
                       <p class="font-medium text-[var(--color-text)]">{p.name}</p>
@@ -1308,7 +1345,12 @@
                     </td>
                     <td class="px-4 py-3 text-xs text-[var(--color-muted)]">{fulfillmentLabel(p.fulfillment_mode)}</td>
                     <td class="px-4 py-3">
-                      <Badge tone={pubInfo.tone}>{pubInfo.label}</Badge>
+                      <div class="flex flex-col items-start gap-1">
+                        <Badge tone={pubInfo.tone}>{pubInfo.label}</Badge>
+                        {#if supInfo}
+                          <Badge tone={supInfo.tone}>{supInfo.label}</Badge>
+                        {/if}
+                      </div>
                     </td>
                     <td class="px-4 py-3">
                       <Badge tone={p.condition_code === "new" ? "ok" : p.condition_code === "for_parts" ? "danger" : "warn"}>
@@ -1705,6 +1747,7 @@
       <div class="grid gap-3 sm:grid-cols-2">
         <Select label="Estado de publicación" bind:value={form.publication_status} options={publicationStatusOptions} />
         <Select label="Política comercial" bind:value={form.sales_policy} options={salesPolicyOptions} />
+        <Select label="Estado de abastecimiento" bind:value={form.supply_status} options={supplyStatusOptions} />
         {#if form.sales_policy === "dropship"}
           <Select label="Estado fuente proveedor" bind:value={form.supplier_source_status} options={supplierSourceStatusOptions} />
           <Input label="Última verificación proveedor" type="date" bind:value={form.supplier_last_verified_at} />
@@ -1716,6 +1759,8 @@
       {#if form.publication_status === "published"}
         {#if form.sales_policy === "not_sellable"}
           <p class="mt-2 text-xs text-rose-300">⚠️ No se puede publicar un producto con política 'No vendible'.</p>
+        {:else if ["ordered", "in_transit", "negotiating", "quality_hold"].includes(form.supply_status)}
+          <p class="mt-2 text-xs text-rose-300">⚠️ No se puede publicar un producto en estado '{form.supply_status === "ordered" ? "Pedido confirmado" : form.supply_status === "in_transit" ? "En tránsito" : form.supply_status === "negotiating" ? "En negociación" : "Cuarentena"}'.</p>
         {:else if form.sales_policy === "own_stock" && (Number(form.stock) || 0) <= 0}
           <p class="mt-2 text-xs text-rose-300">⚠️ Publicar con stock propio requiere existencias > 0.</p>
         {:else if form.sales_policy === "dropship" && (form.supplier_source_status !== "approved" || !form.supplier_last_verified_at)}
