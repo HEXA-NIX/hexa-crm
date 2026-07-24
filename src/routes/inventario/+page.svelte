@@ -1676,39 +1676,46 @@
 </section>
 
 <!-- MODAL: Crear/Editar Producto -->
-<Modal open={modalOpen} title={editing ? "Editar producto" : "Nuevo producto"} onclose={() => (modalOpen = false)}>
+<Modal open={modalOpen} title={editing ? "Editar producto" : "Nuevo producto"} size="fluid" onclose={() => (modalOpen = false)}>
   <form
-    class="grid gap-3"
+    class="flex flex-col gap-4"
     onsubmit={(e) => {
       e.preventDefault();
       saveProduct();
     }}
   >
-    <div class="grid gap-3 sm:grid-cols-2">
+    <!-- Sección: Datos principales -->
+    <div class="grid gap-3.5 sm:grid-cols-2 lg:grid-cols-4">
       <Input label="SKU" bind:value={form.sku} required />
+      <Input label="Nombre" bind:value={form.name} required class="sm:col-span-2 lg:col-span-2" />
       <Select
         label="IVA"
         bind:value={form.vat_rate}
         options={VAT_RATES.map((r) => ({ value: String(r), label: vatLabel(r) }))}
       />
+      <Input label="Categoría" bind:value={form.category} placeholder="Alimentación, Tecnología…" />
+      <Input label="Descripción" bind:value={form.description} class="sm:col-span-2 lg:col-span-3" />
     </div>
-    <Input label="Nombre" bind:value={form.name} required />
-    <Input label="Categoría" bind:value={form.category} placeholder="Alimentación, Tecnología…" />
-    <Input label="Descripción" bind:value={form.description} />
-    <div class="grid gap-3 sm:grid-cols-2">
-      <Input label="PVP (€, IVA incl.)" bind:value={form.price} required />
-      <Input label="Coste (€)" bind:value={form.cost} required />
+
+    <!-- Sección: Precios e Inventario -->
+    <div class="border-t border-[var(--color-border-soft)] pt-3.5">
+      <p class="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Precios e Inventario</p>
+      <div class="grid gap-3.5 sm:grid-cols-2 lg:grid-cols-4">
+        <Input label="PVP (€, IVA incl.)" bind:value={form.price} required />
+        <Input label="Coste (€)" bind:value={form.cost} required />
+        <Input label="Stock disponible" type="number" bind:value={form.stock} />
+        <Input label="Stock mínimo" type="number" bind:value={form.min_stock} />
+      </div>
     </div>
-    <div class="grid gap-3 sm:grid-cols-2">
-      <Input label="Stock" type="number" bind:value={form.stock} />
-      <Input label="Stock mínimo" type="number" bind:value={form.min_stock} />
-    </div>
-    <div class="mt-2 border-t border-[var(--color-border-soft)] pt-3">
-      <p class="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Abastecimiento y estado</p>
-      <div class="grid gap-3 sm:grid-cols-2">
+
+    <!-- Sección: Abastecimiento y Proveedor -->
+    <div class="border-t border-[var(--color-border-soft)] pt-3.5">
+      <p class="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Abastecimiento y Proveedor</p>
+      <div class="grid gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
         <Select label="Cómo se sirve" bind:value={form.fulfillment_mode} options={fulfillmentOptions} />
         <Select label="Condición" bind:value={form.condition_code} options={conditionOptions.filter((item) => item.value !== "preowned")} />
-        <div class="grid gap-2 sm:col-span-2">
+        <Input label="Ubicación / origen" bind:value={form.stock_location} placeholder="Almacén principal, proveedor…" />
+        <div class="grid gap-2 sm:col-span-2 lg:col-span-3">
           <div class="flex flex-col items-stretch gap-2 sm:flex-row sm:items-end">
             <Select
               class="min-w-0 flex-1"
@@ -1722,9 +1729,9 @@
             </Button>
           </div>
           {#if selectedSupplierRecord}
-            <div class="rounded-xl border border-[var(--color-border-soft)] bg-white/[0.025] px-3 py-2.5 text-xs text-[var(--color-muted)]">
+            <div class="rounded-xl border border-[var(--color-border-soft)] bg-white/[0.025] px-3 py-2 text-xs text-[var(--color-muted)]">
               <p class="font-medium text-[var(--color-text)]">{selectedSupplierRecord.name}</p>
-              <p class="mt-1">
+              <p class="mt-0.5">
                 {[selectedSupplierRecord.contact, selectedSupplierRecord.email, selectedSupplierRecord.phone].filter(Boolean).join(" · ") || "Sin datos de contacto"}
               </p>
             </div>
@@ -1736,15 +1743,16 @@
             <p class="text-xs text-[var(--color-muted-dim)]">Aún no hay proveedores guardados. Créalo aquí y volverás al artículo sin perder los datos.</p>
           {/if}
         </div>
-        <Input label="Ubicación / origen" bind:value={form.stock_location} placeholder="Almacén principal, proveedor…" />
       </div>
       {#if form.fulfillment_mode === "supplier_dropship"}
         <p class="mt-2 text-xs text-amber-200">Dropshipping: el proveedor envía al cliente; no uses este dato como stock propio disponible.</p>
       {/if}
     </div>
-    <div class="mt-3 border-t border-[var(--color-border-soft)] pt-3">
+
+    <!-- Sección: Estado comercial y publicación -->
+    <div class="border-t border-[var(--color-border-soft)] pt-3.5">
       <p class="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Estado comercial y publicación</p>
-      <div class="grid gap-3 sm:grid-cols-2">
+      <div class="grid gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
         <Select label="Estado de publicación" bind:value={form.publication_status} options={publicationStatusOptions} />
         <Select label="Política comercial" bind:value={form.sales_policy} options={salesPolicyOptions} />
         <Select label="Estado de abastecimiento" bind:value={form.supply_status} options={supplyStatusOptions} />
@@ -1770,9 +1778,11 @@
         {/if}
       {/if}
     </div>
-    <div class="mt-2 flex justify-end gap-2">
+
+    <!-- Pie de acciones sticky -->
+    <div class="sticky bottom-0 z-20 -mx-5 -mb-5 sm:-mx-6 sm:-mb-6 border-t border-[var(--color-border-soft)] bg-[var(--color-surface-glass,#120e1b)]/95 px-6 py-3.5 backdrop-blur-md flex items-center justify-end gap-3">
       <Button variant="ghost" type="button" onclick={() => (modalOpen = false)}>Cancelar</Button>
-      <Button type="submit">Guardar</Button>
+      <Button type="submit">Guardar producto</Button>
     </div>
   </form>
 </Modal>
