@@ -4,25 +4,17 @@
   import { goto } from "$app/navigation";
   import { api } from "$lib/api/client";
   import type {
-    FulfillmentMode,
     InventoryMovement,
     InventoryMovementType,
     InventoryReason,
     Product,
-    ProductCondition,
-    ProductInput,
-    PublicationStatus,
-    SalesPolicy,
-    SupplierSourceStatus,
-    SupplyStatus,
     StockBalance,
     StockLocation,
     Supplier,
     Warehouse,
   } from "$lib/types";
   import { INVENTORY_REASON_LABELS } from "$lib/types";
-  import { formatEUR, parseEurosInput } from "$lib/money";
-  import { VAT_RATES, vatLabel, type VatRate } from "$lib/vat";
+  import { formatEUR } from "$lib/money";
   import Button from "$lib/components/Button.svelte";
   import Card from "$lib/components/Card.svelte";
   import KpiCard from "$lib/components/KpiCard.svelte";
@@ -41,12 +33,6 @@
   import { estimateDaysOfCover, qtySoldForProduct } from "$lib/inventory/stock-cover";
   import { countsInBusinessTotals } from "$lib/sales/cancel-sale";
   import { planReorderSuggestions } from "$lib/inventory/reorder";
-  import {
-    LEGACY_SUPPLIER,
-    NO_SUPPLIER,
-    productSupplierSelection,
-    supplierSnapshotForSelection,
-  } from "$lib/inventory/supplier-selection";
 
   type TabType = "resumen" | "products" | "movements" | "locations" | "suppliers";
   let activeTab = $state<TabType>("resumen");
@@ -72,39 +58,9 @@
   let showReorder = $state(false);
   let reorderQty = $state<Record<number, number>>({});
 
-  // Product modal
-  let modalOpen = $state(false);
-  let editing = $state<Product | null>(null);
-  let form = $state({
-    sku: "",
-    name: "",
-    description: "",
-    category: "",
-    stock: "0",
-    min_stock: "5",
-    cost: "",
-    price: "",
-    vat_rate: "21" as string,
-    supplier_name: "",
-    supplier_contact: "",
-    supplier_email: "",
-    supplier_phone: "",
-    fulfillment_mode: "own_stock" as FulfillmentMode,
-    stock_location: "Almacén principal",
-    condition_code: "new" as ProductCondition,
-    publication_status: "draft" as PublicationStatus,
-    sales_policy: "not_sellable" as SalesPolicy,
-    supplier_source_status: "not_applicable" as SupplierSourceStatus,
-    supply_status: "not_applicable" as SupplyStatus,
-    supplier_last_verified_at: "",
-    availability_eta: "",
-  });
-
   // Supplier modal
   let supplierModal = $state(false);
   let editingSupplier = $state<Supplier | null>(null);
-  let selectedSupplier = $state(NO_SUPPLIER);
-  let returnToProductAfterSupplier = $state(false);
   let supplierForm = $state({
     name: "",
     contact: "",
@@ -178,26 +134,7 @@
     { value: "other", label: "Otro motivo" },
   ];
 
-  const activeSuppliers = $derived(suppliers.filter((supplier) => supplier.active));
-  const selectedSupplierRecord = $derived(
-    activeSuppliers.find((supplier) => String(supplier.id) === selectedSupplier) ?? null,
-  );
 
-  const supplierOptions = $derived([
-    { value: NO_SUPPLIER, label: "Sin proveedor", hint: "El artículo se abastece sin un contacto asociado" },
-    ...activeSuppliers.map((supplier) => ({
-      value: String(supplier.id),
-      label: supplier.name,
-      hint: supplier.contact || supplier.email || supplier.phone || "Proveedor guardado",
-    })),
-    ...(selectedSupplier === LEGACY_SUPPLIER
-      ? [{
-          value: LEGACY_SUPPLIER,
-          label: `${form.supplier_name || "Proveedor anterior"} · histórico`,
-          hint: "No está en el directorio actual; elige otro para sustituirlo",
-        }]
-      : []),
-  ]);
 
   const productOptions = $derived([
     { value: "", label: "Seleccionar producto…" },
@@ -568,40 +505,15 @@
 
   function closeSupplierModal() {
     supplierModal = false;
-    if (returnToProductAfterSupplier) {
-      returnToProductAfterSupplier = false;
-      modalOpen = true;
-    }
-  }
-
-  function openSupplierFromProduct() {
-    modalOpen = false;
-    returnToProductAfterSupplier = true;
-    openSupplier();
-  }
-
-  function chooseSupplier(value: string) {
-    selectedSupplier = value;
-    const snapshot = supplierSnapshotForSelection(value, suppliers, form);
-    form.supplier_name = snapshot.supplier_name ?? "";
-    form.supplier_contact = snapshot.supplier_contact ?? "";
-    form.supplier_email = snapshot.supplier_email ?? "";
-    form.supplier_phone = snapshot.supplier_phone ?? "";
   }
 
   async function saveSupplier() {
     if (!supplierForm.name.trim()) return showToast("El nombre del proveedor es obligatorio", "err");
     try {
-      const saved = await api.upsertSupplier({ id: editingSupplier?.id, ...supplierForm });
-      const shouldReturnToProduct = returnToProductAfterSupplier;
+      await api.upsertSupplier({ id: editingSupplier?.id, ...supplierForm });
       supplierModal = false;
-      returnToProductAfterSupplier = false;
       showToast(editingSupplier ? "Proveedor actualizado" : "Proveedor creado con éxito");
       await load();
-      if (shouldReturnToProduct) {
-        chooseSupplier(String(saved.id));
-        modalOpen = true;
-      }
     } catch (e) {
       showToast(e instanceof Error ? e.message : "Error al guardar proveedor", "err");
     }
