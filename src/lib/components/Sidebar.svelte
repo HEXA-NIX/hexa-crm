@@ -4,6 +4,8 @@
   import Logo from "$lib/components/Logo.svelte";
   import { PRODUCT_DISPLAY_NAME, PRODUCT_TAGLINE } from "$lib/product";
   import { api } from "$lib/api/client";
+  import { activeCompany } from "$lib/stores/session";
+  import { PROJECT_COMPANY_CODE } from "$lib/company/context";
 
   let {
     forceExpanded = false,
@@ -17,21 +19,25 @@
   } = $props();
 
   const collapsed = $derived(forceExpanded ? false : $sidebarCollapsed);
-  const showWork = $derived(api.supportsWorkManagement());
+  const showWork = $derived(
+    api.supportsWorkManagement() && $activeCompany?.code === PROJECT_COMPANY_CODE,
+  );
 
   const navigationGroups = $derived([
     {
       label: "VISIÓN",
       links: [{ href: "/", label: "Pulso", icon: "⌁" }],
     },
-    {
-      label: "OPERACIÓN",
-      links: [
-        { href: "/ventas", label: "Ventas", icon: "○" },
-        { href: "/inventario", label: "Inventario", icon: "□" },
-        { href: "/clientes", label: "Clientes", icon: "◇" },
-      ],
-    },
+    ...(!showWork
+      ? [{
+          label: "OPERACIÓN",
+          links: [
+            { href: "/ventas", label: "Ventas", icon: "○" },
+            { href: "/inventario", label: "Inventario", icon: "□" },
+            { href: "/clientes", label: "Clientes", icon: "◇" },
+          ],
+        }]
+      : []),
     {
       label: "FINANZAS",
       links: [
@@ -43,8 +49,9 @@
       ? [{
           label: "PROYECTOS",
           links: [
-            { href: "/trabajo", label: "Trabajo", icon: "☑" },
             { href: "/proyectos", label: "Proyectos", icon: "◫" },
+            { href: "/clientes", label: "Clientes", icon: "◇" },
+            { href: "/trabajo", label: "Trabajo", icon: "☑" },
             { href: "/roadmap", label: "Roadmap", icon: "↗" },
           ],
         }]
@@ -58,8 +65,8 @@
   /** Deep-links that open create flows (?nuevo=1). */
   const quick = $derived([
     ...(showWork ? [{ href: "/trabajo?nuevo=1", label: "Nueva tarea" }] : []),
-    { href: "/ventas?nuevo=1", label: "Nueva venta" },
-    { href: "/inventario?nuevo=1", label: "Nuevo producto" },
+    ...(!showWork ? [{ href: "/ventas?nuevo=1", label: "Nueva venta" }] : []),
+    ...(!showWork ? [{ href: "/inventario?nuevo=1", label: "Nuevo producto" }] : []),
     { href: "/clientes?nuevo=1", label: "Nuevo cliente" },
     { href: "/caja?nuevo=1", label: "Movimiento de caja" },
   ]);

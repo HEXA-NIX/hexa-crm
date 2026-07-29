@@ -144,6 +144,7 @@ export type CashKind = "income" | "expense" | "adjustment";
 export type CashMovement = {
   id: number;
   company_id?: number;
+  project_id?: number | null;
   kind: CashKind;
   amount_cents: number;
   category: string;
@@ -155,6 +156,7 @@ export type CashMovement = {
 export type CashInput = {
   kind: CashKind;
   amount_cents: number;
+  project_id?: number | null;
   category: string;
   description?: string;
   occurred_at?: string | null;
@@ -331,7 +333,13 @@ export type WorkCategory = {
 
 export type WorkProject = {
   id: number;
+  uid: string;
   company_id: number;
+  customer_id: number | null;
+  value_cents: number;
+  monthly_estimate_cents: number;
+  revenue_target_date: string | null;
+  revenue_milestones: WorkProjectRevenueMilestone[];
   name: string;
   description: string;
   status: "planned" | "active" | "paused" | "done" | "archived";
@@ -344,11 +352,29 @@ export type WorkProject = {
 
 export type WorkProjectInput = {
   id?: number | null;
+  customer_id?: number | null;
+  value_cents?: number;
+  monthly_estimate_cents?: number;
+  revenue_target_date?: string | null;
+  revenue_milestones?: WorkProjectRevenueMilestoneInput[];
   name: string;
   description?: string;
   status?: "planned" | "active" | "paused" | "done" | "archived";
   start_date?: string | null;
   target_date?: string | null;
+};
+
+export type WorkProjectRevenueMilestone = {
+  id: number;
+  amount_cents: number;
+  target_month: string;
+};
+
+export type WorkProjectRevenueMilestoneInput = {
+  id?: number | null;
+  amount_cents: number;
+  /** Mes objetivo en formato YYYY-MM. */
+  target_month: string;
 };
 export type WorkItem = {
   id: number;

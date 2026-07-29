@@ -5,6 +5,7 @@
 import type { Company, CompanyMember, UserRole } from "../types";
 
 export const DEFAULT_COMPANY_CODE = "SHOP";
+export const PROJECT_COMPANY_CODE = "DEV";
 
 export function seedCompanies(createdAt: string): Company[] {
   return [

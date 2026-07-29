@@ -14,7 +14,11 @@
     WorkStatus,
     WorkPriority,
     WorkItemType,
+    Customer,
+    CashKind,
+    CashMovement,
   } from "$lib/types";
+  import { formatEUR, parseEurosInput } from "$lib/money";
   import Button from "$lib/components/Button.svelte";
   import Card from "$lib/components/Card.svelte";
   import Badge from "$lib/components/Badge.svelte";
@@ -22,16 +26,23 @@
   import Select from "$lib/components/Select.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
 
-  const projectId = $derived(Number($page.params.id));
+  const projectReference = $derived($page.params.id);
 
   let project = $state<WorkProject | null>(null);
+  const projectId = $derived(project?.id ?? 0);
   let tasks = $state<WorkItem[]>([]);
   let categories = $state<WorkCategory[]>([]);
   let members = $state<WorkMember[]>([]);
   let projectsList = $state<WorkProject[]>([]);
+  let customers = $state<Customer[]>([]);
+  let cashMovements = $state<CashMovement[]>([]);
   let loading = $state(true);
 
   let viewMode = $state<"lista" | "kanban">("lista");
+  let draggedTaskId = $state<number | null>(null);
+  let dragOverStatus = $state<WorkStatus | null>(null);
+  let suppressTaskClick = $state(false);
+  let statusUpdatingTaskId = $state<number | null>(null);
 
   // Quick Capture State
   let quickTitle = $state("");
@@ -51,8 +62,18 @@
     name: "",
     description: "",
     status: "active" as WorkProject["status"],
+    customer_id: "",
+    value: "",
+    milestones: [] as { id?: number; amount: string; target_month: string }[],
     start_date: "",
     target_date: "",
+  });
+  let cashModalOpen = $state(false);
+  let cashSaving = $state(false);
+  let cashForm = $state({
+    kind: "income" as CashKind,
+    amount: "",
+    description: "",
   });
 
   // Task Detail Modal State
@@ -129,6 +150,33 @@
     { value: "archived", label: "Archivado" },
   ];
 
+  const today = new Date();
+  const currentMonth = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
+  const availableMilestoneMonths = 36 - today.getMonth();
+  const milestoneMonthOptions = Array.from({ length: availableMilestoneMonths }, (_, index) => {
+    const date = new Date(today.getFullYear(), today.getMonth() + index, 1);
+    return {
+      value: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`,
+      label: date.toLocaleDateString("es-ES", { month: "long", year: "numeric" }),
+    };
+  });
+
+  const customerOptions = $derived([
+    { value: "", label: "Proyecto propio (sin cliente)" },
+    ...customers.map((customer) => ({
+      value: String(customer.id),
+      label: customer.name,
+      hint: customer.nif || customer.email || undefined,
+    })),
+  ]);
+
+  const projectCustomer = $derived.by(() => {
+    const customerId = project?.customer_id;
+    return customerId
+      ? customers.find((customer) => customer.id === customerId) ?? null
+      : null;
+  });
+
   const kanbanColumns: { status: WorkStatus; label: string; tone: "neutral" | "ok" | "warn" | "danger" | "ai" }[] = [
     { status: "inbox", label: "Inbox", tone: "neutral" },
     { status: "planned", label: "Planificado", tone: "warn" },
@@ -158,21 +206,28 @@
   ]);
 
   async function loadData() {
-    if (!projectId || Number.isNaN(projectId)) return;
+    if (!projectReference) return;
     loading = true;
     try {
-      const [p, itemsList, catList, memList, pList] = await Promise.all([
-        api.getWorkProject(projectId),
-        api.listWorkItems({ project_id: projectId }),
+      const p = await api.getWorkProject(projectReference);
+      const [itemsList, catList, memList, pList, customerList, movementList] = await Promise.all([
+        api.listWorkItems({ project_id: p.id }),
         api.listWorkCategories(),
         api.listWorkMembers(),
         api.listWorkProjects(),
+        api.listCustomers(),
+        api.listCashMovements(),
       ]);
       project = p;
       tasks = itemsList;
       categories = catList;
       members = memList;
       projectsList = pList;
+      customers = customerList;
+      cashMovements = movementList;
+      if (projectReference !== p.uid) {
+        await goto(`/proyectos/${p.uid}`, { replaceState: true, noScroll: true });
+      }
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Error al cargar el proyecto", "err");
     } finally {
@@ -182,7 +237,7 @@
 
   $effect(() => {
     const _cid = $session.activeCompanyId;
-    const _pid = projectId;
+    const _reference = projectReference;
     loadData();
   });
 
@@ -191,6 +246,19 @@
   const completedTasks = $derived(tasks.filter((t) => t.status === "done").length);
   const blockedTasks = $derived(tasks.filter((t) => t.status === "blocked").length);
   const progressPercent = $derived(totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0);
+  const projectCashMovements = $derived(
+    cashMovements.filter((movement) => movement.project_id === projectId),
+  );
+  const projectBilledCents = $derived(
+    projectCashMovements
+      .filter((movement) => movement.kind === "income")
+      .reduce((sum, movement) => sum + movement.amount_cents, 0),
+  );
+  const projectSpentCents = $derived(
+    projectCashMovements
+      .filter((movement) => movement.kind === "expense")
+      .reduce((sum, movement) => sum + movement.amount_cents, 0),
+  );
 
   // Filter tasks
   const filteredTasks = $derived(
@@ -326,6 +394,13 @@
       name: project.name,
       description: project.description || "",
       status: project.status,
+      customer_id: project.customer_id ? String(project.customer_id) : "",
+      value: String((project.value_cents / 100).toFixed(2)).replace(".", ","),
+      milestones: project.revenue_milestones.map((milestone) => ({
+        id: milestone.id,
+        amount: String((milestone.amount_cents / 100).toFixed(2)).replace(".", ","),
+        target_month: milestone.target_month,
+      })),
       start_date: project.start_date ? project.start_date.slice(0, 10) : "",
       target_date: project.target_date ? project.target_date.slice(0, 10) : "",
     };
@@ -344,6 +419,26 @@
         name: editProjectForm.name.trim(),
         description: editProjectForm.description.trim(),
         status: editProjectForm.status,
+        customer_id: editProjectForm.customer_id ? Number(editProjectForm.customer_id) : null,
+        value_cents: editProjectForm.customer_id
+          ? (parseEurosInput(editProjectForm.value) ?? 0)
+          : 0,
+        monthly_estimate_cents: editProjectForm.customer_id
+          ? 0
+          : editProjectForm.milestones.reduce(
+              (sum, milestone) => sum + (parseEurosInput(milestone.amount) ?? 0),
+              0,
+            ),
+        revenue_target_date: null,
+        revenue_milestones: editProjectForm.customer_id
+          ? []
+          : editProjectForm.milestones
+              .map((milestone) => ({
+                id: milestone.id,
+                amount_cents: parseEurosInput(milestone.amount) ?? 0,
+                target_month: milestone.target_month,
+              }))
+              .filter((milestone) => milestone.amount_cents > 0 && milestone.target_month),
         start_date: editProjectForm.start_date || null,
         target_date: editProjectForm.target_date || null,
       });
@@ -366,6 +461,58 @@
       goto("/proyectos");
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Error al archivar proyecto", "err");
+    }
+  }
+
+  function addEditMilestone() {
+    editProjectForm.milestones = [
+      ...editProjectForm.milestones,
+      { amount: "", target_month: currentMonth },
+    ];
+  }
+
+  function removeEditMilestone(index: number) {
+    editProjectForm.milestones = editProjectForm.milestones.filter(
+      (_, itemIndex) => itemIndex !== index,
+    );
+  }
+
+  function openCashModal(kind: CashKind) {
+    if (!project?.customer_id) {
+      showToast("Los proyectos propios no admiten movimientos de pago", "err");
+      return;
+    }
+    cashForm = { kind, amount: "", description: "" };
+    cashModalOpen = true;
+  }
+
+  async function saveProjectMovement() {
+    if (!project) return;
+    const amountCents = parseEurosInput(cashForm.amount);
+    if (amountCents === null || amountCents <= 0) {
+      showToast("Introduce un importe válido", "err");
+      return;
+    }
+    if (!cashForm.description.trim()) {
+      showToast("Indica el concepto del movimiento", "err");
+      return;
+    }
+    cashSaving = true;
+    try {
+      await api.createCashMovement({
+        project_id: project.id,
+        kind: cashForm.kind,
+        amount_cents: amountCents,
+        category: cashForm.kind === "income" ? "facturacion_proyecto" : "gasto_proyecto",
+        description: `[${project.name}] ${cashForm.description.trim()}`,
+      });
+      cashModalOpen = false;
+      showToast(cashForm.kind === "income" ? "Facturación registrada" : "Gasto registrado");
+      await loadData();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Error al registrar el movimiento", "err");
+    } finally {
+      cashSaving = false;
     }
   }
 
@@ -449,6 +596,12 @@
 
   // Change status directly in Kanban
   async function updateTaskStatus(task: WorkItem, newStatus: WorkStatus) {
+    if (task.status === newStatus || statusUpdatingTaskId === task.id) return;
+    const previousStatus = task.status;
+    statusUpdatingTaskId = task.id;
+    tasks = tasks.map((item) =>
+      item.id === task.id ? { ...item, status: newStatus } : item,
+    );
     try {
       await api.upsertWorkItem({
         id: task.id,
@@ -456,10 +609,47 @@
         status: newStatus,
       });
       showToast(`Estado actualizado a ${taskStatusLabel(newStatus)}`);
-      await loadData();
     } catch (err) {
+      tasks = tasks.map((item) =>
+        item.id === task.id ? { ...item, status: previousStatus } : item,
+      );
       showToast(err instanceof Error ? err.message : "Error al actualizar estado", "err");
+    } finally {
+      statusUpdatingTaskId = null;
     }
+  }
+
+  function handleTaskDragStart(event: DragEvent, task: WorkItem) {
+    if (!event.dataTransfer || statusUpdatingTaskId === task.id) return;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", String(task.id));
+    draggedTaskId = task.id;
+    suppressTaskClick = true;
+  }
+
+  function handleTaskDragEnd() {
+    draggedTaskId = null;
+    dragOverStatus = null;
+    setTimeout(() => {
+      suppressTaskClick = false;
+    }, 0);
+  }
+
+  function handleColumnDragOver(event: DragEvent, status: WorkStatus) {
+    if (draggedTaskId === null) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    dragOverStatus = status;
+  }
+
+  function handleTaskDrop(event: DragEvent, status: WorkStatus) {
+    event.preventDefault();
+    const transferredId = Number(event.dataTransfer?.getData("text/plain"));
+    const taskId = draggedTaskId ?? (Number.isFinite(transferredId) ? transferredId : null);
+    const task = tasks.find((item) => item.id === taskId);
+    draggedTaskId = null;
+    dragOverStatus = null;
+    if (task) void updateTaskStatus(task, status);
   }
 </script>
 
@@ -518,6 +708,12 @@
           {/if}
 
           <div class="flex flex-wrap items-center gap-6 text-xs text-[var(--color-muted-dim)]">
+            <span>
+              Cliente:
+              <strong class="text-[var(--color-text)]">
+                {projectCustomer?.name ?? "Proyecto propio"}
+              </strong>
+            </span>
             {#if project.start_date}
               <span>Inicio: <strong class="text-[var(--color-text)]">{formatDate(project.start_date)}</strong></span>
             {/if}
@@ -547,6 +743,66 @@
           </div>
         </div>
       </div>
+    </Card>
+
+    <Card lift={false} class="mb-6 border border-[var(--color-border-strong)] p-5">
+      <div class="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p class="section-label mb-1">ECONOMÍA DEL PROYECTO</p>
+          <p class="text-xs text-[var(--color-muted-dim)]">
+            {project.customer_id
+              ? "Valor contratado, facturación y costes registrados."
+              : "Objetivo económico estimado para este proyecto propio."}
+          </p>
+        </div>
+        {#if project.customer_id}
+          <div class="flex gap-2">
+            <Button variant="secondary" onclick={() => openCashModal("expense")}>− Registrar gasto</Button>
+            <Button variant="primary" onclick={() => openCashModal("income")}>+ Registrar factura</Button>
+          </div>
+        {/if}
+      </div>
+      {#if project.customer_id}
+        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div class="rounded-xl border border-purple-400/20 bg-purple-500/[0.06] p-3">
+            <p class="text-xs text-[var(--color-muted)]">Valor contratado</p>
+            <p class="mt-1 text-xl font-semibold text-radiant">{formatEUR(project.value_cents)}</p>
+          </div>
+          <div class="rounded-xl border border-emerald-400/20 bg-emerald-500/[0.06] p-3">
+            <p class="text-xs text-[var(--color-muted)]">Facturado</p>
+            <p class="mt-1 text-xl font-semibold text-emerald-300">{formatEUR(projectBilledCents)}</p>
+          </div>
+          <div class="rounded-xl border border-rose-400/20 bg-rose-500/[0.06] p-3">
+            <p class="text-xs text-[var(--color-muted)]">Gastado</p>
+            <p class="mt-1 text-xl font-semibold text-rose-300">{formatEUR(projectSpentCents)}</p>
+          </div>
+          <div class="rounded-xl border border-cyan-400/20 bg-cyan-500/[0.06] p-3">
+            <p class="text-xs text-[var(--color-muted)]">Margen cobrado</p>
+            <p class="mt-1 text-xl font-semibold text-cyan-300">{formatEUR(projectBilledCents - projectSpentCents)}</p>
+          </div>
+        </div>
+      {:else}
+        <div class="rounded-xl border border-purple-400/20 bg-purple-500/[0.06] p-3">
+          <p class="text-xs text-[var(--color-muted)]">Estimación total de hitos</p>
+          <p class="mt-1 text-xl font-semibold text-radiant">
+            {formatEUR(project.revenue_milestones.reduce((sum, milestone) => sum + milestone.amount_cents, 0))}
+          </p>
+        </div>
+        {#if project.revenue_milestones.length > 0}
+          <div class="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {#each project.revenue_milestones as milestone (milestone.id)}
+              <div class="rounded-xl border border-[var(--color-border)] bg-black/20 p-3">
+                <p class="text-xs text-[var(--color-muted-dim)]">
+                  {new Date(`${milestone.target_month}-01T12:00:00`).toLocaleDateString("es-ES", { month: "long", year: "numeric" })}
+                </p>
+                <p class="mt-1 text-lg font-semibold text-cyan-300">{formatEUR(milestone.amount_cents)}</p>
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <p class="mt-3 text-xs text-[var(--color-muted-dim)]">No hay hitos económicos definidos.</p>
+        {/if}
+      {/if}
     </Card>
 
     <!-- Quick Capture Form for this Project -->
@@ -695,10 +951,22 @@
       </Card>
     {:else}
       <!-- Kanban Board View -->
-      <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-5 items-start">
+      <div>
+        <p class="mb-3 text-xs text-[var(--color-muted-dim)]">
+          Arrastra las tareas entre columnas para cambiar su estado.
+        </p>
+        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-5 items-start">
         {#each kanbanColumns as col}
           {@const colTasks = filteredTasks.filter((t) => t.status === col.status)}
-          <div class="rounded-2xl border border-[var(--color-border)] bg-black/20 p-3 flex flex-col min-h-[300px]">
+          <div
+            role="group"
+            aria-label={`Columna ${col.label}`}
+            class="rounded-2xl border p-3 flex flex-col min-h-[300px] transition-all {dragOverStatus === col.status
+              ? 'border-[var(--color-purple-bright)] bg-purple-500/10 ring-2 ring-purple-400/20'
+              : 'border-[var(--color-border)] bg-black/20'}"
+            ondragover={(event) => handleColumnDragOver(event, col.status)}
+            ondrop={(event) => handleTaskDrop(event, col.status)}
+          >
             <!-- Column Header -->
             <div class="flex items-center justify-between mb-3 px-1 pb-2 border-b border-[var(--color-border-soft)]">
               <div class="flex items-center gap-2">
@@ -712,8 +980,16 @@
               {#each colTasks as task (task.id)}
                 <Card
                   lift={true}
-                  class="cursor-pointer border border-[var(--color-border-soft)] p-3 hover:border-[var(--color-border-strong)] transition-all"
-                  onclick={() => openEditTaskModal(task)}
+                  draggable={statusUpdatingTaskId !== task.id}
+                  aria-label={`Arrastrar tarea ${task.title}`}
+                  class="cursor-grab active:cursor-grabbing border border-[var(--color-border-soft)] p-3 hover:border-[var(--color-border-strong)] transition-all select-none {draggedTaskId === task.id
+                    ? 'opacity-40 scale-[0.98]'
+                    : ''} {statusUpdatingTaskId === task.id ? 'opacity-60 cursor-wait' : ''}"
+                  onclick={() => {
+                    if (!suppressTaskClick) openEditTaskModal(task);
+                  }}
+                  ondragstart={(event) => handleTaskDragStart(event, task)}
+                  ondragend={handleTaskDragEnd}
                 >
                   <div class="space-y-2">
                     <div class="flex items-start justify-between gap-1">
@@ -751,12 +1027,13 @@
               {/each}
               {#if colTasks.length === 0}
                 <div class="py-8 text-center text-xs italic text-[var(--color-muted-dim)]">
-                  Sin tareas
+                  {dragOverStatus === col.status ? "Suelta aquí" : "Sin tareas"}
                 </div>
               {/if}
             </div>
           </div>
         {/each}
+        </div>
       </div>
     {/if}
   {/if}
@@ -802,6 +1079,44 @@
       bind:value={editProjectForm.status}
     />
 
+    <Select
+      label="Cliente"
+      options={customerOptions}
+      bind:value={editProjectForm.customer_id}
+      placeholder="Proyecto propio (sin cliente)"
+    />
+
+    {#if editProjectForm.customer_id}
+      <div class="space-y-1">
+        <label for="edit-project-value" class="text-xs font-medium text-[var(--color-muted)]">Valor contratado (€)</label>
+        <input id="edit-project-value" type="text" inputmode="decimal" bind:value={editProjectForm.value} placeholder="0,00" class="field w-full text-sm" />
+      </div>
+    {:else}
+      <div class="space-y-3 rounded-xl border border-[var(--color-border)] p-3">
+        <div class="flex items-center justify-between gap-3">
+          <div>
+            <p class="text-xs font-medium text-[var(--color-text)]">Hitos mensuales</p>
+            <p class="text-[11px] text-[var(--color-muted-dim)]">Importe estimado y mes/año objetivo.</p>
+          </div>
+          <Button type="button" variant="secondary" onclick={addEditMilestone}>+ Añadir hito</Button>
+        </div>
+        {#each editProjectForm.milestones as milestone, index}
+          <div class="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+            <input class="field w-full text-sm" inputmode="decimal" bind:value={milestone.amount} placeholder="Importe (€)" />
+            <Select
+              options={milestoneMonthOptions}
+              bind:value={milestone.target_month}
+              placeholder="Mes y año"
+            />
+            <Button type="button" variant="ghost" onclick={() => removeEditMilestone(index)}>Eliminar</Button>
+          </div>
+        {/each}
+        {#if editProjectForm.milestones.length === 0}
+          <p class="text-xs text-[var(--color-muted-dim)]">Todavía no hay hitos económicos.</p>
+        {/if}
+      </div>
+    {/if}
+
     <div class="grid gap-3 sm:grid-cols-2">
       <div class="space-y-1">
         <label for="edit-project-start" class="text-xs font-medium text-[var(--color-muted)]">Fecha de inicio</label>
@@ -829,6 +1144,36 @@
       </Button>
       <Button variant="primary" type="submit" disabled={editProjectSaving}>
         Guardar cambios
+      </Button>
+    </div>
+  </form>
+</Modal>
+
+<Modal
+  open={cashModalOpen}
+  title={cashForm.kind === "income" ? "Registrar facturación" : "Registrar gasto"}
+  onclose={() => (cashModalOpen = false)}
+>
+  <form
+    class="space-y-4"
+    onsubmit={(event) => {
+      event.preventDefault();
+      saveProjectMovement();
+    }}
+  >
+    <div class="space-y-1">
+      <label for="project-cash-amount" class="text-xs font-medium text-[var(--color-muted)]">Importe (€)</label>
+      <input id="project-cash-amount" class="field w-full" inputmode="decimal" bind:value={cashForm.amount} placeholder="0,00" required />
+    </div>
+    <div class="space-y-1">
+      <label for="project-cash-description" class="text-xs font-medium text-[var(--color-muted)]">Concepto</label>
+      <input id="project-cash-description" class="field w-full" bind:value={cashForm.description} placeholder="Factura, proveedor, materiales…" required />
+    </div>
+    <p class="text-xs text-[var(--color-muted-dim)]">Este movimiento también quedará reflejado en Caja.</p>
+    <div class="flex justify-end gap-2">
+      <Button variant="ghost" type="button" onclick={() => (cashModalOpen = false)}>Cancelar</Button>
+      <Button variant="primary" type="submit" disabled={cashSaving}>
+        {cashSaving ? "Registrando…" : "Registrar"}
       </Button>
     </div>
   </form>

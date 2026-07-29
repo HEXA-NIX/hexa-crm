@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { page } from "$app/stores";
   import { api } from "$lib/api/client";
-  import type { Customer, Sale } from "$lib/types";
+  import type { Customer, Sale, WorkItem, WorkProject } from "$lib/types";
   import Button from "$lib/components/Button.svelte";
   import Card from "$lib/components/Card.svelte";
   import Input from "$lib/components/Input.svelte";
@@ -12,12 +12,17 @@
   import { customerMetrics } from "$lib/customers/metrics";
   import { formatEUR } from "$lib/money";
   import Badge from "$lib/components/Badge.svelte";
+  import { activeCompany } from "$lib/stores/session";
+  import { PROJECT_COMPANY_CODE } from "$lib/company/context";
 
   let customers = $state<Customer[]>([]);
   let query = $state("");
   let loading = $state(true);
   let open = $state(false);
   let sales = $state<Sale[]>([]);
+  let projects = $state<WorkProject[]>([]);
+  let workItems = $state<WorkItem[]>([]);
+  const isDevCompany = $derived($activeCompany?.code === PROJECT_COMPANY_CODE);
 
   const filtered = $derived(
     customers.filter((c) => {
@@ -38,7 +43,18 @@
   async function load() {
     loading = true;
     try {
-      [customers, sales] = await Promise.all([api.listCustomers(), api.listSales()]);
+      customers = await api.listCustomers();
+      if (isDevCompany) {
+        [projects, workItems] = await Promise.all([
+          api.listWorkProjects(),
+          api.listWorkItems(),
+        ]);
+        sales = [];
+      } else {
+        sales = await api.listSales();
+        projects = [];
+        workItems = [];
+      }
     } catch (e) {
       showToast(e instanceof Error ? e.message : "Error", "err");
     } finally {
@@ -94,8 +110,12 @@
 <div class="workspace-intro workspace-intro-compact">
   <p class="workspace-index">05 / CLIENTES</p>
   <div class="workspace-intro-row">
-    <h2>Personas, no<br /><em>solo tickets.</em></h2>
-    <p>Historial, valor y contexto para cuidar cada relación comercial.</p>
+    <h2>Personas, no<br /><em>{isDevCompany ? "solo proyectos." : "solo tickets."}</em></h2>
+    <p>
+      {isDevCompany
+        ? "Proyectos, valor contratado y progreso de cada relación."
+        : "Historial, valor y contexto para cuidar cada relación comercial."}
+    </p>
   </div>
 </div>
 
@@ -111,7 +131,7 @@
 {#if loading}
   <div class="skeleton h-48"></div>
 {:else if customers.length === 0}
-  <EmptyState title="Sin clientes" description="Añade clientes para asociarlos a las ventas.">
+  <EmptyState title="Sin clientes" description={isDevCompany ? "Añade clientes para asociarlos a proyectos." : "Añade clientes para asociarlos a las ventas."}>
     <Button onclick={openCreate}>Crear cliente</Button>
   </EmptyState>
 {:else if filtered.length === 0}
@@ -121,6 +141,8 @@
     {#each filtered as c}
       {@const metric = metrics[c.id]}
       {@const recentSales = sales.filter((sale) => sale.customer_id === c.id && sale.status !== "cancelled").sort((a, b) => b.sold_at.localeCompare(a.sold_at)).slice(0, 3)}
+      {@const customerProjects = projects.filter((project) => project.customer_id === c.id && project.status !== "archived")}
+      {@const customerProjectValue = customerProjects.reduce((sum, project) => sum + project.value_cents, 0)}
       <Card>
         <div class="flex items-start justify-between gap-2">
           <div>
@@ -136,12 +158,32 @@
           {#if c.phone}<p>{c.phone}</p>{/if}
           {#if c.notes}<p class="text-xs text-[var(--color-muted-dim)]">{c.notes}</p>{/if}
         </div>
-        <div class="mt-4 grid grid-cols-2 gap-2 rounded-xl border border-[var(--color-border)] bg-black/20 p-2.5 text-xs">
-          <div><p class="text-[var(--color-muted-dim)]">Valor total</p><p class="mt-0.5 font-medium tabular text-[var(--color-text)]">{formatEUR(metric?.lifetime_cents ?? 0)}</p></div>
-          <div><p class="text-[var(--color-muted-dim)]">Última compra</p><p class="mt-0.5 text-[var(--color-text)]">{metric?.last_purchase_at ? new Date(metric.last_purchase_at).toLocaleDateString("es-ES") : "—"}</p></div>
-          <div><p class="text-[var(--color-muted-dim)]">Frecuencia</p><p class="mt-0.5 text-[var(--color-text)]">{metric?.purchase_count ?? 0} tickets</p></div>
-          <div class="flex items-end"><Badge tone={metric?.segment === "vip" ? "ai" : metric?.segment === "en_riesgo" ? "warn" : "ok"}>{metric?.segment?.replace("_", " ") ?? "nuevo"}</Badge></div>
-        </div>
+        {#if isDevCompany}
+          <div class="mt-4 grid grid-cols-2 gap-2 rounded-xl border border-[var(--color-border)] bg-black/20 p-2.5 text-xs">
+            <div><p class="text-[var(--color-muted-dim)]">Valor contratado</p><p class="mt-0.5 font-medium tabular text-[var(--color-text)]">{formatEUR(customerProjectValue)}</p></div>
+            <div><p class="text-[var(--color-muted-dim)]">Proyectos</p><p class="mt-0.5 text-[var(--color-text)]">{customerProjects.length}</p></div>
+          </div>
+          {#if customerProjects.length}
+            <div class="mt-3 border-t border-[var(--color-border-soft)] pt-3 text-xs">
+              <p class="mb-1 text-[var(--color-muted-dim)]">Proyectos asociados</p>
+              {#each customerProjects.slice(0, 3) as project (project.id)}
+                {@const projectTasks = workItems.filter((item) => item.project_id === project.id)}
+                {@const progress = projectTasks.length ? Math.round((projectTasks.filter((item) => item.status === "done").length / projectTasks.length) * 100) : 0}
+                <a href="/proyectos/{project.uid}" class="flex justify-between gap-2 py-1 text-[var(--color-muted)] hover:text-[var(--color-purple-bright)]">
+                  <span class="truncate">{project.name}</span>
+                  <span>{progress}% · {formatEUR(project.value_cents)}</span>
+                </a>
+              {/each}
+            </div>
+          {/if}
+          <a href="/proyectos" class="mt-3 inline-flex min-h-11 items-center text-sm font-medium text-radiant hover:underline">Gestionar proyectos del cliente →</a>
+        {:else}
+          <div class="mt-4 grid grid-cols-2 gap-2 rounded-xl border border-[var(--color-border)] bg-black/20 p-2.5 text-xs">
+            <div><p class="text-[var(--color-muted-dim)]">Valor total</p><p class="mt-0.5 font-medium tabular text-[var(--color-text)]">{formatEUR(metric?.lifetime_cents ?? 0)}</p></div>
+            <div><p class="text-[var(--color-muted-dim)]">Última compra</p><p class="mt-0.5 text-[var(--color-text)]">{metric?.last_purchase_at ? new Date(metric.last_purchase_at).toLocaleDateString("es-ES") : "—"}</p></div>
+            <div><p class="text-[var(--color-muted-dim)]">Frecuencia</p><p class="mt-0.5 text-[var(--color-text)]">{metric?.purchase_count ?? 0} tickets</p></div>
+            <div class="flex items-end"><Badge tone={metric?.segment === "vip" ? "ai" : metric?.segment === "en_riesgo" ? "warn" : "ok"}>{metric?.segment?.replace("_", " ") ?? "nuevo"}</Badge></div>
+          </div>
         {#if recentSales.length}
           <div class="mt-3 border-t border-[var(--color-border-soft)] pt-3 text-xs">
             <p class="mb-1 text-[var(--color-muted-dim)]">Últimas compras</p>
@@ -151,6 +193,7 @@
           </div>
         {/if}
         <a href={`/ventas?nuevo=1&customerId=${c.id}`} class="mt-3 inline-flex min-h-11 items-center text-sm font-medium text-radiant hover:underline">Nueva venta para este cliente →</a>
+        {/if}
       </Card>
     {/each}
   </div>
