@@ -216,10 +216,10 @@ fn migrate(conn: &Connection) -> Result<(), String> {
 }
 
 fn hash_pin(pin: &str) -> Result<String, String> {
-    use rand::RngCore;
+    use rand::RngExt;
     use sha2::{Digest, Sha256};
     let mut salt = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut salt);
+    rand::rng().fill(&mut salt);
     let salt_hex = hex::encode(salt);
     let mut hasher = Sha256::new();
     hasher.update(format!("{salt_hex}:{pin}").as_bytes());
@@ -245,12 +245,12 @@ pub const TEMP_PASSWORD_LENGTH: usize = 14;
 pub const TEMP_PASSWORD_TTL_SECS: i64 = 24 * 60 * 60;
 
 pub fn generate_temp_password() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     (0..TEMP_PASSWORD_LENGTH)
         .map(|_| {
-            let idx = rng.gen_range(0..CHARSET.len());
+            let idx = rng.random_range(0..CHARSET.len());
             CHARSET[idx] as char
         })
         .collect()

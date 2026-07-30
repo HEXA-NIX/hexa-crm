@@ -1,0 +1,11 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "hexa-crm-cloudflare",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-30",
+  "vars": { "DATA_BACKEND": "d1" },
+  "assets": { "directory": "../../build", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*"] },
+  "routes": [{ "pattern": "crm.nix-0.com", "custom_domain": true }],
+  "d1_databases": [{ "binding": "DB", "database_name": "hexa-crm", "database_id": "6b0b92b5-ffb5-4306-952b-d0812cec39f9", "migrations_dir": "migrations" }],
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}
