@@ -22,6 +22,7 @@
   import { dashboardHealth } from "$lib/dashboard/health";
   import { activeCompany, session } from "$lib/stores/session";
   import { PROJECT_COMPANY_CODE } from "$lib/company/context";
+  import { buildProjectRevenueProjection } from "$lib/projects/revenue-projection";
 
   let stats = $state<DashboardStats | null>(null);
   let sales = $state<Sale[]>([]);
@@ -159,18 +160,6 @@
       .filter((project) => project.customer_id != null && project.status !== "archived")
       .reduce((sum, project) => sum + project.value_cents, 0),
   );
-  const ownMonthlyEstimateCents = $derived(
-    devProjects
-      .filter((project) => project.customer_id == null && project.status !== "archived")
-      .reduce(
-        (sum, project) =>
-          sum + project.revenue_milestones.reduce(
-            (projectSum, milestone) => projectSum + milestone.amount_cents,
-            0,
-          ),
-        0,
-      ),
-  );
   const billedProjectCents = $derived(
     devCashMovements
       .filter((movement) => movement.project_id != null && movement.kind === "income")
@@ -180,6 +169,21 @@
     devCashMovements
       .filter((movement) => movement.project_id != null && movement.kind === "expense")
       .reduce((sum, movement) => sum + movement.amount_cents, 0),
+  );
+  const projectRevenueProjection = $derived(
+    buildProjectRevenueProjection(devProjects, devCashMovements),
+  );
+  const projectRevenueChartMax = $derived(
+    Math.max(
+      ...projectRevenueProjection.flatMap((month) => [
+        month.income_cents,
+        month.projection_cents,
+      ]),
+      1,
+    ),
+  );
+  const currentRevenueProjection = $derived(
+    projectRevenueProjection.find((month) => month.is_current),
   );
   const upcomingDevTasks = $derived(
     openDevTasks
@@ -236,7 +240,7 @@
         <KpiCard label="Facturado" value={formatEUR(billedProjectCents)} hint={`${openDevTasks.length} tareas abiertas`} icon="€" accent="emerald" />
         <KpiCard label="Gastado" value={formatEUR(spentProjectCents)} hint={`${blockedDevTasks.length} tareas bloqueadas`} icon="−" accent="amber" />
         <KpiCard label="Margen facturado" value={formatEUR(billedProjectCents - spentProjectCents)} hint={`${devCustomers.length} clientes`} icon="◇" accent="cyan" />
-        <KpiCard label="Hitos propios" value={formatEUR(ownMonthlyEstimateCents)} hint="Estimaciones por mes/año" icon="↗" accent="violet" />
+        <KpiCard label="Proyección propia" value={formatEUR(currentRevenueProjection?.projection_cents ?? 0)} hint="Estimación mensual vigente" icon="↗" accent="violet" />
       </div>
 
       {#if devProjects.length === 0}
@@ -246,6 +250,103 @@
           <a href="/proyectos" class="mt-3 inline-block text-sm text-radiant hover:underline">Crear proyecto →</a>
         </Card>
       {/if}
+
+      <Card class="mt-4 overflow-hidden" lift={false}>
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h2 class="section-label !normal-case !tracking-wide !text-sm">Ingresos y proyección propia</h2>
+            <p class="mt-1 max-w-2xl text-xs text-[var(--color-muted)]">
+              Los hitos de cada proyecto propio se mantienen mes a mes hasta que un nuevo hito cambia la estimación.
+            </p>
+          </div>
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px]">
+            <span class="inline-flex items-center gap-1.5 text-[var(--color-muted)]">
+              <span class="h-2.5 w-2.5 rounded-sm bg-emerald-400"></span>
+              Ingresos reales
+            </span>
+            <span class="inline-flex items-center gap-1.5 text-[var(--color-muted)]">
+              <span class="h-2.5 w-2.5 rounded-sm bg-gradient-to-t from-purple-600 to-violet-300"></span>
+              Hitos propios
+            </span>
+          </div>
+        </div>
+
+        <div class="mt-4 grid gap-3 sm:grid-cols-2">
+          <div class="rounded-xl border border-[var(--color-border)] bg-black/20 px-3 py-2.5">
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Ingresos este mes</p>
+            <p class="mt-1 text-lg font-semibold tabular text-emerald-300">
+              {formatEUR(currentRevenueProjection?.income_cents ?? 0)}
+            </p>
+          </div>
+          <div class="rounded-xl border border-purple-400/20 bg-purple-500/[0.07] px-3 py-2.5">
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Proyección propia este mes</p>
+            <p class="mt-1 text-lg font-semibold tabular text-[var(--color-purple-bright)]">
+              {formatEUR(currentRevenueProjection?.projection_cents ?? 0)}
+            </p>
+          </div>
+        </div>
+
+        <div class="mt-5 overflow-x-auto pb-1">
+          <div class="flex h-56 min-w-[780px]" aria-label="Gráfica mensual de ingresos reales y proyección de hitos propios">
+            <div class="flex w-20 shrink-0 flex-col justify-between pb-9 pr-3 text-right">
+              {#each [1, 0.75, 0.5, 0.25, 0] as ratio}
+                <span class="text-[10px] tabular text-[var(--color-muted-dim)]">
+                  {formatEUR(Math.round(projectRevenueChartMax * ratio))}
+                </span>
+              {/each}
+            </div>
+
+            <div class="relative min-w-0 flex-1">
+              <div class="pointer-events-none absolute inset-x-0 top-0 flex h-[calc(100%-2.25rem)] flex-col justify-between">
+                {#each [1, 0.75, 0.5, 0.25, 0] as _}
+                  <span class="block border-t border-[var(--color-border-soft)]"></span>
+                {/each}
+              </div>
+
+              <div class="relative z-10 grid h-full grid-cols-12 gap-2 px-1">
+                {#each projectRevenueProjection as month (month.month)}
+                  <div class="group relative flex min-w-0 flex-col items-center">
+                    <div class="pointer-events-none absolute left-1/2 top-1 z-30 hidden w-44 -translate-x-1/2 rounded-lg border border-[var(--color-border-strong)] bg-[var(--color-obsidian-elevated)] p-2.5 text-left shadow-xl group-hover:block">
+                      <p class="text-[10px] font-bold uppercase tracking-wide text-[var(--color-purple-bright)]">
+                        {new Date(`${month.month}-01T12:00:00`).toLocaleDateString("es-ES", { month: "long", year: "numeric" })}
+                      </p>
+                      <div class="mt-2 space-y-1">
+                        <p class="flex items-center justify-between gap-2 text-[11px] text-[var(--color-muted)]">
+                          <span>Ingresos</span>
+                          <strong class="tabular text-emerald-300">{formatEUR(month.income_cents)}</strong>
+                        </p>
+                        <p class="flex items-center justify-between gap-2 text-[11px] text-[var(--color-muted)]">
+                          <span>Hitos propios</span>
+                          <strong class="tabular text-[var(--color-purple-bright)]">{formatEUR(month.projection_cents)}</strong>
+                        </p>
+                      </div>
+                    </div>
+
+                    <div class="flex min-h-0 flex-1 items-end gap-1">
+                      <div
+                        class="w-3 rounded-t-sm bg-emerald-400/90 transition-[height] duration-300 group-hover:bg-emerald-300"
+                        style={`height: ${month.income_cents ? Math.max(4, Math.round((month.income_cents / projectRevenueChartMax) * 150)) : 0}px`}
+                      ></div>
+                      <div
+                        class="w-3 rounded-t-sm bg-gradient-to-t from-purple-600 to-violet-300 transition-[height] duration-300 group-hover:from-purple-500 group-hover:to-violet-200"
+                        style={`height: ${month.projection_cents ? Math.max(4, Math.round((month.projection_cents / projectRevenueChartMax) * 150)) : 0}px`}
+                      ></div>
+                    </div>
+                    <div class="mt-2 flex h-8 flex-col items-center">
+                      <span class="text-[10px] font-medium uppercase {month.is_current ? 'text-[var(--color-purple-bright)]' : 'text-[var(--color-muted-dim)]'}">
+                        {month.label}
+                      </span>
+                      {#if month.is_current}
+                        <span class="mt-0.5 h-1 w-1 rounded-full bg-[var(--color-purple-bright)]"></span>
+                      {/if}
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          </div>
+        </div>
+      </Card>
 
       <div class="mt-4 grid gap-4 lg:grid-cols-3">
         <Card class="lg:col-span-2" lift={false}>

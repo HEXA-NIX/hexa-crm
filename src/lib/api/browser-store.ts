@@ -44,6 +44,7 @@ import type {
   WorkMember,
   WorkProject,
   WorkProjectInput,
+  WorkStatus,
 } from "../types";
 import {
   PLUGIN_CATALOG,
@@ -399,6 +400,7 @@ function load(): Store {
     if (!memoryStore.workProjects) memoryStore.workProjects = [];
     else memoryStore.workProjects = memoryStore.workProjects.map(normalizeWorkProject);
     if (!memoryStore.workItems) memoryStore.workItems = [];
+    else memoryStore.workItems = memoryStore.workItems.map((item) => ({ ...item, parent_id: item.parent_id ?? null }));
     if (!memoryStore.tenantPlugins) memoryStore.tenantPlugins = [];
     if (!memoryStore.pluginAuditLogs) memoryStore.pluginAuditLogs = [];
     if (memoryStore.seq.warehouse == null) memoryStore.seq.warehouse = 0;
@@ -443,6 +445,7 @@ function load(): Store {
     if (!parsed.workProjects) parsed.workProjects = [];
     else parsed.workProjects = parsed.workProjects.map(normalizeWorkProject);
     if (!parsed.workItems) parsed.workItems = [];
+    else parsed.workItems = parsed.workItems.map((item) => ({ ...item, parent_id: item.parent_id ?? null }));
     if (!parsed.tenantPlugins) parsed.tenantPlugins = [];
     if (!parsed.pluginAuditLogs) parsed.pluginAuditLogs = [];
     if (!parsed.seq) {
@@ -758,11 +761,43 @@ function populateWorkItem(item: WorkItem, s: Store): WorkItem {
       : null;
   const assignee =
     item.assignee_id != null ? s.users.find((u) => u.id === item.assignee_id) : null;
+  const parent =
+    item.parent_id != null ? s.workItems.find((candidate) => candidate.id === item.parent_id) : null;
   return {
     ...item,
+    parent_id: item.parent_id ?? null,
     category: category ? { ...category } : null,
     assignee_name: assignee ? assignee.display_name : null,
+    parent_title: parent?.title ?? null,
   };
+}
+
+function syncWorkItemParent(s: Store, child: WorkItem, timestamp: string) {
+  if (child.parent_id == null) return;
+  const parent = s.workItems.find(
+    (item) => item.id === child.parent_id && item.company_id === child.company_id,
+  );
+  if (!parent) return;
+  const children = s.workItems.filter(
+    (item) =>
+      item.parent_id === parent.id &&
+      item.company_id === parent.company_id &&
+      item.status !== "archived",
+  );
+  if (children.length === 0) return;
+  const nextStatus: WorkStatus = children.every((item) => item.status === "done")
+    ? "done"
+    : children.some((item) => item.status === "blocked")
+      ? "blocked"
+      : children.some((item) => item.status === "in_progress")
+        ? "in_progress"
+        : children.some((item) => item.status === "planned")
+          ? "planned"
+          : "inbox";
+  if (nextStatus === parent.status) return;
+  parent.status = nextStatus;
+  parent.completed_at = nextStatus === "done" ? timestamp : null;
+  parent.updated_at = timestamp;
 }
 
 function auth(s: Store, token?: string | null): AuthUser {
@@ -2382,6 +2417,19 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       if (!existingItem) throw new Error("Tarea no encontrada.");
     }
 
+    let parentId = input.parent_id !== undefined
+      ? input.parent_id
+      : (existingItem?.parent_id ?? null);
+    if (parentId != null) {
+      const parent = s.workItems.find((item) => item.id === parentId && item.company_id === companyId);
+      if (!parent) throw new Error("La tarea padre no pertenece a esta empresa.");
+      if (parent.id === input.id) throw new Error("Una tarea no puede ser su propia subtarea.");
+      if (parent.parent_id != null) throw new Error("Las subtareas no pueden tener otras subtareas.");
+      if (parent.status === "archived") throw new Error("No se pueden añadir subtareas a una tarea archivada.");
+      parentId = parent.id;
+      input = { ...input, project_id: parent.project_id };
+    }
+
     const targetStatus = input.status ?? existingItem?.status ?? "inbox";
     const sourceType = input.source_type !== undefined ? input.source_type : (existingItem?.source_type ?? null);
     const sourceKey = input.source_key !== undefined ? input.source_key : (existingItem?.source_key ?? null);
@@ -2411,6 +2459,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     let savedItem: WorkItem;
 
     if (existingItem) {
+      existingItem.parent_id = parentId;
       existingItem.category_id = categoryId;
       existingItem.project_id = input.project_id !== undefined ? input.project_id : existingItem.project_id;
       existingItem.assignee_id = input.assignee_id !== undefined ? input.assignee_id : existingItem.assignee_id;
@@ -2433,6 +2482,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       savedItem = {
         id: newItemId,
         company_id: companyId,
+        parent_id: parentId,
         category_id: categoryId,
         project_id: input.project_id ?? null,
         assignee_id: input.assignee_id ?? null,
@@ -2455,6 +2505,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       s.workItems.push(savedItem);
     }
 
+    syncWorkItemParent(s, savedItem, nowTs);
     save(s);
     return populateWorkItem(savedItem, s);
   },
@@ -2467,6 +2518,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     item.status = "archived";
     item.completed_at = null;
     item.updated_at = now();
+    syncWorkItemParent(s, item, item.updated_at);
     save(s);
     return populateWorkItem(item, s);
   },

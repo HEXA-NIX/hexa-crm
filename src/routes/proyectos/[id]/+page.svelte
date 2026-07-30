@@ -79,6 +79,7 @@
   // Task Detail Modal State
   let detailModalOpen = $state(false);
   let editingTask = $state<WorkItem | null>(null);
+  let newTaskParent = $state<WorkItem | null>(null);
   let taskSaving = $state(false);
   let detailForm = $state({
     title: "",
@@ -277,6 +278,31 @@
       return true;
     })
   );
+  function taskSubtasks(taskId: number) {
+    return tasks.filter((task) => task.parent_id === taskId && task.status !== "archived");
+  }
+
+  function hasSubtasks(taskId: number) {
+    return taskSubtasks(taskId).length > 0;
+  }
+
+  function orderedTasks(items: WorkItem[]) {
+    const visibleIds = new Set(items.map((task) => task.id));
+    const roots = items.filter((task) => task.parent_id == null);
+    const grouped = roots.flatMap((parent) => [
+      parent,
+      ...items.filter((task) => task.parent_id === parent.id),
+    ]);
+    const groupedIds = new Set(grouped.map((task) => task.id));
+    return [
+      ...grouped,
+      ...items.filter((task) => !groupedIds.has(task.id) && visibleIds.has(task.id)),
+    ];
+  }
+
+  function columnTasks(status: WorkStatus) {
+    return orderedTasks(filteredTasks.filter((task) => task.status === status));
+  }
 
   function projectStatusLabel(status?: string) {
     switch (status) {
@@ -519,6 +545,7 @@
   // Task Modal Handlers
   function openNewTaskModal() {
     editingTask = null;
+    newTaskParent = null;
     detailForm = {
       title: "",
       description: "",
@@ -534,8 +561,28 @@
     detailModalOpen = true;
   }
 
+  function openNewSubtaskModal(event: MouseEvent, parent: WorkItem) {
+    event.stopPropagation();
+    editingTask = null;
+    newTaskParent = parent;
+    detailForm = {
+      title: "",
+      description: "",
+      type: "task",
+      status: "inbox",
+      priority: parent.priority,
+      category_id: parent.category_id ? String(parent.category_id) : "",
+      project_id: String(parent.project_id ?? projectId),
+      assignee_id: parent.assignee_id ? String(parent.assignee_id) : "",
+      start_date: "",
+      due_date: "",
+    };
+    detailModalOpen = true;
+  }
+
   function openEditTaskModal(task: WorkItem) {
     editingTask = task;
+    newTaskParent = null;
     detailForm = {
       title: task.title,
       description: task.description || "",
@@ -560,6 +607,7 @@
     try {
       const input: WorkItemInput = {
         id: editingTask?.id,
+        parent_id: newTaskParent?.id,
         title: detailForm.title.trim(),
         description: detailForm.description.trim(),
         type: detailForm.type,
@@ -572,7 +620,7 @@
         due_date: detailForm.due_date || null,
       };
       await api.upsertWorkItem(input);
-      showToast(editingTask ? "Tarea actualizada" : "Tarea creada correctamente");
+      showToast(editingTask ? "Tarea actualizada" : newTaskParent ? "Subtarea creada correctamente" : "Tarea creada correctamente");
       detailModalOpen = false;
       await loadData();
     } catch (err) {
@@ -608,6 +656,7 @@
         title: task.title,
         status: newStatus,
       });
+      await loadData();
       showToast(`Estado actualizado a ${taskStatusLabel(newStatus)}`);
     } catch (err) {
       tasks = tasks.map((item) =>
@@ -620,7 +669,10 @@
   }
 
   function handleTaskDragStart(event: DragEvent, task: WorkItem) {
-    if (!event.dataTransfer || statusUpdatingTaskId === task.id) return;
+    if (!event.dataTransfer || statusUpdatingTaskId === task.id || hasSubtasks(task.id)) {
+      event.preventDefault();
+      return;
+    }
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", String(task.id));
     draggedTaskId = task.id;
@@ -901,17 +953,35 @@
     {:else if viewMode === "lista"}
       <Card lift={false} class="overflow-hidden p-0">
         <div class="divide-y divide-[var(--color-border-soft)]">
-          {#each filteredTasks as task (task.id)}
-            <button
-              type="button"
+          {#each orderedTasks(filteredTasks) as task (task.id)}
+            <div
+              role="button"
+              tabindex="0"
               onclick={() => openEditTaskModal(task)}
-              class="group flex w-full flex-wrap items-center justify-between gap-3 px-4 py-3.5 text-left transition hover:bg-purple-500/[0.06]"
+              onkeydown={(event) => {
+                if (event.key === "Enter") openEditTaskModal(task);
+              }}
+              class="group relative flex w-full flex-wrap items-center justify-between gap-3 text-left transition hover:bg-purple-500/[0.06] {task.parent_id
+                ? 'border-l-4 border-l-[var(--color-purple-bright)] bg-purple-500/[0.04] py-3 pl-10 pr-4'
+                : 'px-4 py-4'}"
             >
+              {#if task.parent_id}
+                <span class="absolute left-3 top-3 text-lg font-bold text-[var(--color-purple-bright)]">↳</span>
+              {/if}
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2">
                   <span class="text-sm font-medium text-[var(--color-text)] group-hover:text-[var(--color-purple-bright)]">
                     {task.title}
                   </span>
+                  {#if task.parent_id}
+                    <span class="rounded-md border border-purple-400/35 bg-purple-500/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[var(--color-purple-bright)]">
+                      Subtarea
+                    </span>
+                  {:else if hasSubtasks(task.id)}
+                    <span class="rounded-md border border-[var(--color-border)] bg-black/20 px-2 py-0.5 text-[10px] font-semibold text-[var(--color-muted)]">
+                      {taskSubtasks(task.id).filter((item) => item.status === "done").length}/{taskSubtasks(task.id).length} subtareas · automático
+                    </span>
+                  {/if}
                   {#if task.category}
                     <span
                       class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium border border-white/10"
@@ -921,6 +991,11 @@
                     </span>
                   {/if}
                 </div>
+                {#if task.parent_id}
+                  <p class="mt-1 text-[11px] font-medium text-[var(--color-muted)]">
+                    Pertenece a «{task.parent_title}»
+                  </p>
+                {/if}
                 {#if task.description}
                   <p class="mt-0.5 max-w-2xl truncate text-xs text-[var(--color-muted-dim)]">
                     {task.description}
@@ -929,6 +1004,15 @@
               </div>
 
               <div class="flex flex-wrap items-center gap-2 shrink-0">
+                {#if task.parent_id == null}
+                  <button
+                    type="button"
+                    class="rounded-lg border border-purple-400/25 px-2 py-1 text-[11px] font-semibold text-[var(--color-purple-bright)] hover:bg-purple-500/10"
+                    onclick={(event) => openNewSubtaskModal(event, task)}
+                  >
+                    + Subtarea
+                  </button>
+                {/if}
                 <Badge tone={statusBadgeTone(task.status)}>{taskStatusLabel(task.status)}</Badge>
                 <Badge tone="neutral">{taskTypeLabel(task.type)}</Badge>
                 <Badge tone={priorityBadgeTone(task.priority)}>{priorityLabel(task.priority)}</Badge>
@@ -945,7 +1029,7 @@
                   </span>
                 {/if}
               </div>
-            </button>
+            </div>
           {/each}
         </div>
       </Card>
@@ -957,7 +1041,7 @@
         </p>
         <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-5 items-start">
         {#each kanbanColumns as col}
-          {@const colTasks = filteredTasks.filter((t) => t.status === col.status)}
+          {@const colTasks = columnTasks(col.status)}
           <div
             role="group"
             aria-label={`Columna ${col.label}`}
@@ -980,9 +1064,13 @@
               {#each colTasks as task (task.id)}
                 <Card
                   lift={true}
-                  draggable={statusUpdatingTaskId !== task.id}
-                  aria-label={`Arrastrar tarea ${task.title}`}
-                  class="cursor-grab active:cursor-grabbing border border-[var(--color-border-soft)] p-3 hover:border-[var(--color-border-strong)] transition-all select-none {draggedTaskId === task.id
+                  draggable={statusUpdatingTaskId !== task.id && !hasSubtasks(task.id)}
+                  aria-label={hasSubtasks(task.id) ? `Tarea ${task.title} con estado automático` : `Arrastrar ${task.parent_id ? "subtarea" : "tarea"} ${task.title}`}
+                  class="relative border p-3 transition-all select-none {task.parent_id
+                    ? 'ml-4 cursor-grab active:cursor-grabbing border-purple-400/40 border-l-4 bg-purple-500/[0.09] shadow-[inset_0_0_18px_rgba(168,85,247,0.05)] hover:border-purple-400/65'
+                    : hasSubtasks(task.id)
+                      ? 'cursor-default border-[var(--color-border-strong)] bg-black/30'
+                      : 'cursor-grab active:cursor-grabbing border-[var(--color-border-soft)] hover:border-[var(--color-border-strong)]'} {draggedTaskId === task.id
                     ? 'opacity-40 scale-[0.98]'
                     : ''} {statusUpdatingTaskId === task.id ? 'opacity-60 cursor-wait' : ''}"
                   onclick={() => {
@@ -991,12 +1079,42 @@
                   ondragstart={(event) => handleTaskDragStart(event, task)}
                   ondragend={handleTaskDragEnd}
                 >
+                  {#if task.parent_id}
+                    <span class="absolute -left-5 top-2 text-base font-bold text-[var(--color-purple-bright)]">↳</span>
+                  {/if}
                   <div class="space-y-2">
                     <div class="flex items-start justify-between gap-1">
                       <h4 class="text-xs font-semibold text-[var(--color-text)] leading-snug">
                         {task.title}
                       </h4>
+                      {#if task.parent_id == null}
+                        <button
+                          type="button"
+                          title="Añadir subtarea"
+                          aria-label={`Añadir subtarea a ${task.title}`}
+                          class="shrink-0 rounded-md border border-purple-400/25 px-1.5 py-0.5 text-xs font-bold text-[var(--color-purple-bright)] hover:bg-purple-500/15"
+                          onclick={(event) => openNewSubtaskModal(event, task)}
+                        >
+                          +
+                        </button>
+                      {/if}
                     </div>
+
+                    {#if task.parent_id}
+                      <div class="flex items-center gap-1.5">
+                        <span class="rounded border border-purple-400/35 bg-purple-500/20 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-[var(--color-purple-bright)]">Subtarea</span>
+                        <span class="truncate text-[10px] font-medium text-[var(--color-muted)]">de {task.parent_title}</span>
+                      </div>
+                    {:else if hasSubtasks(task.id)}
+                      <div class="rounded-md border border-[var(--color-border-soft)] bg-black/20 px-2 py-1.5">
+                        <p class="text-[10px] font-semibold text-[var(--color-muted)]">
+                          🔒 Estado controlado por {taskSubtasks(task.id).length} subtareas
+                        </p>
+                        <p class="mt-0.5 text-[10px] text-[var(--color-muted-dim)]">
+                          {taskSubtasks(task.id).filter((item) => item.status === "done").length} realizadas
+                        </p>
+                      </div>
+                    {/if}
 
                     {#if task.description}
                       <p class="text-[11px] text-[var(--color-muted-dim)] line-clamp-2">
@@ -1022,6 +1140,7 @@
                         <span>{task.due_date ? `📅 ${formatDate(task.due_date)}` : ""}</span>
                       </div>
                     {/if}
+
                   </div>
                 </Card>
               {/each}
@@ -1182,7 +1301,7 @@
 <!-- Task Detail Modal -->
 <Modal
   open={detailModalOpen}
-  title={editingTask ? "Detalle de Tarea" : "Nueva Tarea"}
+  title={editingTask ? (editingTask.parent_id ? "Detalle de Subtarea" : "Detalle de Tarea") : newTaskParent ? "Nueva Subtarea" : "Nueva Tarea"}
   onclose={() => (detailModalOpen = false)}
 >
   <form
@@ -1192,6 +1311,15 @@
     }}
     class="space-y-4 pt-1"
   >
+    {#if newTaskParent}
+      <div class="rounded-xl border border-purple-400/30 bg-purple-500/10 px-4 py-3">
+        <p class="text-xs font-bold uppercase tracking-wide text-[var(--color-purple-bright)]">↳ Nueva subtarea</p>
+        <p class="mt-1 text-sm text-[var(--color-text)]">
+          Dependerá de «{newTaskParent.title}» y actualizará automáticamente su estado.
+        </p>
+      </div>
+    {/if}
+
     <div class="space-y-1">
       <label for="task-title" class="text-xs font-medium text-[var(--color-muted)]">Título</label>
       <input
@@ -1242,11 +1370,20 @@
     </div>
 
     <div class="grid gap-3 sm:grid-cols-2">
-      <Select
-        label="Proyecto"
-        options={detailProjectOptions}
-        bind:value={detailForm.project_id}
-      />
+      {#if newTaskParent}
+        <div class="space-y-1">
+          <span class="text-xs font-medium text-[var(--color-muted)]">Proyecto</span>
+          <div class="field flex min-h-11 items-center text-sm text-[var(--color-muted)]">
+            {project?.name}
+          </div>
+        </div>
+      {:else}
+        <Select
+          label="Proyecto"
+          options={detailProjectOptions}
+          bind:value={detailForm.project_id}
+        />
+      {/if}
       <Select
         label="Responsable"
         options={detailAssigneeOptions}
