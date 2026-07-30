@@ -104,6 +104,64 @@ describe("Trabajo Backend & API Tests", () => {
       expect(reopenedItem.completed_at).toBeNull();
     });
 
+    it("derives the parent status from its subtasks", async () => {
+      const parent = await browserApi.upsertWorkItem(
+        { title: "Preparar lanzamiento" },
+        adminToken,
+      );
+      const first = await browserApi.upsertWorkItem(
+        { title: "Diseñar portada", parent_id: parent.id, status: "in_progress" },
+        adminToken,
+      );
+
+      let items = await browserApi.listWorkItems({}, adminToken);
+      expect(items.find((item) => item.id === parent.id)?.status).toBe("in_progress");
+
+      const second = await browserApi.upsertWorkItem(
+        { title: "Publicar web", parent_id: parent.id, status: "blocked" },
+        adminToken,
+      );
+      items = await browserApi.listWorkItems({}, adminToken);
+      expect(items.find((item) => item.id === parent.id)?.status).toBe("blocked");
+
+      await browserApi.upsertWorkItem(
+        { id: second.id, title: second.title, status: "done" },
+        adminToken,
+      );
+      items = await browserApi.listWorkItems({}, adminToken);
+      expect(items.find((item) => item.id === parent.id)?.status).toBe("in_progress");
+
+      await browserApi.upsertWorkItem(
+        { id: first.id, title: first.title, status: "done" },
+        adminToken,
+      );
+      items = await browserApi.listWorkItems({}, adminToken);
+      expect(items.find((item) => item.id === parent.id)?.status).toBe("done");
+      expect(items.find((item) => item.id === parent.id)?.completed_at).not.toBeNull();
+
+      await browserApi.upsertWorkItem(
+        { id: first.id, title: first.title, status: "planned" },
+        adminToken,
+      );
+      items = await browserApi.listWorkItems({}, adminToken);
+      expect(items.find((item) => item.id === parent.id)?.status).toBe("planned");
+      expect(items.find((item) => item.id === parent.id)?.completed_at).toBeNull();
+    });
+
+    it("prevents nested subtasks", async () => {
+      const parent = await browserApi.upsertWorkItem({ title: "Padre" }, adminToken);
+      const child = await browserApi.upsertWorkItem(
+        { title: "Hija", parent_id: parent.id },
+        adminToken,
+      );
+      await expect(
+        browserApi.upsertWorkItem(
+          { title: "Nieta", parent_id: child.id },
+          adminToken,
+        ),
+      ).rejects.toThrow("Las subtareas no pueden tener otras subtareas.");
+    });
+
     it("enforces single active task per (company_id, source_type, source_key)", async () => {
       await browserApi.upsertWorkItem(
         {
