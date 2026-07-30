@@ -5,6 +5,7 @@
 import type { Company, CompanyMember, UserRole } from "../types";
 
 export const DEFAULT_COMPANY_CODE = "SHOP";
+export const PROJECT_COMPANY_CODE = "DEV";
 
 export function seedCompanies(createdAt: string): Company[] {
   return [
@@ -58,8 +59,20 @@ export function canAccessCompany(
   userId: number,
   companyId: number,
   members: CompanyMember[],
+  isMaster = false,
 ): boolean {
-  return members.some((m) => m.user_id === userId && m.company_id === companyId);
+  return isMaster || members.some((m) => m.user_id === userId && m.company_id === companyId);
+}
+
+/** Normal users see memberships; a master may explicitly expand the global tenant catalog. */
+export function companiesVisibleToUser(
+  userId: number,
+  members: CompanyMember[],
+  companies: Company[],
+  opts: { isMaster?: boolean; includeAll?: boolean } = {},
+): Company[] {
+  if (opts.isMaster && opts.includeAll) return companies.filter((company) => company.active);
+  return companiesForUser(userId, members, companies);
 }
 
 export function pickDefaultCompanyId(

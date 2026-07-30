@@ -6,12 +6,14 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const LAYOUT = resolve(__dirname, "../../routes/+layout.svelte");
+const APP_CSS = resolve(__dirname, "../../app.css");
 const SIDEBAR = resolve(__dirname, "../components/Sidebar.svelte");
 const DASH = resolve(__dirname, "../../routes/+page.svelte");
 const INV = resolve(__dirname, "../../routes/inventario/+page.svelte");
 const CLI = resolve(__dirname, "../../routes/clientes/+page.svelte");
 const CAJA = resolve(__dirname, "../../routes/caja/+page.svelte");
 const VEN = resolve(__dirname, "../../routes/ventas/+page.svelte");
+const ROADMAP = resolve(__dirname, "../../routes/roadmap/+page.svelte");
 
 describe("session logout UI (#9)", () => {
   const layout = readFileSync(LAYOUT, "utf8");
@@ -34,6 +36,21 @@ describe("session logout UI (#9)", () => {
     expect(layout).toContain("lockAfterIdle");
     expect(layout).toMatch(/pointerdown.*keydown.*touchstart.*scroll/s);
   });
+
+  it("gives master profiles an explicit assigned/all-companies toggle", () => {
+    expect(layout).toContain("data-master-companies-toggle");
+    expect(layout).toContain("data-master-company-menu");
+    expect(layout).toContain("api.listCompanies(true)");
+    expect(layout).toMatch(/Todas ↓/);
+    expect(layout).toContain("data-master-own-companies");
+  });
+
+  it("keeps company menus above the scrollable workspace", () => {
+    const css = readFileSync(APP_CSS, "utf8");
+    expect(css).toMatch(/\.app-header\s*\{[^}]*z-index:\s*100[^}]*overflow:\s*visible/s);
+    expect(css).toMatch(/\.app-main\s*\{[^}]*position:\s*relative[^}]*z-index:\s*0/s);
+    expect(css).toMatch(/\.app-header-master-menu\s*\{[^}]*z-index:\s*120/s);
+  });
 });
 
 describe("shell Spanish commerce copy (#12)", () => {
@@ -55,6 +72,16 @@ describe("shell Spanish commerce copy (#12)", () => {
     expect(sidebar).toContain("/caja?nuevo=1");
     expect(sidebar).toContain("/ventas?nuevo=1");
     expect(dash).toMatch(/inventario\?nuevo=1|caja\?nuevo=1|ventas\?nuevo=1/);
+  });
+
+  it("groups the sidebar by domain and exposes a working roadmap", () => {
+    const roadmap = readFileSync(ROADMAP, "utf8");
+    expect(sidebar).toContain('label: "OPERACIÓN"');
+    expect(sidebar).toContain('label: "FINANZAS"');
+    expect(sidebar).toContain('label: "PROYECTOS"');
+    expect(sidebar).toContain('href: "/roadmap"');
+    expect(roadmap).toContain("Roadmap de trabajo");
+    expect(roadmap).toContain("api.listWorkItems");
   });
 });
 

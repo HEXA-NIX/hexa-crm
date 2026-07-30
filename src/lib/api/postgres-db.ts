@@ -1,5 +1,6 @@
 import postgres from "postgres";
 import { hashPin, verifyCredential } from "../auth/pin";
+import { browserApi } from "./browser-store";
 import {
   clearTempCredentialFields,
   generateTempPassword,
@@ -16,6 +17,10 @@ import {
   validateBackup,
   type BackupEnvelope,
 } from "../backup/backup";
+import {
+  encryptSecret,
+  decryptSecret,
+} from "../plugins/secret-vault";
 import type {
   AiChatResult,
   AiMessage,
@@ -23,29 +28,63 @@ import type {
   CashInput,
   CashMovement,
   Company,
+  CreateInventoryMovementInput,
   CreateUserResult,
   Customer,
   CustomerInput,
   DashboardStats,
+  InventoryMovement,
   LoginResult,
   Product,
   ProductInput,
+  PluginAuditLogEntry,
+  PluginConfig,
+  PluginKey,
+  PluginLogResult,
+  PluginTestResult,
+  PluginToolResult,
   ReturnLineInput,
   Sale,
   SaleLineInput,
   Settings,
+  StockBalance,
+  StockLocation,
+  TenantPlugin,
   UserInput,
   VatSummary,
+  Warehouse,
+  WorkCategory,
+  WorkItem,
+  WorkItemFilters,
+  WorkItemInput,
+  WorkMember,
+  WorkProject,
+  WorkProjectInput,
 } from "../types";
 import {
   billingByCompany,
   canAccessCompany,
   companiesForUser,
+  companiesVisibleToUser,
   pickDefaultCompanyId,
   seedCompanies,
   seedCompanyMembers,
 } from "../company/context";
 import { planPartialReturn, remainingLineAmounts } from "../sales/partial-return";
+import {
+  PLUGIN_CATALOG,
+  pluginDefinition,
+  redactSensitive,
+  sanitizePluginConfig,
+  stripeToolAccess,
+} from "../plugins/catalog";
+import {
+  callStripeTool,
+  listStripeTools,
+  pluginSecretConfigured,
+  testDatabasePlugin,
+  testStripePlugin,
+} from "../plugins/runtime.server";
 
 // Prefer Vite/SvelteKit private env; fall back to process.env and local Docker defaults.
 function resolveDatabaseUrl(): string {
@@ -58,7 +97,7 @@ function resolveDatabaseUrl(): string {
 
 const DATABASE_URL = resolveDatabaseUrl();
 export const CENTRAL_MODE = typeof process !== "undefined" && process.env?.HEXA_CENTRAL_MODE === "1";
-export const CENTRAL_SCHEMA_VERSION = "0012_semantic_metrics";
+export const CENTRAL_SCHEMA_VERSION = "0014_master_profile";
 
 let sql: postgres.Sql;
 
@@ -331,6 +370,7 @@ export async function initDb() {
       category TEXT NOT NULL DEFAULT 'otros',
       description TEXT NOT NULL DEFAULT '',
       sale_id INTEGER REFERENCES sales(id) ON DELETE SET NULL,
+      project_id INTEGER,
       occurred_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     );
   `;
@@ -352,7 +392,8 @@ export async function initDb() {
       active BOOLEAN NOT NULL DEFAULT TRUE,
       created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
       must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
-      temp_password_issued_at TIMESTAMP WITH TIME ZONE
+      temp_password_issued_at TIMESTAMP WITH TIME ZONE,
+      is_master BOOLEAN NOT NULL DEFAULT FALSE
     );
   `;
 
@@ -364,16 +405,57 @@ export async function initDb() {
     );
   `;
 
+  await sql`
+    CREATE TABLE IF NOT EXISTS tenant_plugins (
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      plugin_key TEXT NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      config JSONB NOT NULL DEFAULT '{}'::jsonb,
+      last_error TEXT,
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (company_id, plugin_key)
+    )
+  `;
+  await sql`ALTER TABLE tenant_plugins ADD COLUMN IF NOT EXISTS encrypted_secret TEXT`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS plugin_audit_log (
+      id BIGSERIAL PRIMARY KEY,
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      plugin_key TEXT NOT NULL,
+      action TEXT NOT NULL,
+      tool_name TEXT,
+      result TEXT NOT NULL DEFAULT 'ok',
+      summary TEXT,
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )
+  `;
+  await sql`ALTER TABLE plugin_audit_log ADD COLUMN IF NOT EXISTS result TEXT NOT NULL DEFAULT 'ok'`;
+  await sql`ALTER TABLE plugin_audit_log ADD COLUMN IF NOT EXISTS summary TEXT`;
+
   // Multi-empresa columns (idempotent)
   await sql`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS active_company_id INTEGER`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_master BOOLEAN NOT NULL DEFAULT FALSE`;
   await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS company_id INTEGER NOT NULL DEFAULT 1`;
   await sql`ALTER TABLE customers ADD COLUMN IF NOT EXISTS company_id INTEGER NOT NULL DEFAULT 1`;
   await sql`ALTER TABLE sales ADD COLUMN IF NOT EXISTS company_id INTEGER NOT NULL DEFAULT 1`;
   await sql`ALTER TABLE cash_movements ADD COLUMN IF NOT EXISTS company_id INTEGER NOT NULL DEFAULT 1`;
+  await sql`ALTER TABLE cash_movements ADD COLUMN IF NOT EXISTS project_id INTEGER`;
   // Central catalog metadata. Existing local products remain published by default.
   await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS publication_status TEXT NOT NULL DEFAULT 'published'`;
   await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'EUR'`;
   await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS condition_code TEXT NOT NULL DEFAULT 'preowned'`;
+  // Perfil de abastecimiento del catálogo. Es deliberadamente por producto en
+  // P0; la relación N:M proveedor-producto y recepciones llegan en la siguiente
+  // fase sin impedir que la tienda sepa hoy de dónde y cómo se sirve cada SKU.
+  await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS supplier_name TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS supplier_contact TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS supplier_email TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS supplier_phone TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS fulfillment_mode TEXT NOT NULL DEFAULT 'own_stock'`;
+  await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS stock_location TEXT NOT NULL DEFAULT 'Almacén principal'`;
+  await sql`CREATE TABLE IF NOT EXISTS suppliers (id SERIAL PRIMARY KEY, company_id INTEGER NOT NULL DEFAULT 1 REFERENCES companies(id) ON DELETE CASCADE, name TEXT NOT NULL, contact TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '', ordering_method TEXT NOT NULL DEFAULT 'email', notes TEXT NOT NULL DEFAULT '', active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(), updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(), UNIQUE(company_id, name))`;
   await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT NOT NULL DEFAULT ''`;
   await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS evidence JSONB NOT NULL DEFAULT '[]'::jsonb`;
   await sql`ALTER TABLE products DROP CONSTRAINT IF EXISTS products_sku_key`;
@@ -385,8 +467,24 @@ export async function initDb() {
   await sql`ALTER TABLE sales ADD COLUMN IF NOT EXISTS order_id UUID UNIQUE REFERENCES orders(id) ON DELETE SET NULL`;
   await sql`ALTER TABLE products DROP CONSTRAINT IF EXISTS products_publication_status_check`;
   await sql`ALTER TABLE products ADD CONSTRAINT products_publication_status_check CHECK (publication_status IN ('draft', 'published', 'archived'))`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS integration_events (
+      id BIGSERIAL PRIMARY KEY,
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      correlation_id TEXT,
+      request_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      status TEXT NOT NULL,
+      tool_name TEXT,
+      summary TEXT,
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS integration_events_tenant_created_idx ON integration_events (company_id, id ASC)`;
+  await sql`CREATE INDEX IF NOT EXISTS integration_events_tenant_corr_idx ON integration_events (company_id, correlation_id)`;
+
   // Defense in depth for central API roles. Requests set app.company_id locally.
-  for (const table of ["products", "customers", "sales", "cash_movements", "reservations", "orders", "external_customer_identities", "semantic_documents", "semantic_metrics", "idempotency_keys", "service_audit_log"] as const) {
+  for (const table of ["products", "customers", "sales", "cash_movements", "reservations", "orders", "external_customer_identities", "semantic_documents", "semantic_metrics", "idempotency_keys", "service_audit_log", "plugin_audit_log", "tenant_plugins", "integration_events"] as const) {
     const policy = `${table}_tenant_isolation`;
     await sql.unsafe(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
     await sql.unsafe(`DROP POLICY IF EXISTS ${policy} ON ${table}`);
@@ -404,6 +502,189 @@ export async function initDb() {
   await sql`ALTER TABLE sales ADD COLUMN IF NOT EXISTS refunded_cents INTEGER NOT NULL DEFAULT 0`;
   await sql`ALTER TABLE sale_lines ADD COLUMN IF NOT EXISTS returned_qty INTEGER NOT NULL DEFAULT 0`;
 
+  // Módulo Trabajo (Multiempresa) DDL
+  await sql`
+    CREATE TABLE IF NOT EXISTS work_categories (
+      id SERIAL PRIMARY KEY,
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      normalized_name TEXT NOT NULL,
+      color TEXT NOT NULL DEFAULT '#6b7280',
+      archived_at TIMESTAMP WITH TIME ZONE,
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      CONSTRAINT work_categories_company_normalized_unique UNIQUE (company_id, normalized_name)
+    );
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS work_projects (
+      id SERIAL PRIMARY KEY,
+      uid UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL,
+      value_cents INTEGER NOT NULL DEFAULT 0 CHECK (value_cents >= 0),
+      monthly_estimate_cents INTEGER NOT NULL DEFAULT 0 CHECK (monthly_estimate_cents >= 0),
+      revenue_target_date DATE,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'planned' CHECK (status IN ('planned', 'active', 'paused', 'done', 'archived')),
+      start_date TIMESTAMP WITH TIME ZONE,
+      target_date TIMESTAMP WITH TIME ZONE,
+      created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    );
+  `;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS uid UUID`;
+  await sql`UPDATE work_projects SET uid = gen_random_uuid() WHERE uid IS NULL`;
+  await sql`ALTER TABLE work_projects ALTER COLUMN uid SET DEFAULT gen_random_uuid()`;
+  await sql`ALTER TABLE work_projects ALTER COLUMN uid SET NOT NULL`;
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_work_projects_uid ON work_projects(uid)`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_work_projects_customer ON work_projects(company_id, customer_id)`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS value_cents INTEGER NOT NULL DEFAULT 0`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS monthly_estimate_cents INTEGER NOT NULL DEFAULT 0`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS revenue_target_date DATE`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_cash_movements_project ON cash_movements(company_id, project_id)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS work_project_revenue_milestones (
+      id SERIAL PRIMARY KEY,
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      project_id INTEGER NOT NULL REFERENCES work_projects(id) ON DELETE CASCADE,
+      amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+      target_month TEXT NOT NULL CHECK (target_month ~ '^[0-9]{4}-[0-9]{2}$'),
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_project_revenue_milestones ON work_project_revenue_milestones(company_id, project_id, target_month)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS work_items (
+      id SERIAL PRIMARY KEY,
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      category_id INTEGER REFERENCES work_categories(id) ON DELETE SET NULL,
+      project_id INTEGER REFERENCES work_projects(id) ON DELETE SET NULL,
+      assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      type TEXT NOT NULL DEFAULT 'task' CHECK (type IN ('idea', 'task', 'issue', 'milestone')),
+      status TEXT NOT NULL DEFAULT 'inbox' CHECK (status IN ('inbox', 'planned', 'in_progress', 'blocked', 'done', 'archived')),
+      priority TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+      start_date TIMESTAMP WITH TIME ZONE,
+      due_date TIMESTAMP WITH TIME ZONE,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      source_type TEXT,
+      source_key TEXT,
+      source_href TEXT,
+      completed_at TIMESTAMP WITH TIME ZONE,
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    );
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_work_categories_company ON work_categories(company_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_work_projects_company ON work_projects(company_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_work_items_company ON work_items(company_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_work_items_category ON work_items(category_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_work_items_project ON work_items(project_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_work_items_assignee ON work_items(assignee_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_work_items_source ON work_items(company_id, source_type, source_key)`;
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_work_items_active_source
+    ON work_items (company_id, source_type, source_key)
+    WHERE status NOT IN ('done', 'archived') AND source_type IS NOT NULL AND source_key IS NOT NULL
+  `;
+
+  for (const table of ["work_categories", "work_projects", "work_items"] as const) {
+    const policy = `${table}_tenant_isolation`;
+    await sql.unsafe(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+    await sql.unsafe(`DROP POLICY IF EXISTS ${policy} ON ${table}`);
+    await sql.unsafe(`CREATE POLICY ${policy} ON ${table} USING (company_id = NULLIF(current_setting('app.company_id', true), '')::integer) WITH CHECK (company_id = NULLIF(current_setting('app.company_id', true), '')::integer)`);
+  }
+
+  // --- Inventory Foundation (Phase 1) ---
+  await sql`
+    CREATE TABLE IF NOT EXISTS warehouses (
+      id SERIAL PRIMARY KEY,
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      code TEXT NOT NULL,
+      name TEXT NOT NULL,
+      is_default BOOLEAN NOT NULL DEFAULT FALSE,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      UNIQUE(company_id, code)
+    );
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS stock_locations (
+      id SERIAL PRIMARY KEY,
+      warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      code TEXT NOT NULL,
+      name TEXT NOT NULL,
+      is_default BOOLEAN NOT NULL DEFAULT FALSE,
+      allow_negative_stock BOOLEAN NOT NULL DEFAULT FALSE,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      UNIQUE(company_id, warehouse_id, code)
+    );
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS stock_balances (
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      location_id INTEGER NOT NULL REFERENCES stock_locations(id) ON DELETE CASCADE,
+      on_hand INTEGER NOT NULL DEFAULT 0,
+      reserved INTEGER NOT NULL DEFAULT 0,
+      blocked INTEGER NOT NULL DEFAULT 0,
+      incoming INTEGER NOT NULL DEFAULT 0,
+      available INTEGER NOT NULL DEFAULT 0,
+      updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (company_id, product_id, location_id)
+    );
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS inventory_movements (
+      id SERIAL PRIMARY KEY,
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
+      from_location_id INTEGER REFERENCES stock_locations(id) ON DELETE SET NULL,
+      to_location_id INTEGER REFERENCES stock_locations(id) ON DELETE SET NULL,
+      movement_type TEXT NOT NULL,
+      qty INTEGER NOT NULL,
+      cost_cents INTEGER NOT NULL DEFAULT 0,
+      effective_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      reason_code TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      ref_type TEXT NOT NULL DEFAULT '',
+      ref_id INTEGER,
+      idempotency_key TEXT,
+      reversed_movement_id INTEGER REFERENCES inventory_movements(id) ON DELETE SET NULL,
+      is_reversal BOOLEAN NOT NULL DEFAULT FALSE
+    );
+  `;
+
+  await sql`CREATE INDEX IF NOT EXISTS idx_warehouses_company ON warehouses(company_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_stock_locations_company ON stock_locations(company_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_stock_locations_warehouse ON stock_locations(warehouse_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_stock_balances_product ON stock_balances(company_id, product_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_inventory_movements_company ON inventory_movements(company_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_inventory_movements_product ON inventory_movements(company_id, product_id)`;
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_movements_idempotency ON inventory_movements(company_id, idempotency_key) WHERE idempotency_key IS NOT NULL`;
+
+  for (const table of ["warehouses", "stock_locations", "stock_balances", "inventory_movements"] as const) {
+    const policy = `${table}_tenant_isolation`;
+    await sql.unsafe(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+    await sql.unsafe(`DROP POLICY IF EXISTS ${policy} ON ${table}`);
+    await sql.unsafe(`CREATE POLICY ${policy} ON ${table} USING (company_id = NULLIF(current_setting('app.company_id', true), '')::integer) WITH CHECK (company_id = NULLIF(current_setting('app.company_id', true), '')::integer)`);
+  }
+
   // The local demo keeps its seed data. A central tenant service must start empty
   // and be provisioned explicitly; it must never leak demo rows into a tenant.
   if (!CENTRAL_MODE) {
@@ -412,7 +693,76 @@ export async function initDb() {
     await seedCompaniesPg();
     await seedProductsAndCustomers();
   }
+
+  await seedInventoryFoundation();
+
   await sql`INSERT INTO schema_migrations (version) VALUES (${CENTRAL_SCHEMA_VERSION}) ON CONFLICT (version) DO NOTHING`;
+  await sql`INSERT INTO schema_migrations (version) VALUES ('0015_work_management') ON CONFLICT (version) DO NOTHING`;
+  await sql`INSERT INTO schema_migrations (version) VALUES ('0016_inventory_foundation') ON CONFLICT (version) DO NOTHING`;
+  await sql`INSERT INTO schema_migrations (version) VALUES ('0017_stripe_secret_vault') ON CONFLICT (version) DO NOTHING`;
+  await sql`INSERT INTO schema_migrations (version) VALUES ('0018_integration_events') ON CONFLICT (version) DO NOTHING`;
+}
+
+async function seedInventoryFoundation() {
+  const companies = await sql<{ id: number }[]>`SELECT id FROM companies`;
+  for (const c of companies) {
+    const companyId = c.id;
+
+    // Ensure default warehouse ("Almacén Principal", code "WH-MAIN")
+    const whRows = await sql<{ id: number }[]>`
+      INSERT INTO warehouses (company_id, code, name, is_default, active)
+      VALUES (${companyId}, 'WH-MAIN', 'Almacén Principal', TRUE, TRUE)
+      ON CONFLICT (company_id, code) DO UPDATE SET is_default = TRUE, updated_at = NOW()
+      RETURNING id
+    `;
+    let warehouseId = whRows[0]?.id;
+    if (!warehouseId) {
+      const existingWh = await sql<{ id: number }[]>`SELECT id FROM warehouses WHERE company_id = ${companyId} AND code = 'WH-MAIN'`;
+      warehouseId = existingWh[0]?.id;
+    }
+    if (!warehouseId) continue;
+
+    // Ensure default location ("Ubicación Principal", code "LOC-MAIN")
+    const locRows = await sql<{ id: number }[]>`
+      INSERT INTO stock_locations (warehouse_id, company_id, code, name, is_default, allow_negative_stock, active)
+      VALUES (${warehouseId}, ${companyId}, 'LOC-MAIN', 'Ubicación Principal', TRUE, FALSE, TRUE)
+      ON CONFLICT (company_id, warehouse_id, code) DO UPDATE SET is_default = TRUE, updated_at = NOW()
+      RETURNING id
+    `;
+    let locationId = locRows[0]?.id;
+    if (!locationId) {
+      const existingLoc = await sql<{ id: number }[]>`
+        SELECT id FROM stock_locations WHERE company_id = ${companyId} AND warehouse_id = ${warehouseId} AND code = 'LOC-MAIN'
+      `;
+      locationId = existingLoc[0]?.id;
+    }
+    if (!locationId) continue;
+
+    // For any product with stock > 0, insert/seed initial balance into stock_balances and create an initial_stock movement idempotently.
+    const products = await sql<{ id: number; stock: number; cost_cents: number }[]>`
+      SELECT id, stock, cost_cents FROM products WHERE company_id = ${companyId} AND stock > 0
+    `;
+
+    for (const p of products) {
+      const key = `initial_stock_${companyId}_${p.id}_${locationId}`;
+
+      await sql`
+        INSERT INTO stock_balances (company_id, product_id, location_id, on_hand, reserved, blocked, incoming, available, updated_at)
+        VALUES (${companyId}, ${p.id}, ${locationId}, ${p.stock}, 0, 0, 0, ${p.stock}, NOW())
+        ON CONFLICT (company_id, product_id, location_id) DO NOTHING
+      `;
+
+      await sql`
+        INSERT INTO inventory_movements (
+          company_id, product_id, from_location_id, to_location_id, movement_type, qty, cost_cents, reason_code, notes, idempotency_key
+        )
+        SELECT ${companyId}, ${p.id}, NULL, ${locationId}, 'initial_stock', ${p.stock}, ${p.cost_cents}, 'INITIAL_MIGRATION', 'Migración inicial de stock escalar', ${key}
+        WHERE NOT EXISTS (
+          SELECT 1 FROM inventory_movements WHERE company_id = ${companyId} AND idempotency_key = ${key}
+        )
+      `;
+    }
+  }
 }
 
 async function seedCompaniesPg() {
@@ -467,7 +817,7 @@ async function loadMembers(): Promise<{ company_id: number; user_id: number; rol
   return await sql`SELECT company_id, user_id, role FROM company_members`;
 }
 
-async function resolveActiveCompanyId(token: string, userId: number): Promise<number> {
+async function resolveActiveCompanyId(token: string | null, userId: number): Promise<number> {
   const companies = await loadCompanies();
   const members = await loadMembers();
   const accessible = companiesForUser(
@@ -475,9 +825,16 @@ async function resolveActiveCompanyId(token: string, userId: number): Promise<nu
     members as { company_id: number; user_id: number; role: "admin" | "cajero" }[],
     companies,
   );
-  const sess = await sql`SELECT active_company_id FROM sessions WHERE token = ${token}`;
+  const [sess, masterRows] = await Promise.all([
+    sql`SELECT active_company_id FROM sessions WHERE token = ${token}`,
+    sql`SELECT is_master FROM users WHERE id = ${userId}`,
+  ]);
   const preferred = sess[0]?.active_company_id as number | null | undefined;
-  const id = pickDefaultCompanyId(accessible, preferred);
+  const isMaster = !!masterRows[0]?.is_master;
+  const masterPreferred = isMaster && preferred != null && companies.some((company) => company.id === preferred)
+    ? preferred
+    : null;
+  const id = masterPreferred ?? pickDefaultCompanyId(accessible, preferred) ?? (isMaster ? companies[0]?.id ?? null : null);
   if (id == null) throw new Error("Sin empresa asignada al usuario");
   if (preferred !== id) {
     await sql`UPDATE sessions SET active_company_id = ${id} WHERE token = ${token}`;
@@ -548,7 +905,7 @@ async function seedProductsAndCustomers() {
 async function requireSession(token: string | null): Promise<AuthUser> {
   if (!token) throw new Error("Sesión no iniciada");
   const sessRes = await sql`
-    SELECT s.token, u.id, u.username, u.display_name, u.role, u.active, u.created_at, u.must_change_password, u.temp_password_issued_at
+    SELECT s.token, u.id, u.username, u.display_name, u.role, u.active, u.created_at, u.must_change_password, u.temp_password_issued_at, u.is_master
     FROM sessions s
     JOIN users u ON s.user_id = u.id
     WHERE s.token = ${token} AND u.active = TRUE
@@ -564,6 +921,7 @@ async function requireSession(token: string | null): Promise<AuthUser> {
     created_at: toIso(u.created_at),
     must_change_password: !!u.must_change_password,
     temp_password_issued_at: toIso(u.temp_password_issued_at) || null,
+    is_master: !!u.is_master,
   };
 }
 
@@ -571,6 +929,168 @@ async function requireAdmin(token: string | null): Promise<AuthUser> {
   const u = await requireSession(token);
   if (u.role !== "admin") throw new Error("Se requieren permisos de administrador");
   return u;
+}
+
+async function requireAdminCategoryManagementPg(token: string | null): Promise<AuthUser> {
+  const u = await requireSession(token);
+  if (u.role !== "admin" && !u.is_master) {
+    throw new Error("Solo los administradores pueden gestionar categorías.");
+  }
+  return u;
+}
+
+async function requireAdminProjectManagementPg(token: string | null): Promise<AuthUser> {
+  const u = await requireSession(token);
+  if (u.role !== "admin" && !u.is_master) {
+    throw new Error("Solo los administradores pueden gestionar proyectos.");
+  }
+  return u;
+}
+
+function formatWorkProject(r: any): WorkProject {
+  return {
+    id: r.id,
+    uid: String(r.uid),
+    company_id: r.company_id,
+    customer_id: r.customer_id ?? null,
+    value_cents: r.value_cents ?? 0,
+    monthly_estimate_cents: r.monthly_estimate_cents ?? 0,
+    revenue_target_date: toIso(r.revenue_target_date) || null,
+    revenue_milestones: [],
+    name: r.name,
+    description: r.description ?? "",
+    status: r.status,
+    start_date: toIso(r.start_date) || null,
+    target_date: toIso(r.target_date) || null,
+    created_by: r.created_by,
+    created_at: toIso(r.created_at),
+    updated_at: toIso(r.updated_at),
+  };
+}
+
+async function attachProjectRevenueMilestones(
+  projects: WorkProject[],
+  companyId: number,
+): Promise<WorkProject[]> {
+  if (projects.length === 0) return projects;
+  const rows = await sql`
+    SELECT id, project_id, amount_cents, target_month
+    FROM work_project_revenue_milestones
+    WHERE company_id = ${companyId}
+    ORDER BY target_month, id
+  `;
+  const byProject = new Map<number, WorkProject["revenue_milestones"]>();
+  for (const row of rows) {
+    const entries = byProject.get(row.project_id) ?? [];
+    entries.push({
+      id: row.id,
+      amount_cents: row.amount_cents,
+      target_month: row.target_month,
+    });
+    byProject.set(row.project_id, entries);
+  }
+  return projects.map((project) => ({
+    ...project,
+    revenue_milestones: byProject.get(project.id) ?? [],
+  }));
+}
+
+function formatWorkItem(r: any): WorkItem {
+  return {
+    id: r.id,
+    company_id: r.company_id,
+    category_id: r.category_id ?? null,
+    project_id: r.project_id ?? null,
+    assignee_id: r.assignee_id ?? null,
+    created_by: r.created_by,
+    title: r.title,
+    description: r.description ?? "",
+    type: r.type,
+    status: r.status,
+    priority: r.priority,
+    start_date: toIso(r.start_date) || null,
+    due_date: toIso(r.due_date) || null,
+    sort_order: r.sort_order ?? 0,
+    source_type: r.source_type ?? null,
+    source_key: r.source_key ?? null,
+    source_href: r.source_href ?? null,
+    completed_at: toIso(r.completed_at) || null,
+    created_at: toIso(r.created_at),
+    updated_at: toIso(r.updated_at),
+    category: r.category_name
+      ? {
+          id: r.category_id,
+          company_id: r.company_id,
+          name: r.category_name,
+          normalized_name: r.category_normalized_name ?? r.category_name.toUpperCase(),
+          color: r.category_color ?? "#6b7280",
+          archived_at: toIso(r.category_archived_at) || null,
+          created_at: toIso(r.category_created_at) || "",
+          updated_at: toIso(r.category_updated_at) || "",
+        }
+      : null,
+    assignee_name: r.assignee_name ?? null,
+  };
+}
+
+async function tenantPluginRow(companyId: number, key: PluginKey) {
+  const rows = await sql`
+    SELECT enabled, config, encrypted_secret, last_error, updated_at
+    FROM tenant_plugins
+    WHERE company_id = ${companyId} AND plugin_key = ${key}
+  `;
+  return rows[0] ?? null;
+}
+
+async function tenantPlugin(companyId: number, key: PluginKey): Promise<TenantPlugin> {
+  const definition = pluginDefinition(key);
+  const row = await tenantPluginRow(companyId, key);
+  const config = sanitizePluginConfig(key, row?.config ?? definition.defaultConfig);
+  const enabled = !!row?.enabled;
+  const secretConfigured = key === "stripe_mcp"
+    ? !!row?.encrypted_secret
+    : pluginSecretConfigured(config, "database");
+  const lastLogRows = await sql`
+    SELECT created_at FROM plugin_audit_log
+    WHERE company_id = ${companyId} AND plugin_key = ${key}
+    ORDER BY id DESC LIMIT 1
+  `;
+  const lastCheck = lastLogRows[0]?.created_at
+    ? toIso(lastLogRows[0].created_at)
+    : row?.updated_at
+      ? toIso(row.updated_at)
+      : null;
+
+  return {
+    plugin_key: key,
+    name: definition.name,
+    description: definition.description,
+    category: definition.category,
+    capabilities: [...definition.capabilities],
+    enabled,
+    config,
+    secret_configured: secretConfigured,
+    status: !enabled ? "inactive" : row?.last_error ? "error" : secretConfigured ? "ready" : "needs_secret",
+    last_error: row?.last_error ?? null,
+    last_check: lastCheck,
+    updated_at: row?.updated_at ? toIso(row.updated_at) : null,
+  };
+}
+
+async function pluginAudit(
+  companyId: number,
+  userId: number | null,
+  key: PluginKey,
+  action: string,
+  toolName?: string | null,
+  result: PluginLogResult = "ok",
+  summary?: string | null,
+) {
+  const cleanSummary = redactSensitive(summary ?? "").slice(0, 255) || null;
+  await sql`
+    INSERT INTO plugin_audit_log (company_id, user_id, plugin_key, action, tool_name, result, summary)
+    VALUES (${companyId}, ${userId}, ${key}, ${action}, ${toolName ?? null}, ${result}, ${cleanSummary})
+  `;
 }
 
 // -------------------------------------------------------------
@@ -584,7 +1104,7 @@ export const postgresApi = {
 
   async login(username: string, password: string): Promise<LoginResult> {
     const userRes = await sql`
-      SELECT id, username, display_name, role, active, pin_hash, must_change_password, temp_password_issued_at, created_at
+      SELECT id, username, display_name, role, active, pin_hash, must_change_password, temp_password_issued_at, created_at, is_master
       FROM users
       WHERE LOWER(username) = ${username.trim().toLowerCase()} AND active = TRUE
     `;
@@ -641,6 +1161,7 @@ export const postgresApi = {
         created_at: toIso(user.created_at),
         must_change_password: !!user.must_change_password,
         temp_password_issued_at: toIso(user.temp_password_issued_at) || null,
+        is_master: !!user.is_master,
       },
       token,
       companies: accessible,
@@ -662,14 +1183,16 @@ export const postgresApi = {
     }
   },
 
-  async list_companies(token: string | null): Promise<Company[]> {
+  async list_companies(token: string | null, includeAll = false): Promise<Company[]> {
     const user = await requireSession(token);
     const companies = await loadCompanies();
     const members = await loadMembers();
-    return companiesForUser(
+    if (includeAll && !user.is_master) throw new Error("Solo un perfil maestro puede ver todos los tenants");
+    return companiesVisibleToUser(
       user.id,
       members as { company_id: number; user_id: number; role: "admin" | "cajero" }[],
       companies,
+      { isMaster: !!user.is_master, includeAll },
     );
   },
 
@@ -690,6 +1213,7 @@ export const postgresApi = {
         user.id,
         company_id,
         members as { company_id: number; user_id: number; role: "admin" | "cajero" }[],
+        !!user.is_master,
       )
     ) {
       throw new Error("No tienes acceso a esa empresa");
@@ -717,10 +1241,275 @@ export const postgresApi = {
     );
   },
 
+  async list_plugins(token: string | null): Promise<TenantPlugin[]> {
+    const user = await requireSession(token);
+    if (!token) throw new Error("Sesión no iniciada");
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    return Promise.all(PLUGIN_CATALOG.map((plugin) => tenantPlugin(companyId, plugin.key)));
+  },
+
+  async update_plugin(
+    pluginKey: PluginKey,
+    enabled: boolean,
+    inputConfig: unknown,
+    token: string | null,
+    secretAction?: "save" | "replace" | "remove" | "keep",
+    secretInput?: string | null,
+  ): Promise<TenantPlugin> {
+    const user = await requireAdmin(token);
+    if (!token) throw new Error("Sesión no iniciada");
+    pluginDefinition(pluginKey);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const config = sanitizePluginConfig(pluginKey, inputConfig);
+
+    const rawInput = inputConfig && typeof inputConfig === "object" ? (inputConfig as Record<string, unknown>) : {};
+    const action = secretAction ?? (rawInput.secret_action as "save" | "replace" | "remove" | "keep" | undefined);
+    const rawSecret = secretInput ?? (typeof rawInput.secret === "string" ? rawInput.secret : null);
+
+    let encryptedSecret: string | null | undefined = undefined;
+
+    if (pluginKey === "stripe_mcp" && action) {
+      if (action === "save" || action === "replace") {
+        if (!rawSecret || !rawSecret.trim()) {
+          throw new Error("Debes proporcionar una credencial válida de Stripe");
+        }
+        encryptedSecret = encryptSecret(rawSecret.trim());
+      } else if (action === "remove") {
+        encryptedSecret = null;
+      }
+    }
+
+    if (encryptedSecret !== undefined) {
+      await sql`
+        INSERT INTO tenant_plugins (company_id, plugin_key, enabled, config, encrypted_secret, last_error, updated_at)
+        VALUES (${companyId}, ${pluginKey}, ${enabled}, ${sql.json(config as any)}, ${encryptedSecret}, NULL, NOW())
+        ON CONFLICT (company_id, plugin_key) DO UPDATE SET
+          enabled = EXCLUDED.enabled,
+          config = EXCLUDED.config,
+          encrypted_secret = EXCLUDED.encrypted_secret,
+          last_error = NULL,
+          updated_at = NOW()
+      `;
+    } else {
+      await sql`
+        INSERT INTO tenant_plugins (company_id, plugin_key, enabled, config, last_error, updated_at)
+        VALUES (${companyId}, ${pluginKey}, ${enabled}, ${sql.json(config as any)}, NULL, NOW())
+        ON CONFLICT (company_id, plugin_key) DO UPDATE SET
+          enabled = EXCLUDED.enabled,
+          config = EXCLUDED.config,
+          last_error = NULL,
+          updated_at = NOW()
+      `;
+    }
+
+    const auditSummary = action === "remove"
+      ? "Credencial de Stripe eliminada"
+      : action === "replace"
+        ? "Credencial de Stripe reemplazada"
+        : action === "save"
+          ? "Credencial de Stripe guardada"
+          : enabled
+            ? "Configuración guardada y plugin activado"
+            : "Plugin desactivado";
+
+    await pluginAudit(
+      companyId,
+      user.id,
+      pluginKey,
+      action === "remove" ? "secret_removed" : enabled ? "enabled_or_updated" : "disabled",
+      null,
+      "ok",
+      auditSummary,
+    );
+    return tenantPlugin(companyId, pluginKey);
+  },
+
+  async test_plugin(pluginKey: PluginKey, token: string | null): Promise<PluginTestResult> {
+    const user = await requireAdmin(token);
+    if (!token) throw new Error("Sesión no iniciada");
+    pluginDefinition(pluginKey);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const plugin = await tenantPlugin(companyId, pluginKey);
+    if (!plugin.enabled) {
+      await pluginAudit(
+        companyId,
+        user.id,
+        pluginKey,
+        "connection_test_failed",
+        null,
+        "error",
+        "Activa y guarda el plugin antes de probarlo",
+      );
+      throw new Error("Activa y guarda el plugin antes de probarlo");
+    }
+
+    let decryptedToken: string | undefined = undefined;
+
+    if (pluginKey === "stripe_mcp") {
+      const row = await tenantPluginRow(companyId, pluginKey);
+      if (!row?.encrypted_secret) {
+        const msg = "Ingresa y guarda la credencial de Stripe antes de probar la conexión";
+        await pluginAudit(companyId, user.id, pluginKey, "connection_test_failed", null, "error", msg);
+        throw new Error(msg);
+      }
+      decryptedToken = decryptSecret(row.encrypted_secret);
+    }
+
+    try {
+      const result = pluginKey === "database_bridge"
+        ? await testDatabasePlugin(plugin.config)
+        : await testStripePlugin(plugin.config, decryptedToken);
+
+      await sql`UPDATE tenant_plugins SET last_error = NULL, updated_at = NOW() WHERE company_id = ${companyId} AND plugin_key = ${pluginKey}`;
+      await pluginAudit(companyId, user.id, pluginKey, "connection_test_ok", null, "ok", result.message);
+      return result;
+    } catch (error) {
+      const message = redactSensitive(error instanceof Error ? error.message : "No se pudo conectar");
+      await sql`UPDATE tenant_plugins SET last_error = ${message.slice(0, 500)}, updated_at = NOW() WHERE company_id = ${companyId} AND plugin_key = ${pluginKey}`;
+      await pluginAudit(companyId, user.id, pluginKey, "connection_test_failed", null, "error", message);
+      throw new Error(message);
+    }
+  },
+
+  async list_plugin_tools(pluginKey: PluginKey, token: string | null): Promise<any[]> {
+    const user = await requireSession(token);
+    if (!token) throw new Error("Sesión no iniciada");
+    if (pluginKey !== "stripe_mcp") return [];
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const plugin = await tenantPlugin(companyId, pluginKey);
+    if (!plugin.enabled || !plugin.secret_configured) return [];
+    const row = await tenantPluginRow(companyId, pluginKey);
+    if (!row?.encrypted_secret) return [];
+    const secretToken = decryptSecret(row.encrypted_secret);
+    const tools = await listStripeTools(plugin.config, secretToken);
+    return tools.filter((tool) => stripeToolAccess(String(tool?.name ?? ""), plugin.config).allowed);
+  },
+
+  async call_plugin_tool(
+    pluginKey: PluginKey,
+    toolName: string,
+    args: Record<string, unknown>,
+    confirmed: boolean,
+    token: string | null,
+  ): Promise<PluginToolResult> {
+    const user = await requireSession(token);
+    if (!token) throw new Error("Sesión no iniciada");
+    if (pluginKey !== "stripe_mcp") throw new Error("Este plugin no expone herramientas al asistente");
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const plugin = await tenantPlugin(companyId, pluginKey);
+    if (!plugin.enabled) {
+      await pluginAudit(
+        companyId,
+        user.id,
+        pluginKey,
+        "tool_requested",
+        toolName,
+        "blocked",
+        "El plugin Stripe MCP no está activo para esta tienda",
+      );
+      throw new Error("El plugin Stripe MCP no está activo para esta tienda");
+    }
+    const access = stripeToolAccess(toolName, plugin.config);
+    if (!access.allowed) {
+      await pluginAudit(
+        companyId,
+        user.id,
+        pluginKey,
+        "tool_blocked_permission",
+        toolName,
+        "blocked",
+        "Herramienta de Stripe no permitida en este tenant",
+      );
+      throw new Error("Herramienta de Stripe no permitida en este tenant");
+    }
+    if (access.write) {
+      if (user.role !== "admin") {
+        await pluginAudit(
+          companyId,
+          user.id,
+          pluginKey,
+          "tool_blocked_permission",
+          toolName,
+          "blocked",
+          "Las operaciones de Stripe requieren un administrador",
+        );
+        throw new Error("Las operaciones de Stripe requieren un administrador");
+      }
+      if (!confirmed) {
+        await pluginAudit(
+          companyId,
+          user.id,
+          pluginKey,
+          "tool_blocked_approval",
+          toolName,
+          "blocked",
+          "Esta operación necesita confirmación explícita",
+        );
+        throw new Error("Esta operación necesita confirmación explícita");
+      }
+    }
+    const row = await tenantPluginRow(companyId, pluginKey);
+    if (!row?.encrypted_secret) {
+      throw new Error("No hay credencial de Stripe configurada para esta tienda");
+    }
+    const secretToken = decryptSecret(row.encrypted_secret);
+    try {
+      const result = await callStripeTool(plugin.config, toolName, args ?? {}, secretToken);
+      await pluginAudit(
+        companyId,
+        user.id,
+        pluginKey,
+        access.write ? "tool_write" : "tool_read",
+        toolName,
+        "ok",
+        `Ejecución exitosa de ${toolName}`,
+      );
+      return result;
+    } catch (err) {
+      const msg = redactSensitive(err instanceof Error ? err.message : String(err));
+      await pluginAudit(companyId, user.id, pluginKey, "tool_error", toolName, "error", msg);
+      throw err;
+    }
+  },
+
+  async list_plugin_logs(
+    pluginKey: PluginKey,
+    limit = 20,
+    token: string | null,
+  ): Promise<PluginAuditLogEntry[]> {
+    const user = await requireAdmin(token);
+    if (!token) throw new Error("Sesión no iniciada");
+    pluginDefinition(pluginKey);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const maxLimit = Math.min(Math.max(1, limit), 100);
+
+    const rows = await sql`
+      SELECT l.id, l.company_id, l.user_id, u.display_name AS actor_name, l.plugin_key, l.action, l.tool_name, l.result, l.summary, l.created_at
+      FROM plugin_audit_log l
+      LEFT JOIN users u ON u.id = l.user_id
+      WHERE l.company_id = ${companyId} AND l.plugin_key = ${pluginKey}
+      ORDER BY l.id DESC
+      LIMIT ${maxLimit}
+    `;
+
+    return rows.map((r) => ({
+      id: Number(r.id),
+      company_id: Number(r.company_id),
+      user_id: r.user_id ? Number(r.user_id) : null,
+      actor_name: r.actor_name ?? "Sistema",
+      plugin_key: r.plugin_key as PluginKey,
+      action: r.action,
+      tool_name: r.tool_name ?? null,
+      result: (r.result as PluginLogResult) || "ok",
+      summary: r.summary ?? null,
+      created_at: toIso(r.created_at),
+    }));
+  },
+
   async list_users(token: string | null): Promise<AuthUser[]> {
     await requireAdmin(token);
     const users = await sql`
-      SELECT id, username, display_name, role, active, created_at, must_change_password, temp_password_issued_at
+      SELECT id, username, display_name, role, active, created_at, must_change_password, temp_password_issued_at, is_master
       FROM users
       ORDER BY id ASC
     `;
@@ -733,6 +1522,7 @@ export const postgresApi = {
       created_at: toIso(u.created_at),
       must_change_password: !!u.must_change_password,
       temp_password_issued_at: toIso(u.temp_password_issued_at) || null,
+      is_master: !!u.is_master,
     }));
   },
 
@@ -776,7 +1566,7 @@ export const postgresApi = {
         UPDATE users
         SET ${sql(updateData)}
         WHERE id = ${input.id}
-        RETURNING id, username, display_name, role, active, created_at, must_change_password, temp_password_issued_at
+        RETURNING id, username, display_name, role, active, created_at, must_change_password, temp_password_issued_at, is_master
       `;
       if (res.length === 0) throw new Error("Usuario no encontrado");
       const u = res[0];
@@ -790,6 +1580,7 @@ export const postgresApi = {
           created_at: toIso(u.created_at),
           must_change_password: !!u.must_change_password,
           temp_password_issued_at: toIso(u.temp_password_issued_at) || null,
+          is_master: !!u.is_master,
         },
         temporary_password,
       };
@@ -810,7 +1601,7 @@ export const postgresApi = {
         ${fields.must_change_password},
         ${fields.temp_password_issued_at ? new Date(fields.temp_password_issued_at) : now}
       )
-      RETURNING id, username, display_name, role, active, created_at, must_change_password, temp_password_issued_at
+      RETURNING id, username, display_name, role, active, created_at, must_change_password, temp_password_issued_at, is_master
     `;
     const u = res[0];
     return {
@@ -823,6 +1614,7 @@ export const postgresApi = {
         created_at: toIso(u.created_at),
         must_change_password: !!u.must_change_password,
         temp_password_issued_at: toIso(u.temp_password_issued_at) || null,
+        is_master: !!u.is_master,
       },
       temporary_password,
     };
@@ -855,7 +1647,7 @@ export const postgresApi = {
       UPDATE users
       SET pin_hash = ${newHash}, must_change_password = FALSE, temp_password_issued_at = NULL
       WHERE id = ${me.id}
-      RETURNING id, username, display_name, role, active, created_at, must_change_password, temp_password_issued_at
+      RETURNING id, username, display_name, role, active, created_at, must_change_password, temp_password_issued_at, is_master
     `;
     const u = res[0];
     return {
@@ -867,6 +1659,7 @@ export const postgresApi = {
       created_at: toIso(u.created_at),
       must_change_password: !!u.must_change_password,
       temp_password_issued_at: toIso(u.temp_password_issued_at) || null,
+      is_master: !!u.is_master,
     };
   },
 
@@ -890,6 +1683,13 @@ export const postgresApi = {
       cost_cents: p.cost_cents,
       price_cents: p.price_cents,
       vat_rate: p.vat_rate,
+      supplier_name: p.supplier_name || "",
+      supplier_contact: p.supplier_contact || "",
+      supplier_email: p.supplier_email || "",
+      supplier_phone: p.supplier_phone || "",
+      fulfillment_mode: p.fulfillment_mode || "own_stock",
+      stock_location: p.stock_location || "Almacén principal",
+      condition_code: p.condition_code || "used",
       active: !!p.active,
       created_at: toIso(p.created_at),
       updated_at: toIso(p.updated_at),
@@ -897,7 +1697,9 @@ export const postgresApi = {
   },
 
   async upsert_product(input: ProductInput, token: string | null): Promise<Product> {
-    await requireSession(token);
+    const user = await requireSession(token);
+    if (!token) throw new Error("Sesión no iniciada");
+    const cid = await resolveActiveCompanyId(token, user.id);
     const now = new Date();
 
     if (input.id) {
@@ -913,15 +1715,23 @@ export const postgresApi = {
           cost_cents = ${input.cost_cents},
           price_cents = ${input.price_cents},
           vat_rate = ${input.vat_rate},
+          supplier_name = ${input.supplier_name ?? ""},
+          supplier_contact = ${input.supplier_contact ?? ""},
+          supplier_email = ${input.supplier_email ?? ""},
+          supplier_phone = ${input.supplier_phone ?? ""},
+          fulfillment_mode = ${input.fulfillment_mode ?? "own_stock"},
+          stock_location = ${input.stock_location ?? "Almacén principal"},
+          condition_code = ${input.condition_code ?? "used"},
           active = ${input.active ?? true},
           updated_at = ${now}
-        WHERE id = ${input.id}
+        WHERE id = ${input.id} AND company_id = ${cid}
         RETURNING *
       `;
       if (res.length === 0) throw new Error("Producto no encontrado");
       const p = res[0];
       return {
         id: p.id,
+        company_id: p.company_id,
         sku: p.sku,
         name: p.name,
         description: p.description,
@@ -931,6 +1741,13 @@ export const postgresApi = {
         cost_cents: p.cost_cents,
         price_cents: p.price_cents,
         vat_rate: p.vat_rate,
+        supplier_name: p.supplier_name || "",
+        supplier_contact: p.supplier_contact || "",
+        supplier_email: p.supplier_email || "",
+        supplier_phone: p.supplier_phone || "",
+        fulfillment_mode: p.fulfillment_mode || "own_stock",
+        stock_location: p.stock_location || "Almacén principal",
+        condition_code: p.condition_code || "used",
         active: !!p.active,
         created_at: toIso(p.created_at),
         updated_at: toIso(p.updated_at),
@@ -938,8 +1755,9 @@ export const postgresApi = {
     } else {
       // Create
       const res = await sql`
-        INSERT INTO products (sku, name, description, category, stock, min_stock, cost_cents, price_cents, vat_rate, active)
+        INSERT INTO products (company_id, sku, name, description, category, stock, min_stock, cost_cents, price_cents, vat_rate, supplier_name, supplier_contact, supplier_email, supplier_phone, fulfillment_mode, stock_location, condition_code, active)
         VALUES (
+          ${cid},
           ${input.sku},
           ${input.name},
           ${input.description ?? ""},
@@ -949,6 +1767,13 @@ export const postgresApi = {
           ${input.cost_cents},
           ${input.price_cents},
           ${input.vat_rate},
+          ${input.supplier_name ?? ""},
+          ${input.supplier_contact ?? ""},
+          ${input.supplier_email ?? ""},
+          ${input.supplier_phone ?? ""},
+          ${input.fulfillment_mode ?? "own_stock"},
+          ${input.stock_location ?? "Almacén principal"},
+          ${input.condition_code ?? "used"},
           ${input.active ?? true}
         )
         RETURNING *
@@ -958,13 +1783,14 @@ export const postgresApi = {
       // Registrar movimiento de stock inicial si es mayor que 0
       if (p.stock > 0) {
         await sql`
-          INSERT INTO stock_movements (product_id, delta, reason)
-          VALUES (${p.id}, ${p.stock}, 'Stock inicial')
+          INSERT INTO stock_movements (product_id, company_id, delta, reason)
+          VALUES (${p.id}, ${cid}, ${p.stock}, 'Stock inicial')
         `;
       }
 
       return {
         id: p.id,
+        company_id: p.company_id,
         sku: p.sku,
         name: p.name,
         description: p.description,
@@ -974,6 +1800,13 @@ export const postgresApi = {
         cost_cents: p.cost_cents,
         price_cents: p.price_cents,
         vat_rate: p.vat_rate,
+        supplier_name: p.supplier_name || "",
+        supplier_contact: p.supplier_contact || "",
+        supplier_email: p.supplier_email || "",
+        supplier_phone: p.supplier_phone || "",
+        fulfillment_mode: p.fulfillment_mode || "own_stock",
+        stock_location: p.stock_location || "Almacén principal",
+        condition_code: p.condition_code || "used",
         active: !!p.active,
         created_at: toIso(p.created_at),
         updated_at: toIso(p.updated_at),
@@ -981,13 +1814,30 @@ export const postgresApi = {
     }
   },
 
+  async list_suppliers(token: string | null) {
+    const user = await requireSession(token); if (!token) throw new Error("Sesión no iniciada");
+    const cid = await resolveActiveCompanyId(token, user.id);
+    const rows = await sql`SELECT * FROM suppliers WHERE company_id = ${cid} ORDER BY name ASC`;
+    return rows.map((s) => ({ id: s.id, company_id: s.company_id, name: s.name, contact: s.contact, email: s.email, phone: s.phone, ordering_method: s.ordering_method, notes: s.notes, active: !!s.active, created_at: toIso(s.created_at), updated_at: toIso(s.updated_at) }));
+  },
+
+  async upsert_supplier(input: { id?: number | null; name: string; contact?: string; email?: string; phone?: string; ordering_method?: string; notes?: string; active?: boolean }, token: string | null) {
+    const user = await requireSession(token); if (!token) throw new Error("Sesión no iniciada"); const cid = await resolveActiveCompanyId(token, user.id); const now = new Date();
+    const row = input.id
+      ? (await sql`UPDATE suppliers SET name=${input.name}, contact=${input.contact ?? ""}, email=${input.email ?? ""}, phone=${input.phone ?? ""}, ordering_method=${input.ordering_method ?? "email"}, notes=${input.notes ?? ""}, active=${input.active ?? true}, updated_at=${now} WHERE id=${input.id} AND company_id=${cid} RETURNING *`)[0]
+      : (await sql`INSERT INTO suppliers (company_id,name,contact,email,phone,ordering_method,notes,active) VALUES (${cid},${input.name},${input.contact ?? ""},${input.email ?? ""},${input.phone ?? ""},${input.ordering_method ?? "email"},${input.notes ?? ""},${input.active ?? true}) RETURNING *`)[0];
+    if (!row) throw new Error("Proveedor no encontrado");
+    return { id: row.id, company_id: row.company_id, name: row.name, contact: row.contact, email: row.email, phone: row.phone, ordering_method: row.ordering_method, notes: row.notes, active: !!row.active, created_at: toIso(row.created_at), updated_at: toIso(row.updated_at) };
+  },
+
   async adjust_stock(product_id: number, delta: number, reason: string, token: string | null): Promise<Product> {
-    await requireSession(token);
+    const user = await requireSession(token); if (!token) throw new Error("Sesión no iniciada");
+    const cid = await resolveActiveCompanyId(token, user.id);
     const now = new Date();
 
     const updated = await sql.begin(async (tx) => {
       // Leer actual
-      const prodRes = await tx`SELECT stock FROM products WHERE id = ${product_id}`;
+      const prodRes = await tx`SELECT stock FROM products WHERE id = ${product_id} AND company_id = ${cid}`;
       if (prodRes.length === 0) throw new Error("Producto no encontrado");
       const currentStock = prodRes[0].stock;
       const newStock = currentStock + delta;
@@ -997,14 +1847,14 @@ export const postgresApi = {
       const res = await tx`
         UPDATE products
         SET stock = ${newStock}, updated_at = ${now}
-        WHERE id = ${product_id}
+        WHERE id = ${product_id} AND company_id = ${cid}
         RETURNING *
       `;
 
       // Registrar movimiento
       await tx`
-        INSERT INTO stock_movements (product_id, delta, reason)
-        VALUES (${product_id}, ${delta}, ${reason})
+        INSERT INTO stock_movements (product_id, company_id, delta, reason)
+        VALUES (${product_id}, ${cid}, ${delta}, ${reason})
       `;
 
       return res[0];
@@ -1012,6 +1862,7 @@ export const postgresApi = {
 
     return {
       id: updated.id,
+      company_id: updated.company_id,
       sku: updated.sku,
       name: updated.name,
       description: updated.description,
@@ -1338,15 +2189,19 @@ export const postgresApi = {
   },
 
   async list_cash_movements(token: string | null): Promise<CashMovement[]> {
-    await requireSession(token);
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
     const movements = await sql`
       SELECT cm.*, s.number as sale_number
       FROM cash_movements cm
       LEFT JOIN sales s ON cm.sale_id = s.id
+      WHERE cm.company_id = ${companyId}
       ORDER BY cm.occurred_at DESC
     `;
     return movements.map((m) => ({
       id: m.id,
+      company_id: m.company_id,
+      project_id: m.project_id ?? null,
       kind: m.kind,
       amount_cents: m.amount_cents,
       category: m.category,
@@ -1358,17 +2213,30 @@ export const postgresApi = {
   },
 
   async create_cash_movement(input: CashInput, token: string | null): Promise<CashMovement> {
-    await requireSession(token);
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
     if (input.amount_cents <= 0) throw new Error("El importe debe ser mayor que cero");
+    if (input.project_id != null) {
+      const projectRows = await sql`
+        SELECT id, customer_id FROM work_projects
+        WHERE id = ${input.project_id} AND company_id = ${companyId}
+      `;
+      if (projectRows.length === 0) throw new Error("Proyecto no encontrado.");
+      if (projectRows[0].customer_id == null) {
+        throw new Error("Los proyectos propios no admiten movimientos de pago.");
+      }
+    }
 
     const res = await sql`
-      INSERT INTO cash_movements (kind, amount_cents, category, description)
-      VALUES (${input.kind}, ${input.amount_cents}, ${input.category || "otros"}, ${input.description || ""})
+      INSERT INTO cash_movements (company_id, project_id, kind, amount_cents, category, description)
+      VALUES (${companyId}, ${input.project_id ?? null}, ${input.kind}, ${input.amount_cents}, ${input.category || "otros"}, ${input.description || ""})
       RETURNING *
     `;
     const m = res[0];
     return {
       id: m.id,
+      company_id: m.company_id,
+      project_id: m.project_id ?? null,
       kind: m.kind,
       amount_cents: m.amount_cents,
       category: m.category,
@@ -1379,13 +2247,15 @@ export const postgresApi = {
   },
 
   async get_cash_balance(token: string | null): Promise<number> {
-    await requireSession(token);
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
     const res = await sql`
       SELECT COALESCE(
         SUM(CASE WHEN kind = 'expense' THEN -ABS(amount_cents) ELSE ABS(amount_cents) END),
         0
       )::int as balance
       FROM cash_movements
+      WHERE company_id = ${companyId}
     `;
     return res[0].balance;
   },
@@ -1692,13 +2562,13 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   async reset_demo(token: string | null): Promise<void> {
     await requireAdmin(token);
     // Truncar tablas y volver a sembrar
-    await sql`TRUNCATE TABLE sessions, cash_movements, sale_lines, sales, stock_movements, products, customers RESTART IDENTITY CASCADE`;
+    await sql`TRUNCATE TABLE sessions, work_items, work_projects, work_categories, cash_movements, sale_lines, sales, stock_movements, products, customers RESTART IDENTITY CASCADE`;
     await seedProductsAndCustomers();
   },
 
   async export_backup(token: string | null): Promise<BackupEnvelope> {
     await requireAdmin(token);
-    const [products, customers, sales, sale_lines, cash_movements, stock_movements, settings, users] =
+    const [products, customers, sales, sale_lines, cash_movements, stock_movements, settings, users, work_categories, work_projects, work_items] =
       await Promise.all([
         sql`SELECT * FROM products ORDER BY id`,
         sql`SELECT * FROM customers ORDER BY id`,
@@ -1708,6 +2578,9 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
         sql`SELECT * FROM stock_movements ORDER BY id`,
         sql`SELECT * FROM settings ORDER BY key`,
         sql`SELECT id, username, display_name, role, active, created_at, must_change_password, temp_password_issued_at FROM users ORDER BY id`,
+        sql`SELECT * FROM work_categories ORDER BY id`,
+        sql`SELECT * FROM work_projects ORDER BY id`,
+        sql`SELECT * FROM work_items ORDER BY id`,
       ]);
     const backup = await createBackupEnvelope({
       backend: "postgres",
@@ -1719,6 +2592,9 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
       stock_movements,
       settings,
       users,
+      work_categories,
+      work_projects,
+      work_items,
     });
     await sql`
       INSERT INTO settings (key, value) VALUES ('last_backup_at', ${backup.created_at})
@@ -1748,4 +2624,1045 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
       "Restauración completa Postgres desde UI desactivada por seguridad. Usa docs/BACKUP.md (pg_dump) o un runbook admin.",
     );
   },
+
+  /* -------------------------------------------------------------
+     Módulo Trabajo (Multiempresa) PostgreSQL Implementation
+     ------------------------------------------------------------- */
+
+  async listWorkProjects(status_filter?: string, token?: string | null): Promise<WorkProject[]> {
+    const user = await requireSession(token ?? null);
+    const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+
+    let query = sql`
+      SELECT * FROM work_projects
+      WHERE company_id = ${companyId}
+    `;
+    if (status_filter && status_filter.trim() !== "" && status_filter !== "all") {
+      query = sql`${query} AND status = ${status_filter.trim()}`;
+    }
+    query = sql`${query} ORDER BY created_at DESC, id DESC`;
+    const rows = await query;
+    return attachProjectRevenueMilestones(rows.map(formatWorkProject), companyId);
+  },
+
+  async getWorkProject(reference: number | string, token?: string | null): Promise<WorkProject> {
+    const user = await requireSession(token ?? null);
+    const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+    const ref = String(reference);
+    const numericId = /^\d+$/.test(ref) ? Number(ref) : null;
+
+    const rows = await sql`
+      SELECT * FROM work_projects
+      WHERE company_id = ${companyId}
+        AND (uid::text = ${ref} OR (${numericId}::integer IS NOT NULL AND id = ${numericId}))
+    `;
+    if (rows.length === 0) throw new Error("Proyecto no encontrado.");
+    return (await attachProjectRevenueMilestones([formatWorkProject(rows[0])], companyId))[0];
+  },
+
+  async upsertWorkProject(input: WorkProjectInput, token?: string | null): Promise<WorkProject> {
+    const user = await requireAdminProjectManagementPg(token ?? null);
+    const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+
+    const name = (input.name ?? "").trim();
+    if (!name) throw new Error("El nombre del proyecto es obligatorio.");
+
+    let existing: any = null;
+    if (input.id != null) {
+      const existingRows = await sql`
+        SELECT * FROM work_projects
+        WHERE id = ${input.id} AND company_id = ${companyId}
+      `;
+      if (existingRows.length === 0) throw new Error("Proyecto no encontrado.");
+      existing = existingRows[0];
+    }
+
+    const startDate = input.start_date !== undefined ? (input.start_date ?? null) : (existing?.start_date ? toIso(existing.start_date) : null);
+    const targetDate = input.target_date !== undefined ? (input.target_date ?? null) : (existing?.target_date ? toIso(existing.target_date) : null);
+
+    if (startDate && targetDate) {
+      const startMs = new Date(startDate).getTime();
+      const targetMs = new Date(targetDate).getTime();
+      if (targetMs < startMs) {
+        throw new Error("La fecha de fin no puede ser anterior a la fecha de inicio.");
+      }
+    }
+
+    const status = input.status ?? existing?.status ?? "planned";
+    const valueCents = input.value_cents ?? existing?.value_cents ?? 0;
+    if (valueCents < 0) throw new Error("El valor del proyecto no puede ser negativo.");
+    const monthlyEstimateCents = input.revenue_milestones !== undefined
+      ? input.revenue_milestones.reduce((sum, milestone) => sum + milestone.amount_cents, 0)
+      : (input.monthly_estimate_cents ?? existing?.monthly_estimate_cents ?? 0);
+    if (monthlyEstimateCents < 0) {
+      throw new Error("La estimación mensual no puede ser negativa.");
+    }
+    const revenueTargetDate = input.revenue_target_date !== undefined
+      ? input.revenue_target_date
+      : (existing?.revenue_target_date ? toIso(existing.revenue_target_date) : null);
+    const description = input.description !== undefined ? (input.description ?? "") : (existing?.description ?? "");
+    const customerId = input.customer_id !== undefined
+      ? input.customer_id
+      : (existing?.customer_id ?? null);
+    if (customerId != null) {
+      const customerRows = await sql`
+        SELECT id FROM customers
+        WHERE id = ${customerId} AND company_id = ${companyId}
+      `;
+      if (customerRows.length === 0) {
+        throw new Error("Cliente no encontrado en la empresa activa.");
+      }
+    }
+
+    let projectId: number;
+    if (existing) {
+      const updated = await sql`
+        UPDATE work_projects SET
+          name = ${name},
+          description = ${description},
+          status = ${status},
+          customer_id = ${customerId},
+          value_cents = ${valueCents},
+          monthly_estimate_cents = ${monthlyEstimateCents},
+          revenue_target_date = ${revenueTargetDate},
+          start_date = ${startDate},
+          target_date = ${targetDate},
+          updated_at = NOW()
+        WHERE id = ${existing.id} AND company_id = ${companyId}
+        RETURNING id
+      `;
+      projectId = updated[0].id;
+    } else {
+      const inserted = await sql`
+        INSERT INTO work_projects (
+          company_id, customer_id, value_cents, monthly_estimate_cents, revenue_target_date,
+          name, description, status, start_date, target_date, created_by
+        ) VALUES (
+          ${companyId}, ${customerId}, ${valueCents}, ${monthlyEstimateCents}, ${revenueTargetDate},
+          ${name}, ${description}, ${status}, ${startDate}, ${targetDate}, ${user.id}
+        )
+        RETURNING id
+      `;
+      projectId = inserted[0].id;
+    }
+
+    if (input.revenue_milestones !== undefined) {
+      const minimumMonth = new Date().toISOString().slice(0, 7);
+      for (const milestone of input.revenue_milestones) {
+        if (
+          milestone.amount_cents <= 0 ||
+          !/^\d{4}-\d{2}$/.test(milestone.target_month) ||
+          milestone.target_month < minimumMonth
+        ) {
+          throw new Error("Cada hito mensual debe tener un importe y un mes válidos.");
+        }
+      }
+      await sql`
+        DELETE FROM work_project_revenue_milestones
+        WHERE project_id = ${projectId} AND company_id = ${companyId}
+      `;
+      for (const milestone of input.revenue_milestones) {
+        await sql`
+          INSERT INTO work_project_revenue_milestones (
+            company_id, project_id, amount_cents, target_month
+          ) VALUES (
+            ${companyId}, ${projectId}, ${milestone.amount_cents}, ${milestone.target_month}
+          )
+        `;
+      }
+    }
+
+    const fetched = await sql`
+      SELECT * FROM work_projects WHERE id = ${projectId} AND company_id = ${companyId}
+    `;
+    return (await attachProjectRevenueMilestones([formatWorkProject(fetched[0])], companyId))[0];
+  },
+
+  async archiveWorkProject(id: number, token?: string | null): Promise<WorkProject> {
+    const user = await requireAdminProjectManagementPg(token ?? null);
+    const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+
+    const res = await sql`
+      UPDATE work_projects
+      SET status = 'archived', updated_at = NOW()
+      WHERE id = ${id} AND company_id = ${companyId}
+      RETURNING id
+    `;
+    if (res.length === 0) throw new Error("Proyecto no encontrado.");
+
+    const fetched = await sql`
+      SELECT * FROM work_projects WHERE id = ${id} AND company_id = ${companyId}
+    `;
+    return formatWorkProject(fetched[0]);
+  },
+  async listWorkItems(filters?: WorkItemFilters, token?: string | null): Promise<WorkItem[]> {
+    const user = await requireSession(token ?? null);
+    const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+
+    let query = sql`
+      SELECT
+        wi.*,
+        wc.name AS category_name,
+        wc.normalized_name AS category_normalized_name,
+        wc.color AS category_color,
+        wc.archived_at AS category_archived_at,
+        wc.created_at AS category_created_at,
+        wc.updated_at AS category_updated_at,
+        u.display_name AS assignee_name
+      FROM work_items wi
+      LEFT JOIN work_categories wc ON wi.category_id = wc.id
+      LEFT JOIN users u ON wi.assignee_id = u.id
+      WHERE wi.company_id = ${companyId}
+    `;
+
+    if (filters) {
+      if (filters.status) query = sql`${query} AND wi.status = ${filters.status}`;
+      if (filters.type) query = sql`${query} AND wi.type = ${filters.type}`;
+      if (filters.priority) query = sql`${query} AND wi.priority = ${filters.priority}`;
+      if (filters.category_id !== undefined) {
+        if (filters.category_id === null) {
+          query = sql`${query} AND wi.category_id IS NULL`;
+        } else {
+          query = sql`${query} AND wi.category_id = ${filters.category_id}`;
+        }
+      }
+      if (filters.project_id !== undefined) {
+        if (filters.project_id === null) {
+          query = sql`${query} AND wi.project_id IS NULL`;
+        } else if (typeof filters.project_id === "number") {
+          query = sql`${query} AND wi.project_id = ${filters.project_id}`;
+        }
+      }
+      if (filters.assignee_id !== undefined) {
+        if (filters.assignee_id === null) {
+          query = sql`${query} AND wi.assignee_id IS NULL`;
+        } else {
+          query = sql`${query} AND wi.assignee_id = ${filters.assignee_id}`;
+        }
+      }
+      if (filters.text && filters.text.trim()) {
+        const pattern = `%${filters.text.trim()}%`;
+        query = sql`${query} AND (wi.title ILIKE ${pattern} OR wi.description ILIKE ${pattern})`;
+      }
+    }
+
+    query = sql`${query} ORDER BY wi.sort_order ASC, wi.created_at DESC`;
+    const rows = await query;
+    return rows.map(formatWorkItem);
+  },
+
+  async upsertWorkItem(input: WorkItemInput, token?: string | null): Promise<WorkItem> {
+    const user = await requireSession(token ?? null);
+    const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+
+    const title = (input.title ?? "").trim();
+    if (!title) throw new Error("El título es obligatorio.");
+    const truncatedTitle = title.slice(0, 255);
+
+    if (input.assignee_id != null) {
+      const members = await this.listWorkMembers(token);
+      if (!members.some((m) => m.id === input.assignee_id)) {
+        throw new Error("El responsable no pertenece a esta empresa.");
+      }
+    }
+
+    let categoryId = input.category_id ?? null;
+    if (input.category_name && input.category_name.trim() !== "") {
+      const catName = input.category_name.trim();
+      const normName = catName.toUpperCase();
+      const catRows = await sql`
+        SELECT id FROM work_categories
+        WHERE company_id = ${companyId} AND normalized_name = ${normName}
+        LIMIT 1
+      `;
+      if (catRows.length > 0) {
+        categoryId = catRows[0].id;
+      } else {
+        const newCat = await sql`
+          INSERT INTO work_categories (company_id, name, normalized_name, color)
+          VALUES (${companyId}, ${catName}, ${normName}, '#6b7280')
+          RETURNING id
+        `;
+        categoryId = newCat[0].id;
+      }
+    }
+
+    if (categoryId != null) {
+      const catCheck = await sql`SELECT id FROM work_categories WHERE id = ${categoryId} AND company_id = ${companyId}`;
+      if (catCheck.length === 0) throw new Error("La categoría no pertenece a esta empresa.");
+    }
+
+    if (input.project_id != null) {
+      const projCheck = await sql`SELECT id, status FROM work_projects WHERE id = ${input.project_id} AND company_id = ${companyId}`;
+      if (projCheck.length === 0) throw new Error("El proyecto no pertenece a esta empresa.");
+      if (projCheck[0].status === "archived") throw new Error("No se pueden crear ni asignar tareas a un proyecto archivado.");
+    }
+
+    let existing: any = null;
+    if (input.id != null) {
+      const existingRows = await sql`SELECT * FROM work_items WHERE id = ${input.id} AND company_id = ${companyId}`;
+      if (existingRows.length === 0) throw new Error("Tarea no encontrada.");
+      existing = existingRows[0];
+    }
+
+    const targetStatus = input.status ?? existing?.status ?? "inbox";
+    const sourceType = input.source_type !== undefined ? input.source_type : (existing?.source_type ?? null);
+    const sourceKey = input.source_key !== undefined ? input.source_key : (existing?.source_key ?? null);
+    const isActive = targetStatus !== "done" && targetStatus !== "archived";
+
+    if (sourceType && sourceKey && isActive) {
+      const dupQuery = input.id != null
+        ? sql`SELECT id FROM work_items WHERE company_id = ${companyId} AND source_type = ${sourceType} AND source_key = ${sourceKey} AND status NOT IN ('done', 'archived') AND id <> ${input.id} LIMIT 1`
+        : sql`SELECT id FROM work_items WHERE company_id = ${companyId} AND source_type = ${sourceType} AND source_key = ${sourceKey} AND status NOT IN ('done', 'archived') LIMIT 1`;
+      const activeDup = await dupQuery;
+      if (activeDup.length > 0) {
+        throw new Error("Ya existe una tarea activa para este origen.");
+      }
+    }
+
+    let completedAt: Date | null = null;
+    if (targetStatus === "done") {
+      completedAt = existing && existing.status === "done" && existing.completed_at ? existing.completed_at : new Date();
+    } else {
+      completedAt = null;
+    }
+
+    let itemId: number;
+    if (existing) {
+      const updated = await sql`
+        UPDATE work_items SET
+          category_id = ${categoryId},
+          project_id = ${input.project_id !== undefined ? input.project_id : existing.project_id},
+          assignee_id = ${input.assignee_id !== undefined ? input.assignee_id : existing.assignee_id},
+          title = ${truncatedTitle},
+          description = ${input.description !== undefined ? input.description : existing.description},
+          type = ${input.type ?? existing.type},
+          status = ${targetStatus},
+          priority = ${input.priority ?? existing.priority},
+          start_date = ${input.start_date !== undefined ? (input.start_date ?? null) : (existing.start_date ?? null)},
+          due_date = ${input.due_date !== undefined ? (input.due_date ?? null) : (existing.due_date ?? null)},
+          sort_order = ${input.sort_order ?? existing.sort_order ?? 0},
+          source_type = ${sourceType ?? null},
+          source_key = ${sourceKey ?? null},
+          source_href = ${input.source_href !== undefined ? (input.source_href ?? null) : (existing.source_href ?? null)},
+          completed_at = ${completedAt ?? null},
+          updated_at = NOW()
+        WHERE id = ${input.id ?? null} AND company_id = ${companyId}
+        RETURNING id
+      `;
+      itemId = updated[0].id;
+    } else {
+      const inserted = await sql`
+        INSERT INTO work_items (
+          company_id, category_id, project_id, assignee_id, created_by, title, description,
+          type, status, priority, start_date, due_date, sort_order, source_type, source_key,
+          source_href, completed_at
+        ) VALUES (
+          ${companyId}, ${categoryId}, ${input.project_id ?? null}, ${input.assignee_id ?? null},
+          ${user.id}, ${truncatedTitle}, ${input.description ?? ""}, ${input.type ?? "task"},
+          ${targetStatus}, ${input.priority ?? "normal"}, ${input.start_date ?? null}, ${input.due_date ?? null},
+          ${input.sort_order ?? 0}, ${sourceType}, ${sourceKey}, ${input.source_href ?? null}, ${completedAt}
+        )
+        RETURNING id
+      `;
+      itemId = inserted[0].id;
+    }
+
+    const fetched = await sql`
+      SELECT
+        wi.*,
+        wc.name AS category_name,
+        wc.normalized_name AS category_normalized_name,
+        wc.color AS category_color,
+        wc.archived_at AS category_archived_at,
+        wc.created_at AS category_created_at,
+        wc.updated_at AS category_updated_at,
+        u.display_name AS assignee_name
+      FROM work_items wi
+      LEFT JOIN work_categories wc ON wi.category_id = wc.id
+      LEFT JOIN users u ON wi.assignee_id = u.id
+      WHERE wi.id = ${itemId} AND wi.company_id = ${companyId}
+    `;
+    return formatWorkItem(fetched[0]);
+  },
+
+  async archiveWorkItem(id: number, token?: string | null): Promise<WorkItem> {
+    const user = await requireSession(token ?? null);
+    const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+    const res = await sql`
+      UPDATE work_items
+      SET status = 'archived', completed_at = NULL, updated_at = NOW()
+      WHERE id = ${id} AND company_id = ${companyId}
+      RETURNING id
+    `;
+    if (res.length === 0) throw new Error("Tarea no encontrada.");
+
+    const fetched = await sql`
+      SELECT
+        wi.*,
+        wc.name AS category_name,
+        wc.normalized_name AS category_normalized_name,
+        wc.color AS category_color,
+        wc.archived_at AS category_archived_at,
+        wc.created_at AS category_created_at,
+        wc.updated_at AS category_updated_at,
+        u.display_name AS assignee_name
+      FROM work_items wi
+      LEFT JOIN work_categories wc ON wi.category_id = wc.id
+      LEFT JOIN users u ON wi.assignee_id = u.id
+      WHERE wi.id = ${id} AND wi.company_id = ${companyId}
+    `;
+    return formatWorkItem(fetched[0]);
+  },
+
+  async listWorkCategories(token?: string | null): Promise<WorkCategory[]> {
+    const user = await requireSession(token ?? null);
+    const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+    const rows = await sql`
+      SELECT * FROM work_categories
+      WHERE company_id = ${companyId} AND archived_at IS NULL
+      ORDER BY name ASC
+    `;
+    return rows.map((r) => ({
+      id: r.id,
+      company_id: r.company_id,
+      name: r.name,
+      normalized_name: r.normalized_name,
+      color: r.color,
+      archived_at: toIso(r.archived_at) || null,
+      created_at: toIso(r.created_at),
+      updated_at: toIso(r.updated_at),
+    }));
+  },
+
+  async renameWorkCategory(id: number, name: string, token?: string | null): Promise<WorkCategory> {
+    await requireAdminCategoryManagementPg(token ?? null);
+    const user = await requireSession(token ?? null);
+    const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+
+    const trimmed = (name ?? "").trim();
+    if (!trimmed) throw new Error("El nombre de la categoría es obligatorio.");
+    const normName = trimmed.toUpperCase();
+
+    const dup = await sql`
+      SELECT id FROM work_categories
+      WHERE company_id = ${companyId} AND normalized_name = ${normName} AND id <> ${id}
+    `;
+    if (dup.length > 0) throw new Error("Ya existe una categoría con ese nombre.");
+
+    const updated = await sql`
+      UPDATE work_categories
+      SET name = ${trimmed}, normalized_name = ${normName}, updated_at = NOW()
+      WHERE id = ${id} AND company_id = ${companyId}
+      RETURNING *
+    `;
+    if (updated.length === 0) throw new Error("Categoría no encontrada.");
+
+    const r = updated[0];
+    return {
+      id: r.id,
+      company_id: r.company_id,
+      name: r.name,
+      normalized_name: r.normalized_name,
+      color: r.color,
+      archived_at: toIso(r.archived_at) || null,
+      created_at: toIso(r.created_at),
+      updated_at: toIso(r.updated_at),
+    };
+  },
+
+  async mergeWorkCategory(sourceId: number, targetId: number, token?: string | null): Promise<WorkCategory> {
+    await requireAdminCategoryManagementPg(token ?? null);
+    if (sourceId === targetId) {
+      throw new Error("La categoría de origen y destino no pueden ser la misma.");
+    }
+    const user = await requireSession(token ?? null);
+    const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+
+    const check = await sql`
+      SELECT id FROM work_categories
+      WHERE id IN (${sourceId}, ${targetId}) AND company_id = ${companyId}
+    `;
+    if (check.length < 2) throw new Error("Categoría no encontrada.");
+
+    await sql`
+      UPDATE work_items
+      SET category_id = ${targetId}, updated_at = NOW()
+      WHERE company_id = ${companyId} AND category_id = ${sourceId}
+    `;
+    await sql`
+      UPDATE work_categories
+      SET archived_at = NOW(), updated_at = NOW()
+      WHERE id = ${sourceId} AND company_id = ${companyId}
+    `;
+
+    const target = await sql`
+      SELECT * FROM work_categories WHERE id = ${targetId} AND company_id = ${companyId}
+    `;
+    const r = target[0];
+    return {
+      id: r.id,
+      company_id: r.company_id,
+      name: r.name,
+      normalized_name: r.normalized_name,
+      color: r.color,
+      archived_at: toIso(r.archived_at) || null,
+      created_at: toIso(r.created_at),
+      updated_at: toIso(r.updated_at),
+    };
+  },
+
+  async archiveWorkCategory(id: number, token?: string | null): Promise<WorkCategory> {
+    await requireAdminCategoryManagementPg(token ?? null);
+    const user = await requireSession(token ?? null);
+    const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+
+    const res = await sql`
+      UPDATE work_categories
+      SET archived_at = NOW(), updated_at = NOW()
+      WHERE id = ${id} AND company_id = ${companyId}
+      RETURNING *
+    `;
+    if (res.length === 0) throw new Error("Categoría no encontrada.");
+
+    const r = res[0];
+    return {
+      id: r.id,
+      company_id: r.company_id,
+      name: r.name,
+      normalized_name: r.normalized_name,
+      color: r.color,
+      archived_at: toIso(r.archived_at) || null,
+      created_at: toIso(r.created_at),
+      updated_at: toIso(r.updated_at),
+    };
+  },
+
+  async listWorkMembers(token?: string | null): Promise<WorkMember[]> {
+    const user = await requireSession(token ?? null);
+    const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+    const rows = await sql`
+      SELECT u.id, u.display_name, cm.role
+      FROM company_members cm
+      JOIN users u ON cm.user_id = u.id
+      WHERE cm.company_id = ${companyId} AND u.active = TRUE
+      ORDER BY u.id ASC
+    `;
+    return rows.map((r) => ({
+      id: r.id,
+      display_name: r.display_name,
+      role: r.role,
+    }));
+  },
+
+  async captureDashboardAlert(input: any, token?: string | null): Promise<WorkItem> {
+    const user = await requireSession(token ?? null);
+    const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+
+    const alertId = String(input?.alertId || input?.alert_id || input?.id || "");
+    if (!alertId) throw new Error("ID de alerta obligatorio.");
+
+    const existing = await sql`
+      SELECT id FROM work_items
+      WHERE company_id = ${companyId}
+        AND source_type = 'dashboard_alert'
+        AND source_key = ${alertId}
+        AND status NOT IN ('done', 'archived')
+      LIMIT 1
+    `;
+    if (existing.length > 0) {
+      const fetched = await sql`
+        SELECT
+          wi.*,
+          wc.name AS category_name,
+          wc.normalized_name AS category_normalized_name,
+          wc.color AS category_color,
+          wc.archived_at AS category_archived_at,
+          wc.created_at AS category_created_at,
+          wc.updated_at AS category_updated_at,
+          u.display_name AS assignee_name
+        FROM work_items wi
+        LEFT JOIN work_categories wc ON wi.category_id = wc.id
+        LEFT JOIN users u ON wi.assignee_id = u.id
+        WHERE wi.id = ${existing[0].id} AND wi.company_id = ${companyId}
+      `;
+      return formatWorkItem(fetched[0]);
+    }
+
+    let catName = "General";
+    if (alertId === "stock") catName = "Inventario";
+    else if (alertId === "backup") catName = "Administración";
+    else if (alertId === "no-sales" || alertId === "sales-down") catName = "Ventas";
+
+    const title = input?.title || `Alerta: ${alertId}`;
+    const description = input?.detail || input?.description || "";
+    const source_href = input?.href || input?.source_href || null;
+
+    return this.upsertWorkItem(
+      {
+        title,
+        description,
+        type: "task",
+        status: "inbox",
+        priority: "high",
+        category_name: catName,
+        source_type: "dashboard_alert",
+        source_key: alertId,
+        source_href,
+      },
+      token
+    );
+  },
+
+  async upsertWorkCategory(input: { id?: number | null; name: string; color?: string }, token?: string | null): Promise<WorkCategory> {
+    await requireAdminCategoryManagementPg(token ?? null);
+    const user = await requireSession(token ?? null);
+    const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+
+    const trimmed = (input.name ?? "").trim();
+    if (!trimmed) throw new Error("El nombre de la categoría es obligatorio.");
+    const normName = trimmed.toUpperCase();
+
+    if (input.id) {
+      const dup = await sql`
+        SELECT id FROM work_categories
+        WHERE company_id = ${companyId} AND normalized_name = ${normName} AND id <> ${input.id}
+      `;
+      if (dup.length > 0) throw new Error("Ya existe una categoría con ese nombre.");
+
+      const updated = await sql`
+        UPDATE work_categories
+        SET name = ${trimmed}, normalized_name = ${normName}, color = ${input.color || '#3b82f6'}, updated_at = NOW()
+        WHERE id = ${input.id} AND company_id = ${companyId}
+        RETURNING *
+      `;
+      if (updated.length === 0) throw new Error("Categoría no encontrada.");
+      const r = updated[0];
+      return {
+        id: r.id,
+        company_id: r.company_id,
+        name: r.name,
+        normalized_name: r.normalized_name,
+        color: r.color,
+        archived_at: toIso(r.archived_at) || null,
+        created_at: toIso(r.created_at),
+        updated_at: toIso(r.updated_at),
+      };
+    }
+
+    const dup = await sql`
+      SELECT id FROM work_categories
+      WHERE company_id = ${companyId} AND normalized_name = ${normName} AND archived_at IS NULL
+    `;
+    if (dup.length > 0) throw new Error("Ya existe una categoría con ese nombre.");
+
+    const inserted = await sql`
+      INSERT INTO work_categories (company_id, name, normalized_name, color)
+      VALUES (${companyId}, ${trimmed}, ${normName}, ${input.color || '#3b82f6'})
+      RETURNING *
+    `;
+    const r = inserted[0];
+    return {
+      id: r.id,
+      company_id: r.company_id,
+      name: r.name,
+      normalized_name: r.normalized_name,
+      color: r.color,
+      archived_at: toIso(r.archived_at) || null,
+      created_at: toIso(r.created_at),
+      updated_at: toIso(r.updated_at),
+    };
+  },
+
+  list_work_projects(status_filter?: string, token?: string | null) { return this.listWorkProjects(status_filter, token); },
+  get_work_project(reference: number | string, token?: string | null) { return this.getWorkProject(reference, token); },
+  upsert_work_project(input: WorkProjectInput, token?: string | null) { return this.upsertWorkProject(input, token); },
+  archive_work_project(id: number, token?: string | null) { return this.archiveWorkProject(id, token); },
+  list_work_categories(token?: string | null) { return this.listWorkCategories(token); },
+  upsert_work_category(input: any, token?: string | null) { return this.upsertWorkCategory(input, token); },
+  merge_work_categories(sourceId: number, targetId: number, token?: string | null) { return this.mergeWorkCategory(sourceId, targetId, token); },
+  archive_work_category(id: number, token?: string | null) { return this.archiveWorkCategory(id, token); },
+  list_work_members(token?: string | null) { return this.listWorkMembers(token); },
+  list_work_items(filters?: WorkItemFilters, token?: string | null) { return this.listWorkItems(filters, token); },
+  upsert_work_item(input: WorkItemInput, token?: string | null) { return this.upsertWorkItem(input, token); },
+  archive_work_item(id: number, token?: string | null) { return this.archiveWorkItem(id, token); },
+  capture_dashboard_alert(input: any, token?: string | null) { return this.captureDashboardAlert(input, token); },
+
+  async list_warehouses(token?: string | null): Promise<Warehouse[]> {
+    const user = await requireSession(token ?? null);
+    if (!token) throw new Error("Sesión no iniciada");
+    const cid = await resolveActiveCompanyId(token, user.id);
+    const rows = await sql`
+      SELECT * FROM warehouses
+      WHERE company_id = ${cid}
+      ORDER BY is_default DESC, name ASC
+    `;
+    return rows.map((r) => ({
+      id: r.id,
+      company_id: r.company_id,
+      code: r.code,
+      name: r.name,
+      is_default: !!r.is_default,
+      active: !!r.active,
+      created_at: toIso(r.created_at),
+      updated_at: toIso(r.updated_at),
+    }));
+  },
+
+  async list_stock_locations(warehouse_id?: number | null, token?: string | null): Promise<StockLocation[]> {
+    const user = await requireSession(token ?? null);
+    if (!token) throw new Error("Sesión no iniciada");
+    const cid = await resolveActiveCompanyId(token, user.id);
+    const rows = warehouse_id
+      ? await sql`
+          SELECT * FROM stock_locations
+          WHERE company_id = ${cid} AND warehouse_id = ${warehouse_id}
+          ORDER BY is_default DESC, name ASC
+        `
+      : await sql`
+          SELECT * FROM stock_locations
+          WHERE company_id = ${cid}
+          ORDER BY is_default DESC, name ASC
+        `;
+    return rows.map((r) => ({
+      id: r.id,
+      company_id: r.company_id,
+      warehouse_id: r.warehouse_id,
+      code: r.code,
+      name: r.name,
+      location_type: r.location_type || "warehouse",
+      allow_negative_stock: !!r.allow_negative_stock,
+      active: !!r.active,
+      created_at: toIso(r.created_at),
+      updated_at: toIso(r.updated_at),
+    }));
+  },
+
+  async list_stock_balances(
+    filters?: { product_id?: number; location_id?: number } | null,
+    token?: string | null,
+  ): Promise<StockBalance[]> {
+    const user = await requireSession(token ?? null);
+    if (!token) throw new Error("Sesión no iniciada");
+    const cid = await resolveActiveCompanyId(token, user.id);
+
+    const productId = filters?.product_id ? Number(filters.product_id) : null;
+    const locationId = filters?.location_id ? Number(filters.location_id) : null;
+
+    const rows = await sql`
+      SELECT sb.*, sl.name as location_name, sl.warehouse_id
+      FROM stock_balances sb
+      LEFT JOIN stock_locations sl ON sb.location_id = sl.id
+      WHERE sb.company_id = ${cid}
+        ${productId ? sql`AND sb.product_id = ${productId}` : sql``}
+        ${locationId ? sql`AND sb.location_id = ${locationId}` : sql``}
+      ORDER BY sb.product_id ASC, sb.location_id ASC
+    `;
+
+    return rows.map((r) => ({
+      company_id: r.company_id,
+      product_id: r.product_id,
+      location_id: r.location_id,
+      location_name: r.location_name || "",
+      warehouse_id: r.warehouse_id,
+      on_hand: r.on_hand ?? 0,
+      reserved: r.reserved ?? 0,
+      blocked: r.blocked ?? 0,
+      incoming: r.incoming ?? 0,
+      available: r.available ?? (r.on_hand ?? 0) - (r.reserved ?? 0) - (r.blocked ?? 0),
+      updated_at: toIso(r.updated_at),
+    }));
+  },
+
+  async list_inventory_movements(
+    filters?: { product_id?: number; location_id?: number; limit?: number } | null,
+    token?: string | null,
+  ): Promise<InventoryMovement[]> {
+    const user = await requireSession(token ?? null);
+    if (!token) throw new Error("Sesión no iniciada");
+    const cid = await resolveActiveCompanyId(token, user.id);
+
+    const productId = filters?.product_id ? Number(filters.product_id) : null;
+    const locationId = filters?.location_id ? Number(filters.location_id) : null;
+    const limitVal = filters?.limit && filters.limit > 0 ? Number(filters.limit) : 200;
+
+    const rows = await sql`
+      SELECT im.*,
+        p.sku as product_sku,
+        p.name as product_name,
+        fl.name as from_location_name,
+        tl.name as to_location_name,
+        u.display_name as created_by_name
+      FROM inventory_movements im
+      LEFT JOIN products p ON im.product_id = p.id
+      LEFT JOIN stock_locations fl ON im.from_location_id = fl.id
+      LEFT JOIN stock_locations tl ON im.to_location_id = tl.id
+      LEFT JOIN users u ON im.actor_id = u.id
+      WHERE im.company_id = ${cid}
+        ${productId ? sql`AND im.product_id = ${productId}` : sql``}
+        ${locationId ? sql`AND (im.from_location_id = ${locationId} OR im.to_location_id = ${locationId})` : sql``}
+      ORDER BY im.created_at DESC, im.id DESC
+      LIMIT ${limitVal}
+    `;
+
+    return rows.map((r) => ({
+      id: r.id,
+      company_id: r.company_id,
+      product_id: r.product_id,
+      product_sku: r.product_sku || "",
+      product_name: r.product_name || "",
+      movement_type: r.movement_type,
+      reason: r.reason_code || "",
+      quantity: r.qty ?? 0,
+      from_location_id: r.from_location_id,
+      to_location_id: r.to_location_id,
+      from_location_name: r.from_location_name || null,
+      to_location_name: r.to_location_name || null,
+      unit_cost_cents: r.cost_cents ?? 0,
+      reference_type: r.ref_type || null,
+      reference_id: r.ref_id,
+      reversed_movement_id: r.reversed_movement_id,
+      is_reversal: !!r.is_reversal,
+      notes: r.notes || null,
+      created_by: r.actor_id,
+      created_by_name: r.created_by_name || null,
+      created_at: toIso(r.created_at),
+    }));
+  },
+
+  async create_inventory_movement(input: CreateInventoryMovementInput | any, token?: string | null): Promise<InventoryMovement> {
+    const user = await requireSession(token ?? null);
+    if (!token) throw new Error("Sesión no iniciada");
+    const cid = input.company_id ? Number(input.company_id) : await resolveActiveCompanyId(token, user.id);
+
+    const productId = Number(input.product_id);
+    if (!productId) throw new Error("product_id es requerido");
+
+    const qty = Number(input.quantity ?? input.qty);
+    if (!qty || qty <= 0 || !Number.isFinite(qty)) {
+      throw new Error("La cantidad debe ser un número entero mayor que 0");
+    }
+
+    const movementType = String(input.movement_type);
+    const idempotencyKey = input.idempotency_key ? String(input.idempotency_key) : null;
+
+    return await sql.begin(async (tx) => {
+      if (idempotencyKey) {
+        const existing = await tx`
+          SELECT im.*,
+            p.sku as product_sku, p.name as product_name,
+            fl.name as from_location_name, tl.name as to_location_name,
+            u.display_name as created_by_name
+          FROM inventory_movements im
+          LEFT JOIN products p ON im.product_id = p.id
+          LEFT JOIN stock_locations fl ON im.from_location_id = fl.id
+          LEFT JOIN stock_locations tl ON im.to_location_id = tl.id
+          LEFT JOIN users u ON im.actor_id = u.id
+          WHERE im.company_id = ${cid} AND im.idempotency_key = ${idempotencyKey}
+        `;
+        if (existing.length > 0) {
+          const r = existing[0];
+          return {
+            id: r.id,
+            company_id: r.company_id,
+            product_id: r.product_id,
+            product_sku: r.product_sku || "",
+            product_name: r.product_name || "",
+            movement_type: r.movement_type,
+            reason: r.reason_code || "",
+            quantity: r.qty ?? 0,
+            from_location_id: r.from_location_id,
+            to_location_id: r.to_location_id,
+            from_location_name: r.from_location_name || null,
+            to_location_name: r.to_location_name || null,
+            unit_cost_cents: r.cost_cents ?? 0,
+            reference_type: r.ref_type || null,
+            reference_id: r.ref_id,
+            reversed_movement_id: r.reversed_movement_id,
+            is_reversal: !!r.is_reversal,
+            notes: r.notes || null,
+            created_by: r.actor_id,
+            created_by_name: r.created_by_name || null,
+            created_at: toIso(r.created_at),
+          };
+        }
+      }
+
+      const prodRes = await tx`SELECT id, cost_cents FROM products WHERE id = ${productId} AND company_id = ${cid}`;
+      if (prodRes.length === 0) throw new Error("Producto no encontrado en la empresa");
+
+      let fromLocationId = input.from_location_id ? Number(input.from_location_id) : null;
+      let toLocationId = input.to_location_id ? Number(input.to_location_id) : null;
+
+      if (movementType === "in" || movementType === "initial_stock") {
+        if (!toLocationId) {
+          const defaultLoc = await tx`SELECT id FROM stock_locations WHERE company_id = ${cid} AND is_default = TRUE LIMIT 1`;
+          toLocationId = defaultLoc[0]?.id ?? null;
+        }
+      } else if (movementType === "out") {
+        if (!fromLocationId) {
+          const defaultLoc = await tx`SELECT id FROM stock_locations WHERE company_id = ${cid} AND is_default = TRUE LIMIT 1`;
+          fromLocationId = defaultLoc[0]?.id ?? null;
+        }
+      }
+
+      const reasonCode = String(input.reason ?? input.reason_code ?? "other");
+      const costCents = input.unit_cost_cents != null ? Number(input.unit_cost_cents) : (input.cost_cents != null ? Number(input.cost_cents) : prodRes[0].cost_cents ?? 0);
+      const notes = input.notes ? String(input.notes) : "";
+      const refType = input.reference_type ?? input.ref_type ?? "";
+      const refId = input.reference_id ?? input.ref_id ?? null;
+      const isReversal = !!input.is_reversal;
+      const reversedMovementId = input.reversed_movement_id ? Number(input.reversed_movement_id) : null;
+
+      const insertedMovements = await tx`
+        INSERT INTO inventory_movements (
+          company_id, product_id, from_location_id, to_location_id, movement_type, qty, cost_cents,
+          effective_at, created_at, actor_id, reason_code, notes, ref_type, ref_id, idempotency_key,
+          reversed_movement_id, is_reversal
+        ) VALUES (
+          ${cid}, ${productId}, ${fromLocationId}, ${toLocationId}, ${movementType}, ${qty}, ${costCents},
+          NOW(), NOW(), ${user.id}, ${reasonCode}, ${notes}, ${refType}, ${refId ? Number(refId) : null}, ${idempotencyKey},
+          ${reversedMovementId}, ${isReversal}
+        )
+        RETURNING *
+      `;
+      const mov = insertedMovements[0];
+
+      if (fromLocationId) {
+        await tx`
+          INSERT INTO stock_balances (company_id, product_id, location_id, on_hand, reserved, blocked, incoming, available, updated_at)
+          VALUES (${cid}, ${productId}, ${fromLocationId}, 0, 0, 0, 0, 0, NOW())
+          ON CONFLICT (company_id, product_id, location_id) DO NOTHING
+        `;
+        const updateFrom = await tx`
+          UPDATE stock_balances
+          SET on_hand = on_hand - ${qty}, available = available - ${qty}, updated_at = NOW()
+          WHERE company_id = ${cid} AND product_id = ${productId} AND location_id = ${fromLocationId}
+          RETURNING *
+        `;
+        const bal = updateFrom[0];
+
+        const locRes = await tx`SELECT allow_negative_stock FROM stock_locations WHERE id = ${fromLocationId}`;
+        const allowNeg = input.allow_negative_stock === true || !!locRes[0]?.allow_negative_stock;
+        if (!allowNeg && (bal?.available < 0 || bal?.on_hand < 0)) {
+          throw new Error(`Stock insuficiente en ubicación origen (disponible: ${bal?.available ?? 0})`);
+        }
+      }
+
+      if (toLocationId) {
+        await tx`
+          INSERT INTO stock_balances (company_id, product_id, location_id, on_hand, reserved, blocked, incoming, available, updated_at)
+          VALUES (${cid}, ${productId}, ${toLocationId}, ${qty}, 0, 0, 0, ${qty}, NOW())
+          ON CONFLICT (company_id, product_id, location_id)
+          DO UPDATE SET
+            on_hand = stock_balances.on_hand + ${qty},
+            available = stock_balances.available + ${qty},
+            updated_at = NOW()
+          RETURNING *
+        `;
+      }
+
+      await tx`
+        UPDATE products
+        SET stock = COALESCE((
+          SELECT SUM(on_hand)::int FROM stock_balances WHERE company_id = ${cid} AND product_id = ${productId}
+        ), 0),
+        updated_at = NOW()
+        WHERE id = ${productId} AND company_id = ${cid}
+      `;
+
+      const [fromLoc, toLoc, prodInfo] = await Promise.all([
+        fromLocationId ? tx`SELECT name FROM stock_locations WHERE id = ${fromLocationId}` : Promise.resolve([]),
+        toLocationId ? tx`SELECT name FROM stock_locations WHERE id = ${toLocationId}` : Promise.resolve([]),
+        tx`SELECT sku, name FROM products WHERE id = ${productId}`,
+      ]);
+
+      return {
+        id: mov.id,
+        company_id: mov.company_id,
+        product_id: mov.product_id,
+        product_sku: prodInfo[0]?.sku || "",
+        product_name: prodInfo[0]?.name || "",
+        movement_type: mov.movement_type,
+        reason: mov.reason_code || "",
+        quantity: mov.qty ?? 0,
+        from_location_id: mov.from_location_id,
+        to_location_id: mov.to_location_id,
+        from_location_name: fromLoc[0]?.name || null,
+        to_location_name: toLoc[0]?.name || null,
+        unit_cost_cents: mov.cost_cents ?? 0,
+        reference_type: mov.ref_type || null,
+        reference_id: mov.ref_id,
+        reversed_movement_id: mov.reversed_movement_id,
+        is_reversal: !!mov.is_reversal,
+        notes: mov.notes || null,
+        created_by: mov.actor_id,
+        created_by_name: user.display_name,
+        created_at: toIso(mov.created_at),
+      };
+    });
+  },
+
+  async reverse_inventory_movement(
+    movement_id: number,
+    reason?: string,
+    token?: string | null,
+  ): Promise<InventoryMovement> {
+    const user = await requireSession(token ?? null);
+    if (!token) throw new Error("Sesión no iniciada");
+    const cid = await resolveActiveCompanyId(token, user.id);
+
+    const origRes = await sql`
+      SELECT * FROM inventory_movements WHERE id = ${movement_id} AND company_id = ${cid}
+    `;
+    if (origRes.length === 0) throw new Error("Movimiento de inventario no encontrado");
+    const orig = origRes[0];
+
+    if (orig.is_reversal) {
+      throw new Error("No se puede anular una reversión de movimiento");
+    }
+
+    const existingReversal = await sql`
+      SELECT id FROM inventory_movements WHERE company_id = ${cid} AND reversed_movement_id = ${movement_id}
+    `;
+    if (existingReversal.length > 0) {
+      const revMovements = await this.list_inventory_movements({ product_id: orig.product_id, limit: 100 }, token);
+      const found = revMovements.find((m) => m.id === existingReversal[0].id);
+      if (found) return found;
+    }
+
+    const compensatoryFrom = orig.to_location_id;
+    const compensatoryTo = orig.from_location_id;
+
+    let compType: string = "reversal";
+    if (orig.movement_type === "in") compType = "out";
+    else if (orig.movement_type === "out") compType = "in";
+    else if (orig.movement_type === "transfer") compType = "transfer";
+
+    const reversalInput = {
+      company_id: cid,
+      product_id: orig.product_id,
+      movement_type: compType,
+      quantity: orig.qty,
+      from_location_id: compensatoryFrom,
+      to_location_id: compensatoryTo,
+      unit_cost_cents: orig.cost_cents,
+      reason: reason || "movement_reversal",
+      notes: `Reversión de movimiento #${orig.id}${orig.notes ? ` (${orig.notes})` : ""}`,
+      reference_type: orig.ref_type,
+      reference_id: orig.ref_id,
+      idempotency_key: `reversal_${orig.id}`,
+      reversed_movement_id: orig.id,
+      is_reversal: true,
+    };
+
+    return await this.create_inventory_movement(reversalInput, token);
+  },
+
+  listWarehouses(token?: string | null) { return this.list_warehouses(token); },
+  listStockLocations(warehouse_id?: number | null, token?: string | null) { return this.list_stock_locations(warehouse_id, token); },
+  listStockBalances(filters?: { product_id?: number; location_id?: number } | null, token?: string | null) { return this.list_stock_balances(filters, token); },
+  listInventoryMovements(filters?: { product_id?: number; location_id?: number; limit?: number } | null, token?: string | null) { return this.list_inventory_movements(filters, token); },
+  createInventoryMovement(input: any, token?: string | null) { return this.create_inventory_movement(input, token); },
+  reverseInventoryMovement(movement_id: number, reason?: string, token?: string | null) { return this.reverse_inventory_movement(movement_id, reason, token); },
 };

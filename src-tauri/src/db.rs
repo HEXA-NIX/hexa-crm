@@ -114,6 +114,70 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS warehouses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL DEFAULT 1,
+            code TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            address TEXT,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS stock_locations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL DEFAULT 1,
+            warehouse_id INTEGER REFERENCES warehouses(id),
+            code TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            location_type TEXT NOT NULL DEFAULT 'warehouse',
+            allow_negative_stock INTEGER NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS stock_balances (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL DEFAULT 1,
+            product_id INTEGER NOT NULL REFERENCES products(id),
+            location_id INTEGER NOT NULL REFERENCES stock_locations(id),
+            on_hand INTEGER NOT NULL DEFAULT 0,
+            reserved INTEGER NOT NULL DEFAULT 0,
+            available INTEGER NOT NULL DEFAULT 0,
+            incoming INTEGER NOT NULL DEFAULT 0,
+            min_stock INTEGER NOT NULL DEFAULT 0,
+            max_stock INTEGER,
+            updated_at TEXT,
+            UNIQUE(product_id, location_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS inventory_movements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL DEFAULT 1,
+            product_id INTEGER NOT NULL REFERENCES products(id),
+            product_sku TEXT,
+            product_name TEXT,
+            movement_type TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            from_location_id INTEGER REFERENCES stock_locations(id),
+            to_location_id INTEGER REFERENCES stock_locations(id),
+            from_location_name TEXT,
+            to_location_name TEXT,
+            unit_cost_cents INTEGER,
+            reference_type TEXT,
+            reference_id TEXT,
+            reversed_movement_id INTEGER REFERENCES inventory_movements(id),
+            is_reversal INTEGER NOT NULL DEFAULT 0,
+            notes TEXT,
+            created_by INTEGER,
+            created_by_name TEXT,
+            created_at TEXT NOT NULL
+        );
         "#,
     )
     .map_err(|e| e.to_string())?;
@@ -139,16 +203,23 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         "ALTER TABLE products ADD COLUMN category TEXT NOT NULL DEFAULT ''",
         [],
     );
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN supplier_name TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN supplier_contact TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN supplier_email TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN supplier_phone TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN fulfillment_mode TEXT NOT NULL DEFAULT 'own_stock'", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN stock_location TEXT NOT NULL DEFAULT 'Almacén principal'", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN condition_code TEXT NOT NULL DEFAULT 'used'", []);
 
     seed_users_if_empty(conn)?;
     Ok(())
 }
 
 fn hash_pin(pin: &str) -> Result<String, String> {
-    use rand::RngCore;
+    use rand::RngExt;
     use sha2::{Digest, Sha256};
     let mut salt = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut salt);
+    rand::rng().fill(&mut salt);
     let salt_hex = hex::encode(salt);
     let mut hasher = Sha256::new();
     hasher.update(format!("{salt_hex}:{pin}").as_bytes());
@@ -174,12 +245,12 @@ pub const TEMP_PASSWORD_LENGTH: usize = 14;
 pub const TEMP_PASSWORD_TTL_SECS: i64 = 24 * 60 * 60;
 
 pub fn generate_temp_password() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     (0..TEMP_PASSWORD_LENGTH)
         .map(|_| {
-            let idx = rng.gen_range(0..CHARSET.len());
+            let idx = rng.random_range(0..CHARSET.len());
             CHARSET[idx] as char
         })
         .collect()

@@ -9,7 +9,18 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-30
+
 ### Added
+
+- Módulo multiempresa Trabajo (fase 1): bandeja persistente y categorizada (`/trabajo`), migración browser store v6, esquema e índices PostgreSQL con RLS por tenant, captura de avisos desde el Dashboard y flag centralizado `supportsWorkManagement()`.
+
+- Gestión de plugins por tenant en Ajustes, con activación y configuración independientes por empresa.
+- Plugin de conexión PostgreSQL externa mediante referencias seguras a variables de entorno.
+- Plugin Stripe MCP para el asistente, con lista cerrada de herramientas, auditoría y confirmación humana obligatoria para escrituras.
+- Perfil Maestro con vista normal de empresas asignadas y despliegue explícito y autorizado de todos los tenants.
+- Selector de proveedores guardados al crear o editar artículos, con alta rápida sin perder el formulario y conservación de proveedores históricos.
+- Landing pública editorial y hero original para presentar el CRM antes del acceso.
 - Shell: accesos rápidos con deep-link `?nuevo=1` (producto, cliente, caja, TPV) (#12).
 - **Onboarding guiado** 1ª sesión: tienda → producto → CTA primera venta; se puede saltar (#11).
 - **Cobertura de stock** (~días a ritmo de 14 d) en inventario y alertas del dashboard (#22).
@@ -30,16 +41,44 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 - El despliegue central ya no inserta datos demo al migrar (#26).
 
 ### Changed
+- Extraído e integrado el plugin `stripe_mcp` desde `vendor/hexa-crm-plugins` -> `plugins/stripe`, ambos pinneados por SHA de commit inmutable; `database_bridge` permanece in-tree (`src/lib/plugins/`). Se requiere `git submodule update --init --recursive` al sincronizar.
+- Documentada la arquitectura de separación Host-plugins y la especificación del agregador `hexa-crm-plugins` compuesto por submódulos de Git pinneados a versiones estables.
+- Cabecera autenticada adaptada al lenguaje editorial de la landing: contexto de área, selector de empresa custom, identidad de sesión y acciones responsive.
+- Rediseño editorial completo del área autenticada: Pulso, Inventario, TPV e historial, Caja, Clientes, Impuestos y Ajustes comparten la jerarquía y estética de la landing.
+- Onboarding, cambio forzado de contraseña, modales, estados vacíos, toasts y asistente IA se alinean con el mismo sistema visual y responsive.
+- Rediseño integral del shell, navegación, login, tarjetas y sistema visual inspirado en una experiencia retail editorial.
 - **Cerrar sesión** explícito en header y sidebar (sustituye «Bloquear»); toast al salir (#9).
 - Navegación en **español de comercio** (#12).
 - Naming comercial **Hexa** + tagline «Asistente de tienda · IA local opcional» en login/shell (#23). Package npm sigue `hexa-crm`.
 - CI queda orientado a `main`; la protección documentada exige squash, revisión y el check `quality` (#1).
+
+### Fixed
+- El selector de empresa de la cabecera permanece por encima del contenido y permite pulsar todas las opciones del desplegable.
 
 ### Pendiente / backlog
 - Dashboard de mando completo (#13) y copiloto IA con tools (#14)
 - CRM valor cliente (#17), TPV favoritos (#15), reposición sugerida (#16)
 - Settings por empresa (M1b)
 - Design system light (#18); idle timeout (#21)
+
+
+---
+
+## [0.2.1-rc.2] — 2026-07-24
+
+### Fixed
+- **Aislamiento multiempresa crítico de productos en PostgreSQL/RPC:** Se corrigió un fallo por el cual `upsert_product()` no resolvía la empresa activa (`active_company_id`) de la sesión. Los `INSERT` no incluían `company_id` cayendo en el valor por defecto `1`, y los `UPDATE` filtraban exclusivamente por `id`. Con este fix, la creación, edición y ajuste de stock de productos operan siempre sobre el tenant activo de la sesión del usuario, rechazando modificaciones sobre productos de otros tenants e ignorando cualquier `company_id` recibido en el payload.
+
+
+---
+
+## [0.2.1-rc.1] - 2026-07-23
+
+### Added
+- Integración del agregador Stripe.
+
+### Fixed
+- Arreglo de Plugins en modo local.
 
 
 ---
@@ -94,6 +133,9 @@ Primera release pública (tag `v0.1.0`).
 
 ---
 
-[Unreleased]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.2.1-rc.2...v0.3.0
+[0.2.1-rc.2]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.2.1-rc.1...v0.2.1-rc.2
+[0.2.1-rc.1]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.2.0...v0.2.1-rc.1
 [0.2.0]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/HEXA-NIX/hexa-crm/releases/tag/v0.1.0

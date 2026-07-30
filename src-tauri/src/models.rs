@@ -12,6 +12,13 @@ pub struct Product {
     pub cost_cents: i64,
     pub price_cents: i64,
     pub vat_rate: i32,
+    pub supplier_name: String,
+    pub supplier_contact: String,
+    pub supplier_email: String,
+    pub supplier_phone: String,
+    pub fulfillment_mode: String,
+    pub stock_location: String,
+    pub condition_code: String,
     pub active: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -29,6 +36,13 @@ pub struct ProductInput {
     pub cost_cents: i64,
     pub price_cents: i64,
     pub vat_rate: i32,
+    pub supplier_name: Option<String>,
+    pub supplier_contact: Option<String>,
+    pub supplier_email: Option<String>,
+    pub supplier_phone: Option<String>,
+    pub fulfillment_mode: Option<String>,
+    pub stock_location: Option<String>,
+    pub condition_code: Option<String>,
     pub active: Option<bool>,
 }
 
@@ -211,4 +225,95 @@ pub struct CreateUserResult {
 pub struct LoginResult {
     pub user: AuthUser,
     pub token: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Warehouse {
+    pub id: i64,
+    pub company_id: i64,
+    pub code: String,
+    pub name: String,
+    pub address: Option<String>,
+    pub is_default: Option<bool>,
+    pub active: bool,
+    pub created_at: String,
+    pub updated_at: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StockLocation {
+    pub id: i64,
+    pub company_id: i64,
+    pub warehouse_id: Option<i64>,
+    pub code: String,
+    pub name: String,
+    pub location_type: String,
+    pub allow_negative_stock: bool,
+    pub active: bool,
+    pub created_at: String,
+    pub updated_at: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StockBalance {
+    pub id: Option<i64>,
+    pub company_id: i64,
+    pub product_id: i64,
+    pub location_id: i64,
+    pub location_name: Option<String>,
+    pub warehouse_id: Option<i64>,
+    pub on_hand: i64,
+    pub reserved: i64,
+    pub available: i64,
+    pub incoming: i64,
+    pub min_stock: Option<i64>,
+    pub max_stock: Option<i64>,
+    pub updated_at: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InventoryMovement {
+    pub id: i64,
+    pub company_id: i64,
+    pub product_id: i64,
+    pub product_sku: Option<String>,
+    pub product_name: Option<String>,
+    pub movement_type: String,
+    pub reason: String,
+    pub quantity: i64,
+    pub from_location_id: Option<i64>,
+    pub to_location_id: Option<i64>,
+    pub from_location_name: Option<String>,
+    pub to_location_name: Option<String>,
+    pub unit_cost_cents: Option<i64>,
+    pub reference_type: Option<String>,
+    pub reference_id: Option<String>,
+    pub reversed_movement_id: Option<i64>,
+    pub is_reversal: Option<bool>,
+    pub notes: Option<String>,
+    pub created_by: Option<i64>,
+    pub created_by_name: Option<String>,
+    pub created_at: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateInventoryMovementInput {
+    pub company_id: Option<i64>,
+    pub product_id: i64,
+    pub movement_type: String,
+    pub reason: String,
+    pub quantity: i64,
+    pub from_location_id: Option<i64>,
+    pub to_location_id: Option<i64>,
+    pub unit_cost_cents: Option<i64>,
+    pub reference_type: Option<String>,
+    pub reference_id: Option<String>,
+    pub reversed_movement_id: Option<i64>,
+    pub notes: Option<String>,
+    pub allow_negative_stock: Option<bool>,
 }

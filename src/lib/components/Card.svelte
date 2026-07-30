@@ -10,9 +10,10 @@
   }: HTMLAttributes<HTMLDivElement> & {
     lift?: boolean;
     children: Snippet;
+    [attribute: string]: unknown;
   } = $props();
 </script>
 
-<div {...restProps} class="glass rounded-2xl p-4 {lift ? 'card-lift' : ''} {className}">
+<div {...restProps} class="glass crm-card rounded-2xl p-4 {lift ? 'card-lift' : ''} {className}">
   {@render children()}
 </div>

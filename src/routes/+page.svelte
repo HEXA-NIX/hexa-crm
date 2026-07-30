@@ -1,18 +1,27 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api } from "$lib/api/client";
-  import type { DashboardStats, Sale, Settings } from "$lib/types";
+  import type {
+    Customer,
+    CashMovement,
+    DashboardStats,
+    Sale,
+    Settings,
+    WorkItem,
+    WorkProject,
+  } from "$lib/types";
   import { formatEUR } from "$lib/money";
   import KpiCard from "$lib/components/KpiCard.svelte";
   import Card from "$lib/components/Card.svelte";
   import Badge from "$lib/components/Badge.svelte";
-  import { openAiChat, showToast } from "$lib/stores/ui";
+  import { showToast } from "$lib/stores/ui";
   import { estimateDaysOfCover, qtySoldForProduct } from "$lib/inventory/stock-cover";
   import { countsInBusinessTotals } from "$lib/sales/cancel-sale";
   import { isOnboardingDone } from "$lib/onboarding/state";
   import { backupAgeDays, needsBackupReminder } from "$lib/backup/backup-status";
   import { dashboardHealth } from "$lib/dashboard/health";
-  import { session } from "$lib/stores/session";
+  import { activeCompany, session } from "$lib/stores/session";
+  import { PROJECT_COMPANY_CODE } from "$lib/company/context";
 
   let stats = $state<DashboardStats | null>(null);
   let sales = $state<Sale[]>([]);
@@ -21,6 +30,39 @@
   let onboardingPending = $state(false);
   let settings = $state<Settings | null>(null);
   let centralSynchronizedAt = $state<string | null>(null);
+  let devProjects = $state<WorkProject[]>([]);
+  let devTasks = $state<WorkItem[]>([]);
+  let devCustomers = $state<Customer[]>([]);
+  let devCashMovements = $state<CashMovement[]>([]);
+  let devLoading = $state(false);
+
+  let alertTasks = $state<Record<string, number>>({});
+  const isDevCompany = $derived($activeCompany?.code === PROJECT_COMPANY_CODE);
+
+  $effect(() => {
+    const _companyId = $session.activeCompanyId;
+    if (!isDevCompany) return;
+
+    devLoading = true;
+    Promise.all([
+      api.listWorkProjects(),
+      api.listWorkItems(),
+      api.listCustomers(),
+      api.listCashMovements(),
+    ])
+      .then(([projects, tasks, customers, cashMovements]) => {
+        devProjects = projects;
+        devTasks = tasks;
+        devCustomers = customers;
+        devCashMovements = cashMovements;
+      })
+      .catch((error) => {
+        showToast(error instanceof Error ? error.message : "Error al cargar proyectos", "err");
+      })
+      .finally(() => {
+        devLoading = false;
+      });
+  });
 
   onMount(async () => {
     try {
@@ -31,6 +73,22 @@
         api.getSettings(),
       ]);
       centralSynchronizedAt = $session.remote ? new Date().toISOString() : null;
+
+      if (api.supportsWorkManagement()) {
+        try {
+          const workItems = await api.listWorkItems();
+          const taskMap: Record<string, number> = {};
+          for (const item of workItems) {
+            if (item.source_type === "dashboard_alert" && item.source_key && item.status !== "archived") {
+              taskMap[item.source_key] = item.id;
+            }
+          }
+          alertTasks = taskMap;
+        } catch {
+          /* ignore */
+        }
+      }
+
       // Build sold map for low-stock cover hints (last 14d, cap fetches)
       const cutoff = Date.now() - 14 * 86400000;
       const recentSales = sales
@@ -68,12 +126,84 @@
     }
   });
 
+  async function handleCreateTask(alert: { id: string; title: string; detail: string; href: string }) {
+    try {
+      const task = await api.captureDashboardAlert({
+        alertId: alert.id,
+        title: alert.title,
+        detail: alert.detail,
+        href: alert.href,
+      });
+      showToast("Tarea creada en Trabajo");
+      alertTasks = { ...alertTasks, [alert.id]: task.id };
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Error al crear tarea", "err");
+    }
+  }
+
   const recent = $derived(sales.slice(0, 6));
   const showBackupReminder = $derived(needsBackupReminder(settings?.last_backup_at));
   const backupDays = $derived(backupAgeDays(settings?.last_backup_at));
   const health = $derived(dashboardHealth(sales, stats?.low_stock ?? [], showBackupReminder));
   const trendMax = $derived(Math.max(...health.trend.map((day) => day.cents), 1));
   const deltaLabel = (delta: number | null) => delta === null ? "Sin referencia" : `${delta > 0 ? "+" : ""}${delta}% vs ayer`;
+  const activeDevProjects = $derived(
+    devProjects.filter((project) => project.status === "active" || project.status === "planned"),
+  );
+  const openDevTasks = $derived(
+    devTasks.filter((task) => !["done", "archived"].includes(task.status)),
+  );
+  const blockedDevTasks = $derived(devTasks.filter((task) => task.status === "blocked"));
+  const wonProjectValueCents = $derived(
+    devProjects
+      .filter((project) => project.customer_id != null && project.status !== "archived")
+      .reduce((sum, project) => sum + project.value_cents, 0),
+  );
+  const ownMonthlyEstimateCents = $derived(
+    devProjects
+      .filter((project) => project.customer_id == null && project.status !== "archived")
+      .reduce(
+        (sum, project) =>
+          sum + project.revenue_milestones.reduce(
+            (projectSum, milestone) => projectSum + milestone.amount_cents,
+            0,
+          ),
+        0,
+      ),
+  );
+  const billedProjectCents = $derived(
+    devCashMovements
+      .filter((movement) => movement.project_id != null && movement.kind === "income")
+      .reduce((sum, movement) => sum + movement.amount_cents, 0),
+  );
+  const spentProjectCents = $derived(
+    devCashMovements
+      .filter((movement) => movement.project_id != null && movement.kind === "expense")
+      .reduce((sum, movement) => sum + movement.amount_cents, 0),
+  );
+  const upcomingDevTasks = $derived(
+    openDevTasks
+      .filter((task) => task.due_date)
+      .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)))
+      .slice(0, 6),
+  );
+  const recentDevProjects = $derived(
+    [...devProjects]
+      .filter((project) => project.status !== "archived")
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+      .slice(0, 5),
+  );
+  const projectProgress = (projectId: number) => {
+    const projectTasks = devTasks.filter((task) => task.project_id === projectId);
+    if (projectTasks.length === 0) return 0;
+    return Math.round(
+      (projectTasks.filter((task) => task.status === "done").length / projectTasks.length) * 100,
+    );
+  };
+  const projectCustomerName = (customerId: number | null) =>
+    customerId
+      ? devCustomers.find((customer) => customer.id === customerId)?.name ?? "Cliente"
+      : "Proyecto propio";
 </script>
 
 {#if loading}
@@ -83,6 +213,110 @@
     {/each}
   </div>
 {:else if stats}
+  {#if isDevCompany}
+  <section class="pulse-page">
+    <div class="workspace-intro">
+      <p class="workspace-index">01 / PULSO DE PROYECTOS</p>
+      <div class="workspace-intro-row">
+        <h2>Proyectos claros,<br /><em>prioridades visibles.</em></h2>
+        <p>Una vista rápida de la cartera, las tareas pendientes y los clientes de HEXA.</p>
+      </div>
+    </div>
+
+    {#if devLoading}
+      <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {#each Array(4) as _}
+          <div class="skeleton h-32"></div>
+        {/each}
+      </div>
+    {:else}
+      <p class="section-label mb-3">Estado de la cartera</p>
+      <div class="pulse-metrics grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+        <KpiCard label="Valor conseguido" value={formatEUR(wonProjectValueCents)} hint={`${activeDevProjects.length} proyectos en cartera`} icon="◫" accent="violet" />
+        <KpiCard label="Facturado" value={formatEUR(billedProjectCents)} hint={`${openDevTasks.length} tareas abiertas`} icon="€" accent="emerald" />
+        <KpiCard label="Gastado" value={formatEUR(spentProjectCents)} hint={`${blockedDevTasks.length} tareas bloqueadas`} icon="−" accent="amber" />
+        <KpiCard label="Margen facturado" value={formatEUR(billedProjectCents - spentProjectCents)} hint={`${devCustomers.length} clientes`} icon="◇" accent="cyan" />
+        <KpiCard label="Hitos propios" value={formatEUR(ownMonthlyEstimateCents)} hint="Estimaciones por mes/año" icon="↗" accent="violet" />
+      </div>
+
+      {#if devProjects.length === 0}
+        <Card class="mt-4 border border-purple-400/30 bg-purple-500/10" lift={false}>
+          <p class="text-sm font-medium text-[var(--color-purple-bright)]">Todavía no hay proyectos</p>
+          <p class="mt-1 text-xs text-[var(--color-muted)]">Crea el primero y decide si pertenece a un cliente o es un proyecto propio.</p>
+          <a href="/proyectos" class="mt-3 inline-block text-sm text-radiant hover:underline">Crear proyecto →</a>
+        </Card>
+      {/if}
+
+      <div class="mt-4 grid gap-4 lg:grid-cols-3">
+        <Card class="lg:col-span-2" lift={false}>
+          <div class="mb-4 flex items-center justify-between">
+            <h2 class="section-label !normal-case !tracking-wide !text-sm">Proyectos recientes</h2>
+            <a href="/proyectos" class="text-xs text-radiant hover:underline">Ver todos</a>
+          </div>
+          {#if recentDevProjects.length === 0}
+            <p class="text-sm text-[var(--color-muted-dim)]">La cartera está vacía.</p>
+          {:else}
+            <div class="space-y-2">
+              {#each recentDevProjects as project (project.id)}
+                {@const progress = projectProgress(project.id)}
+                <a href="/proyectos/{project.uid}" class="block rounded-xl border border-[var(--color-border)] bg-black/20 p-3 transition hover:border-purple-400/35 hover:bg-purple-500/10">
+                  <div class="flex items-start justify-between gap-3">
+                    <div class="min-w-0">
+                      <p class="truncate text-sm font-medium text-[var(--color-text)]">{project.name}</p>
+                      <p class="mt-0.5 text-[11px] text-[var(--color-muted-dim)]">{projectCustomerName(project.customer_id)}</p>
+                    </div>
+                    <span class="text-xs font-semibold text-[var(--color-purple-bright)]">{progress}%</span>
+                  </div>
+                  <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
+                    <div class="h-full bg-gradient-to-r from-purple-500 to-indigo-400" style={`width: ${progress}%`}></div>
+                  </div>
+                </a>
+              {/each}
+            </div>
+          {/if}
+        </Card>
+
+        <Card lift={false}>
+          <div class="mb-4 flex items-center justify-between">
+            <h2 class="section-label !normal-case !tracking-wide !text-sm">Próximos vencimientos</h2>
+            <a href="/trabajo" class="text-xs text-radiant hover:underline">Ver trabajo</a>
+          </div>
+          {#if upcomingDevTasks.length === 0}
+            <p class="text-sm text-[var(--color-muted-dim)]">No hay tareas abiertas con fecha.</p>
+          {:else}
+            <ul class="space-y-2">
+              {#each upcomingDevTasks as task (task.id)}
+                <li class="rounded-xl border border-[var(--color-border)] bg-black/20 px-3 py-2.5">
+                  <p class="truncate text-sm font-medium text-[var(--color-text)]">{task.title}</p>
+                  <p class="mt-0.5 text-[11px] text-[var(--color-muted-dim)]">
+                    {task.due_date ? new Date(task.due_date).toLocaleDateString("es-ES") : ""}
+                  </p>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </Card>
+      </div>
+
+      <Card class="mt-4" lift={false}>
+        <h2 class="section-label mb-4 !normal-case !tracking-wide !text-sm">Acciones rápidas</h2>
+        <div class="grid gap-2 sm:grid-cols-3">
+          <a href="/proyectos" class="rounded-xl border border-[var(--color-border)] bg-black/20 px-4 py-3 text-sm font-medium text-[var(--color-purple-bright)] transition hover:border-purple-400/35 hover:bg-purple-500/10">+ Nuevo proyecto</a>
+          <a href="/trabajo?nuevo=1" class="rounded-xl border border-[var(--color-border)] bg-black/20 px-4 py-3 text-sm font-medium transition hover:border-purple-400/35 hover:bg-purple-500/10">+ Nueva tarea</a>
+          <a href="/clientes?nuevo=1" class="rounded-xl border border-[var(--color-border)] bg-black/20 px-4 py-3 text-sm font-medium transition hover:border-purple-400/35 hover:bg-purple-500/10">+ Nuevo cliente</a>
+        </div>
+      </Card>
+    {/if}
+  </section>
+  {:else}
+  <section class="pulse-page">
+    <div class="workspace-intro">
+      <p class="workspace-index">01 / PULSO DEL NEGOCIO</p>
+      <div class="workspace-intro-row">
+        <h2>Lo que importa,<br /><em>ahora.</em></h2>
+        <p>Una lectura breve de ventas, caja y prioridades para abrir el día con criterio.</p>
+      </div>
+    </div>
   {#if $session.remote}
     <p class="mb-4 rounded-xl border border-cyan-400/25 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100" data-central-status>
       CRM central · tenant {$session.remote.tenantCode} · datos actualizados {centralSynchronizedAt ? new Date(centralSynchronizedAt).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "ahora"}. Sin conexión, las operaciones no se guardan localmente.
@@ -118,8 +352,8 @@
     </Card>
   {/if}
   <!-- Resumen KPIs -->
-  <p class="section-label mb-3">Resumen</p>
-  <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+  <p class="section-label mb-3">El día en cifras</p>
+  <div class="pulse-metrics grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
     <KpiCard
       label="Ventas hoy"
       value={formatEUR(stats.sales_today_cents)}
@@ -150,8 +384,8 @@
     />
   </div>
 
-  <div class="mt-4 grid gap-4 lg:grid-cols-3" data-dashboard-health>
-    <Card class="lg:col-span-2" lift={false}>
+  <div class="pulse-story mt-4 grid gap-4 lg:grid-cols-3" data-dashboard-health>
+    <Card class="pulse-trend lg:col-span-2" lift={false}>
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 class="section-label !normal-case !tracking-wide !text-sm">Pulso de hoy</h2>
@@ -169,12 +403,38 @@
         {/each}
       </div>
     </Card>
-    <Card lift={false}>
+    <Card class="pulse-attention" lift={false}>
       <div class="mb-3 flex items-center justify-between"><h2 class="section-label !normal-case !tracking-wide !text-sm">Atención ahora</h2><Badge tone={health.alerts.length ? "warn" : "ok"}>{health.alerts.length || "OK"}</Badge></div>
       {#if health.alerts.length}
         <ul class="space-y-2">
           {#each health.alerts as alert (alert.id)}
-            <li><a href={alert.href} class="block rounded-lg border border-[var(--color-border)] bg-black/20 p-2.5 hover:border-purple-400/35"><p class="text-xs font-medium text-[var(--color-text)]">{alert.title}</p><p class="mt-0.5 text-[11px] text-[var(--color-muted-dim)]">{alert.detail} →</p></a></li>
+            {@const taskId = alertTasks[alert.id]}
+            <li class="rounded-lg border border-[var(--color-border)] bg-black/20 p-2.5 transition hover:border-purple-400/35">
+              <div class="flex items-center justify-between gap-2">
+                <a href={alert.href} class="block flex-1 min-w-0">
+                  <p class="text-xs font-medium text-[var(--color-text)]">{alert.title}</p>
+                  <p class="mt-0.5 text-[11px] text-[var(--color-muted-dim)]">{alert.detail} →</p>
+                </a>
+                {#if api.supportsWorkManagement()}
+                  {#if taskId}
+                    <a
+                      href="/trabajo?item={taskId}"
+                      class="shrink-0 rounded px-2 py-1 text-xs font-medium bg-purple-500/20 text-purple-200 hover:bg-purple-500/30 border border-purple-400/20"
+                    >
+                      Ver tarea
+                    </a>
+                  {:else}
+                    <button
+                      type="button"
+                      onclick={() => handleCreateTask(alert)}
+                      class="shrink-0 rounded px-2 py-1 text-xs font-medium bg-purple-600/30 text-purple-200 hover:bg-purple-600/50 border border-purple-400/20"
+                    >
+                      Crear tarea
+                    </button>
+                  {/if}
+                {/if}
+              </div>
+            </li>
           {/each}
         </ul>
       {:else}
@@ -183,17 +443,17 @@
     </Card>
   </div>
 
-  <Card class="mt-4 border border-purple-400/20 bg-purple-500/5" lift={false} data-dashboard-ai-slot>
+  <Card class="pulse-ai-note mt-4" lift={false} data-dashboard-ai-slot>
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div>
         <h2 class="section-label !normal-case !tracking-wide !text-sm">Recomendación IA</h2>
         <p class="mt-1 text-sm text-[var(--color-muted)]">Pregunta por el resumen de hoy, stock o prioridades. Si Ollama está apagado, el resto del CRM sigue disponible.</p>
       </div>
-      <button type="button" class="min-h-11 rounded-xl border border-purple-400/30 px-4 text-sm font-medium text-radiant hover:bg-purple-500/10" onclick={openAiChat}>Preguntar al asistente</button>
+      <p class="pulse-ai-hint">El asistente vive en el sello flotante <span>↘</span></p>
     </div>
   </Card>
 
-  <div class="mt-8 grid gap-4 lg:grid-cols-3">
+  <div class="pulse-details mt-8 grid gap-4 lg:grid-cols-3">
     <!-- Stock alerts as pipeline-like cards -->
     <Card class="lg:col-span-1" lift={false}>
       <div class="mb-4 flex items-center justify-between">
@@ -322,4 +582,6 @@
       </p>
     </Card>
   </div>
+  </section>
+  {/if}
 {/if}

@@ -58,7 +58,7 @@ export const POST: RequestHandler = async ({ request }) => {
         result = await postgresApi.session_me(token);
         break;
       case "list_companies":
-        result = await postgresApi.list_companies(token);
+        result = await postgresApi.list_companies(token, !!args?.include_all);
         break;
       case "get_active_company":
         result = await postgresApi.get_active_company(token);
@@ -68,6 +68,41 @@ export const POST: RequestHandler = async ({ request }) => {
         break;
       case "billing_by_company":
         result = await postgresApi.billing_by_company(token);
+        break;
+      case "list_plugins":
+        result = await postgresApi.list_plugins(token);
+        break;
+      case "update_plugin":
+        result = await postgresApi.update_plugin(
+          args?.plugin_key,
+          !!args?.enabled,
+          args?.config,
+          token,
+          args?.secret_action as any,
+          args?.secret as any,
+        );
+        break;
+      case "test_plugin":
+        result = await postgresApi.test_plugin(args?.plugin_key, token);
+        break;
+      case "list_plugin_tools":
+        result = await postgresApi.list_plugin_tools(args?.plugin_key, token);
+        break;
+      case "call_plugin_tool":
+        result = await postgresApi.call_plugin_tool(
+          args?.plugin_key,
+          String(args?.tool_name ?? ""),
+          args?.arguments ?? {},
+          !!args?.confirmed,
+          token,
+        );
+        break;
+      case "list_plugin_logs":
+        result = await postgresApi.list_plugin_logs(
+          args?.plugin_key,
+          (args?.limit as number) ?? 20,
+          token,
+        );
         break;
       case "list_users":
         result = await postgresApi.list_users(token);
@@ -86,6 +121,12 @@ export const POST: RequestHandler = async ({ request }) => {
         break;
       case "upsert_product":
         result = await postgresApi.upsert_product(args?.input, token);
+        break;
+      case "list_suppliers":
+        result = await postgresApi.list_suppliers(token);
+        break;
+      case "upsert_supplier":
+        result = await postgresApi.upsert_supplier(args?.input, token);
         break;
       case "adjust_stock":
         result = await postgresApi.adjust_stock(args?.product_id as number, args?.delta as number, args?.reason as string, token);
@@ -153,6 +194,74 @@ export const POST: RequestHandler = async ({ request }) => {
         break;
       case "restore_backup":
         result = await postgresApi.restore_backup(args?.raw, token);
+        break;
+      case "list_work_items":
+        result = await postgresApi.listWorkItems(args?.filters, token);
+        break;
+      case "upsert_work_item":
+        result = await postgresApi.upsertWorkItem(args?.input, token);
+        break;
+      case "archive_work_item":
+        result = await postgresApi.archiveWorkItem(args?.id as number, token);
+        break;
+      case "list_work_projects":
+        result = await postgresApi.list_work_projects(args?.status_filter as string | undefined, token);
+        break;
+      case "get_work_project":
+        result = await postgresApi.get_work_project(
+          (args?.reference ?? args?.id) as number | string,
+          token,
+        );
+        break;
+      case "upsert_work_project":
+        result = await postgresApi.upsert_work_project(args?.input, token);
+        break;
+      case "archive_work_project":
+        result = await postgresApi.archive_work_project(args?.id as number, token);
+        break;
+      case "list_work_categories":
+        result = await postgresApi.list_work_categories(token);
+        break;
+      case "upsert_work_category":
+        result = await postgresApi.upsert_work_category(args?.input, token);
+        break;
+      case "rename_work_category":
+        result = await postgresApi.upsert_work_category(args, token);
+        break;
+      case "merge_work_category":
+      case "merge_work_categories":
+        result = await postgresApi.merge_work_categories(
+          ((args?.source_category_id ?? args?.sourceId ?? args?.source_id) as number),
+          ((args?.target_category_id ?? args?.targetId ?? args?.target_id) as number),
+          token
+        );
+        break;
+      case "archive_work_category":
+        result = await postgresApi.archive_work_category(args?.id as number, token);
+        break;
+      case "list_work_members":
+        result = await postgresApi.list_work_members(token);
+        break;
+      case "capture_dashboard_alert":
+        result = await postgresApi.capture_dashboard_alert(args?.input, token);
+        break;
+      case "list_warehouses":
+        result = await postgresApi.list_warehouses(token);
+        break;
+      case "list_stock_locations":
+        result = await postgresApi.list_stock_locations(args?.warehouse_id as number | undefined, token);
+        break;
+      case "list_stock_balances":
+        result = await postgresApi.list_stock_balances(args?.filters, token);
+        break;
+      case "list_inventory_movements":
+        result = await postgresApi.list_inventory_movements(args?.filters, token);
+        break;
+      case "create_inventory_movement":
+        result = await postgresApi.create_inventory_movement(args?.input, token);
+        break;
+      case "reverse_inventory_movement":
+        result = await postgresApi.reverse_inventory_movement(args?.movement_id as number, args?.reason as string | undefined, token);
         break;
       default:
         return json({ error: `Comando no soportado: ${cmd}` }, { status: 400 });
