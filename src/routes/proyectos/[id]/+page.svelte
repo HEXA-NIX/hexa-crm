@@ -41,6 +41,7 @@
   let viewMode = $state<"lista" | "kanban">("lista");
   let draggedTaskId = $state<number | null>(null);
   let dragOverStatus = $state<WorkStatus | null>(null);
+  let dragOverParentId = $state<number | null>(null);
   let suppressTaskClick = $state(false);
   let statusUpdatingTaskId = $state<number | null>(null);
 
@@ -89,6 +90,7 @@
     priority: "normal" as WorkPriority,
     category_id: "",
     project_id: "",
+    parent_id: "",
     assignee_id: "",
     start_date: "",
     due_date: "",
@@ -204,6 +206,18 @@
   const detailProjectOptions = $derived([
     { value: "", label: "Sin proyecto" },
     ...projectsList.map((p) => ({ value: String(p.id), label: p.name })),
+  ]);
+
+  const taskParentOptions = $derived([
+    { value: "", label: "Tarea principal (sin padre)" },
+    ...tasks
+      .filter(
+        (task) =>
+          task.parent_id == null &&
+          task.status !== "archived" &&
+          task.id !== editingTask?.id,
+      )
+      .map((task) => ({ value: String(task.id), label: task.title })),
   ]);
 
   async function loadData() {
@@ -554,6 +568,7 @@
       priority: "normal",
       category_id: "",
       project_id: String(projectId),
+      parent_id: "",
       assignee_id: "",
       start_date: "",
       due_date: "",
@@ -573,6 +588,7 @@
       priority: parent.priority,
       category_id: parent.category_id ? String(parent.category_id) : "",
       project_id: String(parent.project_id ?? projectId),
+      parent_id: String(parent.id),
       assignee_id: parent.assignee_id ? String(parent.assignee_id) : "",
       start_date: "",
       due_date: "",
@@ -591,6 +607,7 @@
       priority: task.priority,
       category_id: task.category_id ? String(task.category_id) : "",
       project_id: task.project_id ? String(task.project_id) : String(projectId),
+      parent_id: task.parent_id ? String(task.parent_id) : "",
       assignee_id: task.assignee_id ? String(task.assignee_id) : "",
       start_date: task.start_date ? task.start_date.slice(0, 10) : "",
       due_date: task.due_date ? task.due_date.slice(0, 10) : "",
@@ -607,7 +624,9 @@
     try {
       const input: WorkItemInput = {
         id: editingTask?.id,
-        parent_id: newTaskParent?.id,
+        parent_id: editingTask
+          ? (detailForm.parent_id ? Number(detailForm.parent_id) : null)
+          : newTaskParent?.id,
         title: detailForm.title.trim(),
         description: detailForm.description.trim(),
         type: detailForm.type,
@@ -668,6 +687,29 @@
     }
   }
 
+  async function updateTaskParent(task: WorkItem, parent: WorkItem) {
+    if (
+      task.id === parent.id ||
+      parent.parent_id != null ||
+      hasSubtasks(task.id) ||
+      statusUpdatingTaskId === task.id
+    ) return;
+    statusUpdatingTaskId = task.id;
+    try {
+      await api.upsertWorkItem({
+        id: task.id,
+        title: task.title,
+        parent_id: parent.id,
+      });
+      showToast(`«${task.title}» ahora es subtarea de «${parent.title}»`);
+      await loadData();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Error al mover la subtarea", "err");
+    } finally {
+      statusUpdatingTaskId = null;
+    }
+  }
+
   function handleTaskDragStart(event: DragEvent, task: WorkItem) {
     if (!event.dataTransfer || statusUpdatingTaskId === task.id || hasSubtasks(task.id)) {
       event.preventDefault();
@@ -682,6 +724,7 @@
   function handleTaskDragEnd() {
     draggedTaskId = null;
     dragOverStatus = null;
+    dragOverParentId = null;
     setTimeout(() => {
       suppressTaskClick = false;
     }, 0);
@@ -703,6 +746,48 @@
     dragOverStatus = null;
     if (task) void updateTaskStatus(task, status);
   }
+
+  function handleParentDragOver(event: DragEvent, parent: WorkItem) {
+    if (!event.shiftKey) {
+      if (dragOverParentId === parent.id) dragOverParentId = null;
+      return;
+    }
+    const dragged = tasks.find((task) => task.id === draggedTaskId);
+    if (
+      !dragged ||
+      dragged.id === parent.id ||
+      parent.parent_id != null ||
+      hasSubtasks(dragged.id)
+    ) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    dragOverParentId = parent.id;
+    dragOverStatus = null;
+  }
+
+  function handleParentDragLeave(event: DragEvent, parent: WorkItem) {
+    if (
+      event.relatedTarget instanceof Node &&
+      (event.currentTarget as HTMLElement).contains(event.relatedTarget)
+    ) return;
+    if (dragOverParentId === parent.id) dragOverParentId = null;
+  }
+
+  function handleParentDrop(event: DragEvent, parent: WorkItem) {
+    if (!event.shiftKey) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const transferredId = Number(event.dataTransfer?.getData("text/plain"));
+    const taskId = draggedTaskId ?? (Number.isFinite(transferredId) ? transferredId : null);
+    const task = tasks.find((item) => item.id === taskId);
+    draggedTaskId = null;
+    dragOverParentId = null;
+    dragOverStatus = null;
+    if (task) void updateTaskParent(task, parent);
+  }
+
+
 </script>
 
 <section class="proyecto-detalle-page workspace-page">
@@ -1037,7 +1122,7 @@
       <!-- Kanban Board View -->
       <div>
         <p class="mb-3 text-xs text-[var(--color-muted-dim)]">
-          Arrastra las tareas entre columnas para cambiar su estado.
+          Arrastra las tareas entre columnas para cambiar su estado. Mantén Mayús y suelta sobre una tarea para convertirla en subtarea.
         </p>
         <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-5 items-start">
         {#each kanbanColumns as col}
@@ -1072,17 +1157,27 @@
                       ? 'cursor-default border-[var(--color-border-strong)] bg-black/30'
                       : 'cursor-grab active:cursor-grabbing border-[var(--color-border-soft)] hover:border-[var(--color-border-strong)]'} {draggedTaskId === task.id
                     ? 'opacity-40 scale-[0.98]'
-                    : ''} {statusUpdatingTaskId === task.id ? 'opacity-60 cursor-wait' : ''}"
+                    : ''} {statusUpdatingTaskId === task.id ? 'opacity-60 cursor-wait' : ''} {dragOverParentId === task.id
+                      ? 'ring-2 ring-[var(--color-purple-bright)] border-[var(--color-purple-bright)] bg-purple-500/20'
+                      : ''}"
                   onclick={() => {
                     if (!suppressTaskClick) openEditTaskModal(task);
                   }}
                   ondragstart={(event) => handleTaskDragStart(event, task)}
                   ondragend={handleTaskDragEnd}
+                  ondragover={(event) => handleParentDragOver(event, task)}
+                  ondragleave={(event) => handleParentDragLeave(event, task)}
+                  ondrop={(event) => handleParentDrop(event, task)}
                 >
                   {#if task.parent_id}
                     <span class="absolute -left-5 top-2 text-base font-bold text-[var(--color-purple-bright)]">↳</span>
                   {/if}
                   <div class="space-y-2">
+                    {#if dragOverParentId === task.id}
+                      <p class="rounded-md bg-purple-500/25 px-2 py-1 text-center text-[10px] font-bold text-[var(--color-purple-bright)]">
+                        Suelta con Mayús para convertirla en subtarea
+                      </p>
+                    {/if}
                     <div class="flex items-start justify-between gap-1">
                       <h4 class="text-xs font-semibold text-[var(--color-text)] leading-snug">
                         {task.title}
@@ -1342,6 +1437,22 @@
         class="field w-full text-sm"
       ></textarea>
     </div>
+
+    {#if editingTask}
+      <div class="space-y-1">
+        <Select
+          label="Tarea padre"
+          options={taskParentOptions}
+          bind:value={detailForm.parent_id}
+          disabled={hasSubtasks(editingTask.id)}
+        />
+        <p class="text-[11px] text-[var(--color-muted-dim)]">
+          {hasSubtasks(editingTask.id)
+            ? "Esta tarea ya tiene subtareas y no puede convertirse en subtarea."
+            : "Selecciona una tarea padre o déjalo vacío para que sea una tarea principal."}
+        </p>
+      </div>
+    {/if}
 
     <div class="grid gap-3 sm:grid-cols-2">
       <Select

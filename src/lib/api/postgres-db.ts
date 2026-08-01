@@ -2913,6 +2913,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     }
 
     let parentId = input.parent_id !== undefined ? input.parent_id : (existing?.parent_id ?? null);
+    const previousParentId = existing?.parent_id ?? null;
     if (parentId != null) {
       const parentRows = await sql`
         SELECT id, parent_id, project_id, status
@@ -2924,6 +2925,16 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
       if (parent.id === input.id) throw new Error("Una tarea no puede ser su propia subtarea.");
       if (parent.parent_id != null) throw new Error("Las subtareas no pueden tener otras subtareas.");
       if (parent.status === "archived") throw new Error("No se pueden añadir subtareas a una tarea archivada.");
+      if (input.id != null) {
+        const childRows = await sql`
+          SELECT id FROM work_items
+          WHERE parent_id = ${input.id} AND company_id = ${companyId} AND status <> 'archived'
+          LIMIT 1
+        `;
+        if (childRows.length > 0) {
+          throw new Error("Una tarea con subtareas no puede convertirse en subtarea.");
+        }
+      }
       parentId = parent.id;
       input = { ...input, project_id: parent.project_id };
     }
@@ -2992,7 +3003,12 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
       itemId = inserted[0].id;
     }
 
-    if (parentId != null) {
+    const affectedParentIds = Array.from(
+      new Set(
+        [previousParentId, parentId].filter((id): id is number => id != null),
+      ),
+    );
+    for (const affectedParentId of affectedParentIds) {
       await sql`
         UPDATE work_items parent SET
           status = CASE
@@ -3022,7 +3038,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
             ELSE NULL
           END,
           updated_at = NOW()
-        WHERE parent.id = ${parentId} AND parent.company_id = ${companyId}
+        WHERE parent.id = ${affectedParentId} AND parent.company_id = ${companyId}
       `;
     }
 

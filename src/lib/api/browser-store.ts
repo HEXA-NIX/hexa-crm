@@ -2420,12 +2420,24 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     let parentId = input.parent_id !== undefined
       ? input.parent_id
       : (existingItem?.parent_id ?? null);
+    const previousParentId = existingItem?.parent_id ?? null;
     if (parentId != null) {
       const parent = s.workItems.find((item) => item.id === parentId && item.company_id === companyId);
       if (!parent) throw new Error("La tarea padre no pertenece a esta empresa.");
       if (parent.id === input.id) throw new Error("Una tarea no puede ser su propia subtarea.");
       if (parent.parent_id != null) throw new Error("Las subtareas no pueden tener otras subtareas.");
       if (parent.status === "archived") throw new Error("No se pueden añadir subtareas a una tarea archivada.");
+      if (
+        input.id != null &&
+        s.workItems.some(
+          (item) =>
+            item.parent_id === input.id &&
+            item.company_id === companyId &&
+            item.status !== "archived",
+        )
+      ) {
+        throw new Error("Una tarea con subtareas no puede convertirse en subtarea.");
+      }
       parentId = parent.id;
       input = { ...input, project_id: parent.project_id };
     }
@@ -2505,6 +2517,9 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       s.workItems.push(savedItem);
     }
 
+    if (previousParentId != null && previousParentId !== parentId) {
+      syncWorkItemParent(s, { ...savedItem, parent_id: previousParentId }, nowTs);
+    }
     syncWorkItemParent(s, savedItem, nowTs);
     save(s);
     return populateWorkItem(savedItem, s);
