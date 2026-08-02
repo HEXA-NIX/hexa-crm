@@ -165,23 +165,36 @@
       .filter((movement) => movement.project_id != null && movement.kind === "income")
       .reduce((sum, movement) => sum + movement.amount_cents, 0),
   );
-  const spentProjectCents = $derived(
-    devCashMovements
-      .filter((movement) => movement.project_id != null && movement.kind === "expense")
+  const totalExpenseMovements = $derived(
+    devCashMovements.filter((movement) => movement.kind === "expense"),
+  );
+  const totalSpentCents = $derived(
+    totalExpenseMovements
       .reduce((sum, movement) => sum + movement.amount_cents, 0),
   );
+  const billedMarginCents = $derived(billedProjectCents - totalSpentCents);
   const projectRevenueProjection = $derived(
     buildProjectRevenueProjection(devProjects, devCashMovements),
   );
-  const projectRevenueChartMax = $derived(
+  const projectRevenuePositiveMax = $derived(
     Math.max(
       ...projectRevenueProjection.flatMap((month) => [
         month.income_cents,
         month.projection_cents,
       ]),
-      1,
+      0,
     ),
   );
+  const projectRevenueExpenseMax = $derived(
+    Math.max(...projectRevenueProjection.map((month) => month.expense_cents), 0),
+  );
+  const projectRevenueChartRange = $derived(
+    Math.max(projectRevenuePositiveMax + projectRevenueExpenseMax, 1),
+  );
+  const projectRevenuePositiveShare = $derived(
+    (projectRevenuePositiveMax / projectRevenueChartRange) * 100,
+  );
+  const projectRevenueExpenseShare = $derived(100 - projectRevenuePositiveShare);
   const currentRevenueProjection = $derived(
     projectRevenueProjection.find((month) => month.is_current),
   );
@@ -238,8 +251,15 @@
       <div class="pulse-metrics grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
         <KpiCard label="Valor conseguido" value={formatEUR(wonProjectValueCents)} hint={`${activeDevProjects.length} proyectos en cartera`} icon="◫" accent="violet" />
         <KpiCard label="Facturado" value={formatEUR(billedProjectCents)} hint={`${openDevTasks.length} tareas abiertas`} icon="€" accent="emerald" />
-        <KpiCard label="Gastado" value={formatEUR(spentProjectCents)} hint={`${blockedDevTasks.length} tareas bloqueadas`} icon="−" accent="amber" />
-        <KpiCard label="Margen facturado" value={formatEUR(billedProjectCents - spentProjectCents)} hint={`${devCustomers.length} clientes`} icon="◇" accent="cyan" />
+        <KpiCard label="Gastado" value={formatEUR(totalSpentCents)} hint={`${totalExpenseMovements.length} gastos registrados en Caja`} icon="−" accent="amber" />
+        <KpiCard
+          label="Margen facturado"
+          value={formatEUR(billedMarginCents)}
+          hint="Facturado menos todos los gastos"
+          icon="◇"
+          accent={billedMarginCents < 0 ? "rose" : "cyan"}
+          valueTone={billedMarginCents < 0 ? "danger" : "default"}
+        />
         <KpiCard label="Proyección propia" value={formatEUR(currentRevenueProjection?.projection_cents ?? 0)} hint="Estimación mensual vigente" icon="↗" accent="violet" />
       </div>
 
@@ -251,7 +271,7 @@
         </Card>
       {/if}
 
-      <Card class="mt-4 overflow-hidden" lift={false}>
+      <Card class="relative mt-4 overflow-visible" lift={false}>
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h2 class="section-label !normal-case !tracking-wide !text-sm">Ingresos y proyección propia</h2>
@@ -267,6 +287,10 @@
             <span class="inline-flex items-center gap-1.5 text-[var(--color-muted)]">
               <span class="h-2.5 w-2.5 rounded-sm bg-gradient-to-t from-purple-600 to-violet-300"></span>
               Hitos propios
+            </span>
+            <span class="inline-flex items-center gap-1.5 text-[var(--color-muted)]">
+              <span class="h-2.5 w-2.5 rounded-sm bg-rose-400"></span>
+              Gastos
             </span>
           </div>
         </div>
@@ -287,26 +311,31 @@
         </div>
 
         <div class="mt-5 overflow-x-auto pb-1">
-          <div class="flex h-56 min-w-[780px]" aria-label="Gráfica mensual de ingresos reales y proyección de hitos propios">
-            <div class="flex w-20 shrink-0 flex-col justify-between pb-9 pr-3 text-right">
-              {#each [1, 0.75, 0.5, 0.25, 0] as ratio}
-                <span class="text-[10px] tabular text-[var(--color-muted-dim)]">
-                  {formatEUR(Math.round(projectRevenueChartMax * ratio))}
-                </span>
-              {/each}
+          <div class="flex h-64 min-w-[780px]" aria-label="Gráfica mensual de ingresos, proyección propia y gastos">
+            <div class="relative w-20 shrink-0 pb-9 pr-3 text-right">
+              <div class="absolute inset-x-0 bottom-9 top-0">
+                <span class="absolute right-3 top-0 text-[10px] tabular text-[var(--color-muted-dim)]">{formatEUR(projectRevenuePositiveMax)}</span>
+                <span class="absolute right-3 -translate-y-1/2 text-[10px] font-semibold tabular text-[var(--color-muted)]" style={`top: ${projectRevenuePositiveShare}%`}>0 €</span>
+                {#if projectRevenueExpenseShare >= 12}
+                  <span class="absolute bottom-0 right-3 text-[10px] tabular text-rose-300/70">{formatEUR(-projectRevenueExpenseMax)}</span>
+                {/if}
+              </div>
             </div>
 
             <div class="relative min-w-0 flex-1">
-              <div class="pointer-events-none absolute inset-x-0 top-0 flex h-[calc(100%-2.25rem)] flex-col justify-between">
-                {#each [1, 0.75, 0.5, 0.25, 0] as _}
-                  <span class="block border-t border-[var(--color-border-soft)]"></span>
-                {/each}
+              <div class="pointer-events-none absolute inset-x-0 top-0 h-[calc(100%-2.25rem)]">
+                <span class="block border-t border-[var(--color-border-soft)]"></span>
+                <span class="absolute inset-x-0 border-t border-dashed border-[var(--color-border-soft)]" style={`top: ${projectRevenuePositiveShare / 2}%`}></span>
+                <span class="absolute inset-x-0 border-t border-[var(--color-border-strong)]" style={`top: ${projectRevenuePositiveShare}%`}></span>
+                {#if projectRevenueExpenseMax > 0}
+                  <span class="absolute inset-x-0 bottom-0 border-t border-rose-400/20"></span>
+                {/if}
               </div>
 
               <div class="relative z-10 grid h-full grid-cols-12 gap-2 px-1">
-                {#each projectRevenueProjection as month (month.month)}
-                  <div class="group relative flex min-w-0 flex-col items-center">
-                    <div class="pointer-events-none absolute left-1/2 top-1 z-30 hidden w-44 -translate-x-1/2 rounded-lg border border-[var(--color-border-strong)] bg-[var(--color-obsidian-elevated)] p-2.5 text-left shadow-xl group-hover:block">
+                {#each projectRevenueProjection as month, monthIndex (month.month)}
+                  <div class="group relative flex min-w-0 flex-col items-center hover:z-50">
+                    <div class="pointer-events-none absolute top-1 z-[100] hidden w-48 rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-obsidian-elevated)] p-3 text-left shadow-[0_18px_45px_rgba(0,0,0,0.55)] group-hover:block {monthIndex < 2 ? 'left-0' : monthIndex > projectRevenueProjection.length - 3 ? 'right-0' : 'left-1/2 -translate-x-1/2'}">
                       <p class="text-[10px] font-bold uppercase tracking-wide text-[var(--color-purple-bright)]">
                         {new Date(`${month.month}-01T12:00:00`).toLocaleDateString("es-ES", { month: "long", year: "numeric" })}
                       </p>
@@ -319,18 +348,30 @@
                           <span>Hitos propios</span>
                           <strong class="tabular text-[var(--color-purple-bright)]">{formatEUR(month.projection_cents)}</strong>
                         </p>
+                        <p class="flex items-center justify-between gap-2 text-[11px] text-[var(--color-muted)]">
+                          <span>Gastos</span>
+                          <strong class="tabular text-rose-300">{formatEUR(-month.expense_cents)}</strong>
+                        </p>
                       </div>
                     </div>
 
-                    <div class="flex min-h-0 flex-1 items-end gap-1">
-                      <div
-                        class="w-3 rounded-t-sm bg-emerald-400/90 transition-[height] duration-300 group-hover:bg-emerald-300"
-                        style={`height: ${month.income_cents ? Math.max(4, Math.round((month.income_cents / projectRevenueChartMax) * 150)) : 0}px`}
-                      ></div>
-                      <div
-                        class="w-3 rounded-t-sm bg-gradient-to-t from-purple-600 to-violet-300 transition-[height] duration-300 group-hover:from-purple-500 group-hover:to-violet-200"
-                        style={`height: ${month.projection_cents ? Math.max(4, Math.round((month.projection_cents / projectRevenueChartMax) * 150)) : 0}px`}
-                      ></div>
+                    <div class="relative min-h-0 w-full flex-1">
+                      <div class="absolute inset-x-0 top-0 flex items-end justify-center gap-1 pb-px" style={`height: ${projectRevenuePositiveShare}%`}>
+                        <div
+                          class="w-3 rounded-t-sm bg-emerald-400/90 transition-[height] duration-300 group-hover:bg-emerald-300"
+                          style={`height: ${month.income_cents && projectRevenuePositiveMax ? Math.max(4, (month.income_cents / projectRevenuePositiveMax) * 100) : 0}%`}
+                        ></div>
+                        <div
+                          class="w-3 rounded-t-sm bg-gradient-to-t from-purple-600 to-violet-300 transition-[height] duration-300 group-hover:from-purple-500 group-hover:to-violet-200"
+                          style={`height: ${month.projection_cents && projectRevenuePositiveMax ? Math.max(4, (month.projection_cents / projectRevenuePositiveMax) * 100) : 0}%`}
+                        ></div>
+                      </div>
+                      <div class="absolute inset-x-0 flex items-start justify-center pt-px" style={`top: ${projectRevenuePositiveShare}%; height: ${projectRevenueExpenseShare}%`}>
+                        <div
+                          class="w-3 rounded-b-sm bg-rose-500/90 transition-[height] duration-300 group-hover:bg-rose-400"
+                          style={`height: ${month.expense_cents && projectRevenueExpenseMax ? Math.max(4, (month.expense_cents / projectRevenueExpenseMax) * 100) : 0}%`}
+                        ></div>
+                      </div>
                     </div>
                     <div class="mt-2 flex h-8 flex-col items-center">
                       <span class="text-[10px] font-medium uppercase {month.is_current ? 'text-[var(--color-purple-bright)]' : 'text-[var(--color-muted-dim)]'}">

@@ -10,6 +10,8 @@
   import Modal from "$lib/components/Modal.svelte";
   import Select from "$lib/components/Select.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
+  import RichDescription from "$lib/components/RichDescription.svelte";
+  import RichDescriptionEditor from "$lib/components/RichDescriptionEditor.svelte";
 
   let projects = $state<WorkProject[]>([]);
   let items = $state<WorkItem[]>([]);
@@ -17,6 +19,8 @@
   let loading = $state(true);
 
   let filterStatus = $state("");
+  let filterText = $state("");
+  let sortBy = $state("attention");
   let modalOpen = $state(false);
   let saving = $state(false);
 
@@ -46,6 +50,14 @@
     { value: "paused", label: "En pausa" },
     { value: "done", label: "Completado" },
     { value: "archived", label: "Archivado" },
+  ];
+
+  const sortOptions = [
+    { value: "attention", label: "Necesitan atención" },
+    { value: "deadline", label: "Fecha objetivo" },
+    { value: "progress", label: "Mayor progreso" },
+    { value: "value", label: "Mayor valor" },
+    { value: "name", label: "Nombre A–Z" },
   ];
 
   const today = new Date();
@@ -93,24 +105,92 @@
   });
 
   const projectMetrics = $derived.by(() => {
-    const map = new Map<number, { total: number; completed: number; blocked: number; progress: number }>();
+    const map = new Map<number, {
+      total: number;
+      completed: number;
+      blocked: number;
+      overdue: number;
+      dueSoon: number;
+      progress: number;
+      health: "on_track" | "at_risk" | "off_track";
+      attentionScore: number;
+    }>();
+    const now = new Date();
+    now.setHours(0, 0, 0, 0);
+    const inSevenDays = new Date(now);
+    inSevenDays.setDate(inSevenDays.getDate() + 7);
     for (const proj of projects) {
       const projItems = items.filter((i) => i.project_id === proj.id);
       const total = projItems.length;
       const completed = projItems.filter((i) => i.status === "done").length;
       const blocked = projItems.filter((i) => i.status === "blocked").length;
+      const openItems = projItems.filter((i) => i.status !== "done" && i.status !== "archived");
+      const overdue = openItems.filter((i) => i.due_date && new Date(`${i.due_date}T00:00:00`) < now).length;
+      const dueSoon = openItems.filter((i) => {
+        if (!i.due_date) return false;
+        const due = new Date(`${i.due_date}T00:00:00`);
+        return due >= now && due <= inSevenDays;
+      }).length;
       const progress = total > 0 ? Math.round((completed / total) * 100) : 0;
-      map.set(proj.id, { total, completed, blocked, progress });
+      const targetOverdue = Boolean(
+        proj.target_date &&
+        proj.status !== "done" &&
+        proj.status !== "archived" &&
+        new Date(`${proj.target_date}T00:00:00`) < now,
+      );
+      const health = targetOverdue || overdue > 0
+        ? "off_track"
+        : blocked > 0 || dueSoon > 0
+          ? "at_risk"
+          : "on_track";
+      const attentionScore = (targetOverdue ? 100 : 0) + overdue * 20 + blocked * 10 + dueSoon * 3;
+      map.set(proj.id, { total, completed, blocked, overdue, dueSoon, progress, health, attentionScore });
     }
     return map;
   });
 
-  const filteredProjects = $derived(
-    projects.filter((p) => {
+  const filteredProjects = $derived.by(() => {
+    const query = filterText.trim().toLowerCase();
+    return projects.filter((p) => {
       if (filterStatus && p.status !== filterStatus) return false;
+      if (query) {
+        const customer = customers.find((item) => item.id === p.customer_id)?.name ?? "";
+        if (![p.name, p.description ?? "", customer].some((value) => value.toLowerCase().includes(query))) return false;
+      }
       return true;
-    })
-  );
+    }).sort((a, b) => {
+      const aMetrics = projectMetrics.get(a.id);
+      const bMetrics = projectMetrics.get(b.id);
+      if (sortBy === "attention") return (bMetrics?.attentionScore ?? 0) - (aMetrics?.attentionScore ?? 0);
+      if (sortBy === "progress") return (bMetrics?.progress ?? 0) - (aMetrics?.progress ?? 0);
+      if (sortBy === "value") return (b.value_cents + b.monthly_estimate_cents) - (a.value_cents + a.monthly_estimate_cents);
+      if (sortBy === "deadline") return (a.target_date || "9999-12-31").localeCompare(b.target_date || "9999-12-31");
+      return a.name.localeCompare(b.name, "es");
+    });
+  });
+
+  const portfolioSummary = $derived.by(() => {
+    const active = projects.filter((project) => project.status === "active").length;
+    const atRisk = projects.filter((project) => {
+      const health = projectMetrics.get(project.id)?.health;
+      return health === "at_risk" || health === "off_track";
+    }).length;
+    const blocked = Array.from(projectMetrics.values()).reduce((sum, metrics) => sum + metrics.blocked, 0);
+    const dueSoon = Array.from(projectMetrics.values()).reduce((sum, metrics) => sum + metrics.dueSoon, 0);
+    return { active, atRisk, blocked, dueSoon };
+  });
+
+  function healthLabel(health: "on_track" | "at_risk" | "off_track") {
+    if (health === "off_track") return "Fuera de plazo";
+    if (health === "at_risk") return "En riesgo";
+    return "En curso";
+  }
+
+  function healthClass(health: "on_track" | "at_risk" | "off_track") {
+    if (health === "off_track") return "border-rose-400/30 bg-rose-500/10 text-rose-200";
+    if (health === "at_risk") return "border-amber-400/30 bg-amber-500/10 text-amber-200";
+    return "border-emerald-400/30 bg-emerald-500/10 text-emerald-200";
+  }
 
   function projectStatusLabel(status: string) {
     switch (status) {
@@ -231,15 +311,52 @@
     </div>
   </div>
 
+  {#if !loading && projects.length > 0}
+    <div class="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div class="rounded-xl border border-[var(--color-border)] bg-black/20 p-4">
+        <p class="text-[11px] font-semibold uppercase tracking-wider text-[var(--color-muted-dim)]">En marcha</p>
+        <p class="mt-1 text-2xl font-semibold text-[var(--color-text)]">{portfolioSummary.active}</p>
+        <p class="mt-1 text-xs text-[var(--color-muted)]">Proyectos activos</p>
+      </div>
+      <div class="rounded-xl border border-amber-400/20 bg-amber-500/[0.05] p-4">
+        <p class="text-[11px] font-semibold uppercase tracking-wider text-amber-300/70">Atención</p>
+        <p class="mt-1 text-2xl font-semibold text-amber-200">{portfolioSummary.atRisk}</p>
+        <p class="mt-1 text-xs text-[var(--color-muted)]">Proyectos con riesgo</p>
+      </div>
+      <div class="rounded-xl border border-rose-400/20 bg-rose-500/[0.05] p-4">
+        <p class="text-[11px] font-semibold uppercase tracking-wider text-rose-300/70">Bloqueos</p>
+        <p class="mt-1 text-2xl font-semibold text-rose-200">{portfolioSummary.blocked}</p>
+        <p class="mt-1 text-xs text-[var(--color-muted)]">Tareas bloqueadas</p>
+      </div>
+      <div class="rounded-xl border border-cyan-400/20 bg-cyan-500/[0.05] p-4">
+        <p class="text-[11px] font-semibold uppercase tracking-wider text-cyan-300/70">Próximos 7 días</p>
+        <p class="mt-1 text-2xl font-semibold text-cyan-200">{portfolioSummary.dueSoon}</p>
+        <p class="mt-1 text-xs text-[var(--color-muted)]">Entregas previstas</p>
+      </div>
+    </div>
+  {/if}
+
   <!-- Status Filter Toolbar -->
   <div class="workspace-toolbar mb-6 flex flex-wrap items-center justify-between gap-4">
-    <div class="flex items-center gap-3">
-      <span class="text-xs font-medium text-[var(--color-muted)]">Filtrar por estado:</span>
+    <div class="flex flex-1 flex-wrap items-center gap-3">
+      <input
+        type="search"
+        bind:value={filterText}
+        placeholder="Buscar proyecto o cliente…"
+        aria-label="Buscar proyecto o cliente"
+        class="field min-w-56 flex-1 text-sm sm:max-w-xs"
+      />
       <Select
         options={filterOptions}
         bind:value={filterStatus}
         placeholder="Todos"
-        class="w-48"
+        class="w-44"
+      />
+      <Select
+        options={sortOptions}
+        bind:value={sortBy}
+        placeholder="Ordenar"
+        class="w-52"
       />
     </div>
     <div class="text-xs text-[var(--color-muted-dim)]">
@@ -262,7 +379,7 @@
   {:else}
     <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
       {#each filteredProjects as project (project.id)}
-        {@const metrics = projectMetrics.get(project.id) ?? { total: 0, completed: 0, blocked: 0, progress: 0 }}
+        {@const metrics = projectMetrics.get(project.id) ?? { total: 0, completed: 0, blocked: 0, overdue: 0, dueSoon: 0, progress: 0, health: "on_track" as const, attentionScore: 0 }}
         <a
           href="/proyectos/{project.uid}"
           class="group block transition-transform duration-200 hover:-translate-y-0.5"
@@ -274,9 +391,18 @@
                 <h3 class="font-semibold text-base text-[var(--color-text)] group-hover:text-[var(--color-purple-bright)] transition-colors">
                   {project.name}
                 </h3>
-                <Badge tone={projectStatusTone(project.status)}>
-                  {projectStatusLabel(project.status)}
-                </Badge>
+                <span class="shrink-0 rounded-full border px-2 py-1 text-[10px] font-bold uppercase tracking-wide {healthClass(metrics.health)}">
+                  {healthLabel(metrics.health)}
+                </span>
+              </div>
+
+              <div class="mb-3 flex items-center gap-2">
+                <Badge tone={projectStatusTone(project.status)}>{projectStatusLabel(project.status)}</Badge>
+                {#if metrics.overdue > 0}
+                  <span class="text-[11px] font-semibold text-rose-300">{metrics.overdue} vencida{metrics.overdue === 1 ? "" : "s"}</span>
+                {:else if metrics.dueSoon > 0}
+                  <span class="text-[11px] font-semibold text-amber-200">{metrics.dueSoon} próxima{metrics.dueSoon === 1 ? "" : "s"}</span>
+                {/if}
               </div>
 
               <!-- Description -->
@@ -291,9 +417,7 @@
                   : `Estimación mensual: ${formatEUR(project.monthly_estimate_cents)}`}
               </p>
               {#if project.description}
-                <p class="text-xs text-[var(--color-muted-dim)] line-clamp-2 mb-4">
-                  {project.description}
-                </p>
+                <RichDescription value={project.description} class="mb-4 line-clamp-2 text-xs text-[var(--color-muted-dim)]" />
               {:else}
                 <p class="text-xs text-[var(--color-muted-dim)] italic mb-4">
                   Sin descripción
@@ -371,16 +495,11 @@
       />
     </div>
 
-    <div class="space-y-1">
-      <label for="project-desc" class="text-xs font-medium text-[var(--color-muted)]">Descripción</label>
-      <textarea
-        id="project-desc"
-        bind:value={form.description}
-        placeholder="Describe el objetivo y alcance del proyecto..."
-        rows={3}
-        class="field w-full text-sm"
-      ></textarea>
-    </div>
+    <RichDescriptionEditor
+      id="project-desc"
+      bind:value={form.description}
+      placeholder="Describe el objetivo y alcance del proyecto…"
+    />
 
     <Select
       label="Estado inicial"

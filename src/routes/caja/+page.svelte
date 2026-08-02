@@ -21,12 +21,14 @@
   let sales = $state<Sale[]>([]);
   let loading = $state(true);
   let open = $state(false);
-  let closeDay = $state(new Date().toISOString().slice(0, 10));
+  const today = new Date().toISOString().slice(0, 10);
+  let closeDay = $state(today);
   let form = $state({
     kind: "expense",
     amount: "",
     category: "proveedores",
     description: "",
+    date: today,
   });
 
   /** Physical count for arqueo (€ string). */
@@ -97,15 +99,20 @@
       showToast("Importe no válido", "err");
       return;
     }
+    if (!form.date) {
+      showToast("Selecciona la fecha del movimiento", "err");
+      return;
+    }
     try {
       await api.createCashMovement({
         kind: form.kind as CashKind,
         amount_cents: cents,
         category: form.category,
         description: form.description,
+        occurred_at: `${form.date}T12:00:00.000Z`,
       });
       open = false;
-      form = { kind: "expense", amount: "", category: "proveedores", description: "" };
+      form = { kind: "expense", amount: "", category: "proveedores", description: "", date: today };
       showToast("Movimiento registrado");
       await load();
     } catch (e) {
@@ -377,6 +384,18 @@
       ]}
     />
     <Input label="Importe (€)" bind:value={form.amount} required />
+    <div class="space-y-1.5 text-sm">
+      <label for="cash-movement-date" class="font-medium text-[var(--color-muted)]">Fecha del movimiento</label>
+      <input
+        id="cash-movement-date"
+        type="date"
+        bind:value={form.date}
+        max={today}
+        class="field w-full"
+        required
+      />
+      <p class="text-[11px] text-[var(--color-muted-dim)]">Puedes registrar ingresos y gastos de fechas anteriores.</p>
+    </div>
     <Select
       label="Categoría"
       bind:value={form.category}

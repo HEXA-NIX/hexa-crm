@@ -9,6 +9,17 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+### Added
+
+- El portafolio de Proyectos incorpora indicadores de salud, resumen de riesgos, bloqueos y entregas próximas, además de búsqueda y orden por atención, fecha, progreso o valor.
+- El detalle de cada proyecto muestra señales operativas de tareas vencidas, urgentes, próximas y sin responsable.
+- Las descripciones de proyectos, tareas y subtareas admiten negrita, cursiva y listas mediante un editor ligero con vista previa y renderizado seguro.
+- Las subtareas se presentan agrupadas bajo su tarea padre, con expansión, progreso agregado y filas compactas tanto en lista como en kanban.
+- En kanban, las subtareas vuelven a ser arrastrables entre estados, muestran título y descripción al pasar el cursor y comparten el código de color de las columnas.
+- Caja permite indicar la fecha de un nuevo movimiento para registrar ingresos y gastos pasados, también en PostgreSQL.
+- El panel central incluye en «Gastado» todos los gastos de Caja, aunque no estén vinculados a un proyecto, y los descuenta del margen facturado.
+- Los márgenes negativos se muestran con signo y color rojo; el gráfico mensual representa los gastos como barras rojas bajo una línea de cero proporcional al rango real.
+
 ## [0.3.0] — 2026-07-30
 
 ### Added

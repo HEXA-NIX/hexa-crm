@@ -25,6 +25,8 @@
   import Modal from "$lib/components/Modal.svelte";
   import Select from "$lib/components/Select.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
+  import RichDescription from "$lib/components/RichDescription.svelte";
+  import RichDescriptionEditor from "$lib/components/RichDescriptionEditor.svelte";
 
   const projectReference = $derived($page.params.id);
 
@@ -44,6 +46,7 @@
   let dragOverParentId = $state<number | null>(null);
   let suppressTaskClick = $state(false);
   let statusUpdatingTaskId = $state<number | null>(null);
+  let collapsedParentIds = $state<Set<number>>(new Set());
 
   // Quick Capture State
   let quickTitle = $state("");
@@ -261,6 +264,33 @@
   const completedTasks = $derived(tasks.filter((t) => t.status === "done").length);
   const blockedTasks = $derived(tasks.filter((t) => t.status === "blocked").length);
   const progressPercent = $derived(totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0);
+  const projectSignals = $derived.by(() => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const inSevenDays = new Date(today);
+    inSevenDays.setDate(inSevenDays.getDate() + 7);
+    const openTasks = tasks.filter((task) => task.status !== "done" && task.status !== "archived");
+    const overdue = openTasks.filter((task) => task.due_date && new Date(`${task.due_date}T00:00:00`) < today).length;
+    const dueSoon = openTasks.filter((task) => {
+      if (!task.due_date) return false;
+      const due = new Date(`${task.due_date}T00:00:00`);
+      return due >= today && due <= inSevenDays;
+    }).length;
+    const urgent = openTasks.filter((task) => task.priority === "urgent").length;
+    const unassigned = openTasks.filter((task) => !task.assignee_id).length;
+    const targetOverdue = Boolean(
+      project?.target_date &&
+      project.status !== "done" &&
+      project.status !== "archived" &&
+      new Date(`${project.target_date}T00:00:00`) < today,
+    );
+    const health = targetOverdue || overdue > 0
+      ? { label: "Fuera de plazo", detail: "Hay trabajo vencido que requiere una nueva fecha o resolución.", className: "border-rose-400/30 bg-rose-500/10 text-rose-200" }
+      : blockedTasks > 0 || dueSoon > 0
+        ? { label: "En riesgo", detail: "Conviene revisar bloqueos y entregas de los próximos siete días.", className: "border-amber-400/30 bg-amber-500/10 text-amber-200" }
+        : { label: "En curso", detail: "No se detectan bloqueos ni vencimientos inmediatos.", className: "border-emerald-400/30 bg-emerald-500/10 text-emerald-200" };
+    return { overdue, dueSoon, urgent, unassigned, health };
+  });
   const projectCashMovements = $derived(
     cashMovements.filter((movement) => movement.project_id === projectId),
   );
@@ -296,26 +326,35 @@
     return tasks.filter((task) => task.parent_id === taskId && task.status !== "archived");
   }
 
+  function visibleSubtasks(taskId: number) {
+    return filteredTasks.filter((task) => task.parent_id === taskId);
+  }
+
+  const parentTasksForView = $derived(
+    tasks.filter((task) => {
+      if (task.parent_id != null || task.status === "archived") return false;
+      return filteredTasks.some((visible) => visible.id === task.id || visible.parent_id === task.id);
+    }),
+  );
+
+  function isParentCollapsed(taskId: number) {
+    return collapsedParentIds.has(taskId);
+  }
+
+  function toggleParent(event: MouseEvent, taskId: number) {
+    event.stopPropagation();
+    const next = new Set(collapsedParentIds);
+    if (next.has(taskId)) next.delete(taskId);
+    else next.add(taskId);
+    collapsedParentIds = next;
+  }
+
   function hasSubtasks(taskId: number) {
     return taskSubtasks(taskId).length > 0;
   }
 
-  function orderedTasks(items: WorkItem[]) {
-    const visibleIds = new Set(items.map((task) => task.id));
-    const roots = items.filter((task) => task.parent_id == null);
-    const grouped = roots.flatMap((parent) => [
-      parent,
-      ...items.filter((task) => task.parent_id === parent.id),
-    ]);
-    const groupedIds = new Set(grouped.map((task) => task.id));
-    return [
-      ...grouped,
-      ...items.filter((task) => !groupedIds.has(task.id) && visibleIds.has(task.id)),
-    ];
-  }
-
   function columnTasks(status: WorkStatus) {
-    return orderedTasks(filteredTasks.filter((task) => task.status === status));
+    return parentTasksForView.filter((task) => task.status === status);
   }
 
   function projectStatusLabel(status?: string) {
@@ -389,6 +428,16 @@
       case "blocked": return "danger";
       case "planned": return "warn";
       default: return "neutral";
+    }
+  }
+
+  function statusDotClass(status: WorkStatus) {
+    switch (status) {
+      case "planned": return "bg-amber-400 shadow-[0_0_0_3px_rgba(251,191,36,0.12)]";
+      case "in_progress": return "bg-purple-400 shadow-[0_0_0_3px_rgba(192,132,252,0.12)]";
+      case "blocked": return "bg-rose-400 shadow-[0_0_0_3px_rgba(251,113,133,0.12)]";
+      case "done": return "bg-emerald-400 shadow-[0_0_0_3px_rgba(52,211,153,0.12)]";
+      default: return "bg-slate-400 shadow-[0_0_0_3px_rgba(148,163,184,0.1)]";
     }
   }
 
@@ -839,9 +888,7 @@
           </div>
 
           {#if project.description}
-            <p class="text-sm text-[var(--color-muted)] mb-4 leading-relaxed">
-              {project.description}
-            </p>
+            <RichDescription value={project.description} class="mb-4 text-sm leading-relaxed text-[var(--color-muted)]" />
           {/if}
 
           <div class="flex flex-wrap items-center gap-6 text-xs text-[var(--color-muted-dim)]">
@@ -942,6 +989,33 @@
       {/if}
     </Card>
 
+    <div class="mb-6 grid gap-3 lg:grid-cols-[1.4fr_repeat(4,minmax(0,1fr))]">
+      <div class="rounded-xl border p-4 {projectSignals.health.className}">
+        <p class="text-[11px] font-bold uppercase tracking-wider opacity-75">Salud del proyecto</p>
+        <div class="mt-1 flex items-center gap-2">
+          <span class="h-2.5 w-2.5 rounded-full bg-current"></span>
+          <p class="text-base font-semibold">{projectSignals.health.label}</p>
+        </div>
+        <p class="mt-1 text-xs leading-relaxed opacity-75">{projectSignals.health.detail}</p>
+      </div>
+      <div class="rounded-xl border border-rose-400/20 bg-rose-500/[0.05] p-4">
+        <p class="text-2xl font-semibold text-rose-200">{projectSignals.overdue}</p>
+        <p class="mt-1 text-xs text-[var(--color-muted)]">Tareas vencidas</p>
+      </div>
+      <div class="rounded-xl border border-amber-400/20 bg-amber-500/[0.05] p-4">
+        <p class="text-2xl font-semibold text-amber-200">{projectSignals.dueSoon}</p>
+        <p class="mt-1 text-xs text-[var(--color-muted)]">Próximas 7 días</p>
+      </div>
+      <div class="rounded-xl border border-purple-400/20 bg-purple-500/[0.05] p-4">
+        <p class="text-2xl font-semibold text-purple-200">{projectSignals.urgent}</p>
+        <p class="mt-1 text-xs text-[var(--color-muted)]">Prioridad urgente</p>
+      </div>
+      <div class="rounded-xl border border-[var(--color-border)] bg-black/20 p-4">
+        <p class="text-2xl font-semibold text-[var(--color-text)]">{projectSignals.unassigned}</p>
+        <p class="mt-1 text-xs text-[var(--color-muted)]">Sin responsable</p>
+      </div>
+    </div>
+
     <!-- Quick Capture Form for this Project -->
     <Card lift={false} class="mb-6 border border-[var(--color-border)] bg-purple-950/10 p-4">
       <form
@@ -1036,101 +1110,115 @@
         <Button variant="primary" onclick={openNewTaskModal}>+ Nueva tarea</Button>
       </EmptyState>
     {:else if viewMode === "lista"}
-      <Card lift={false} class="overflow-hidden p-0">
-        <div class="divide-y divide-[var(--color-border-soft)]">
-          {#each orderedTasks(filteredTasks) as task (task.id)}
+      <div class="space-y-3">
+        {#each parentTasksForView as task (task.id)}
+          {@const subtasks = taskSubtasks(task.id)}
+          {@const visibleChildren = visibleSubtasks(task.id)}
+          {@const completedChildren = subtasks.filter((item) => item.status === "done").length}
+          {@const childProgress = subtasks.length ? Math.round((completedChildren / subtasks.length) * 100) : 0}
+          <Card lift={false} class="relative overflow-visible border border-[var(--color-border)] p-0 hover:z-50 hover:border-[var(--color-border-strong)]">
             <div
               role="button"
               tabindex="0"
+              class="group flex flex-wrap items-center gap-3 px-4 py-4 text-left transition hover:bg-purple-500/[0.05]"
               onclick={() => openEditTaskModal(task)}
-              onkeydown={(event) => {
-                if (event.key === "Enter") openEditTaskModal(task);
-              }}
-              class="group relative flex w-full flex-wrap items-center justify-between gap-3 text-left transition hover:bg-purple-500/[0.06] {task.parent_id
-                ? 'border-l-4 border-l-[var(--color-purple-bright)] bg-purple-500/[0.04] py-3 pl-10 pr-4'
-                : 'px-4 py-4'}"
+              onkeydown={(event) => event.key === "Enter" && openEditTaskModal(task)}
             >
-              {#if task.parent_id}
-                <span class="absolute left-3 top-3 text-lg font-bold text-[var(--color-purple-bright)]">↳</span>
-              {/if}
+              <button
+                type="button"
+                class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-sm text-[var(--color-muted)] transition hover:bg-white/10 hover:text-white {subtasks.length === 0 ? 'invisible' : ''}"
+                aria-label={isParentCollapsed(task.id) ? "Mostrar subtareas" : "Ocultar subtareas"}
+                aria-expanded={!isParentCollapsed(task.id)}
+                onclick={(event) => toggleParent(event, task.id)}
+              >
+                <span class="transition-transform {isParentCollapsed(task.id) ? '-rotate-90' : ''}">▾</span>
+              </button>
+
               <div class="min-w-0 flex-1">
-                <div class="flex items-center gap-2">
-                  <span class="text-sm font-medium text-[var(--color-text)] group-hover:text-[var(--color-purple-bright)]">
-                    {task.title}
-                  </span>
-                  {#if task.parent_id}
-                    <span class="rounded-md border border-purple-400/35 bg-purple-500/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[var(--color-purple-bright)]">
-                      Subtarea
-                    </span>
-                  {:else if hasSubtasks(task.id)}
-                    <span class="rounded-md border border-[var(--color-border)] bg-black/20 px-2 py-0.5 text-[10px] font-semibold text-[var(--color-muted)]">
-                      {taskSubtasks(task.id).filter((item) => item.status === "done").length}/{taskSubtasks(task.id).length} subtareas · automático
-                    </span>
-                  {/if}
-                  {#if task.category}
-                    <span
-                      class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium border border-white/10"
-                      style="background-color: {task.category.color}22; color: {task.category.color}"
-                    >
-                      ● {task.category.name}
-                    </span>
-                  {/if}
+                <div class="flex flex-wrap items-center gap-2">
+                  <h3 class="text-sm font-semibold text-[var(--color-text)] group-hover:text-[var(--color-purple-bright)]">{task.title}</h3>
+                  <Badge tone={statusBadgeTone(task.status)}>{taskStatusLabel(task.status)}</Badge>
+                  <Badge tone={priorityBadgeTone(task.priority)}>{priorityLabel(task.priority)}</Badge>
                 </div>
-                {#if task.parent_id}
-                  <p class="mt-1 text-[11px] font-medium text-[var(--color-muted)]">
-                    Pertenece a «{task.parent_title}»
-                  </p>
-                {/if}
                 {#if task.description}
-                  <p class="mt-0.5 max-w-2xl truncate text-xs text-[var(--color-muted-dim)]">
-                    {task.description}
-                  </p>
+                  <RichDescription value={task.description} class="mt-1 max-w-3xl line-clamp-2 text-xs text-[var(--color-muted-dim)]" />
+                {/if}
+                {#if subtasks.length > 0}
+                  <div class="mt-2 flex max-w-md items-center gap-2">
+                    <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
+                      <div class="h-full rounded-full bg-gradient-to-r from-purple-500 to-indigo-400" style="width: {childProgress}%"></div>
+                    </div>
+                    <span class="shrink-0 text-[10px] font-semibold text-[var(--color-muted)]">{completedChildren}/{subtasks.length} completadas</span>
+                  </div>
                 {/if}
               </div>
 
-              <div class="flex flex-wrap items-center gap-2 shrink-0">
-                {#if task.parent_id == null}
-                  <button
-                    type="button"
-                    class="rounded-lg border border-purple-400/25 px-2 py-1 text-[11px] font-semibold text-[var(--color-purple-bright)] hover:bg-purple-500/10"
-                    onclick={(event) => openNewSubtaskModal(event, task)}
-                  >
-                    + Subtarea
-                  </button>
-                {/if}
-                <Badge tone={statusBadgeTone(task.status)}>{taskStatusLabel(task.status)}</Badge>
-                <Badge tone="neutral">{taskTypeLabel(task.type)}</Badge>
-                <Badge tone={priorityBadgeTone(task.priority)}>{priorityLabel(task.priority)}</Badge>
-
-                {#if task.assignee_name}
-                  <span class="text-xs text-[var(--color-muted)]">
-                    👤 {task.assignee_name}
-                  </span>
-                {/if}
-
-                {#if task.due_date}
-                  <span class="text-xs text-[var(--color-muted-dim)] tabular">
-                    📅 {formatDate(task.due_date)}
-                  </span>
-                {/if}
+              <div class="flex shrink-0 flex-wrap items-center gap-2">
+                {#if task.assignee_name}<span class="text-xs text-[var(--color-muted)]">👤 {task.assignee_name}</span>{/if}
+                {#if task.due_date}<span class="text-xs tabular text-[var(--color-muted-dim)]">📅 {formatDate(task.due_date)}</span>{/if}
+                <button
+                  type="button"
+                  class="rounded-lg border border-purple-400/25 px-2.5 py-1.5 text-[11px] font-semibold text-[var(--color-purple-bright)] hover:bg-purple-500/10"
+                  onclick={(event) => openNewSubtaskModal(event, task)}
+                >+ Añadir subtarea</button>
               </div>
             </div>
-          {/each}
-        </div>
-      </Card>
+
+            {#if subtasks.length > 0 && !isParentCollapsed(task.id)}
+              <div class="border-t border-[var(--color-border-soft)] bg-black/15 px-4 py-2 sm:pl-14">
+                <div class="divide-y divide-[var(--color-border-soft)] border-l border-purple-400/25 pl-3">
+                  {#each visibleChildren as child (child.id)}
+                    <button
+                      type="button"
+                      class="group/child relative flex w-full flex-wrap items-center gap-3 px-3 py-3 text-left transition hover:bg-purple-500/[0.06]"
+                      onclick={() => openEditTaskModal(child)}
+                    >
+                      <span class="h-2 w-2 shrink-0 rounded-full {statusDotClass(child.status)}"></span>
+                      <div class="min-w-0 flex-1">
+                        <p class="text-sm font-medium text-[var(--color-text)] group-hover/child:text-[var(--color-purple-bright)] {child.status === 'done' ? 'line-through opacity-60' : ''}">{child.title}</p>
+                        {#if child.description}<RichDescription value={child.description} class="mt-0.5 line-clamp-1 text-[11px] text-[var(--color-muted-dim)]" />{/if}
+                      </div>
+                      <Badge tone={statusBadgeTone(child.status)}>{taskStatusLabel(child.status)}</Badge>
+                      {#if child.assignee_name}<span class="text-[11px] text-[var(--color-muted)]">👤 {child.assignee_name}</span>{/if}
+                      {#if child.due_date}<span class="text-[11px] tabular text-[var(--color-muted-dim)]">{formatDate(child.due_date)}</span>{/if}
+                      <div class="pointer-events-none absolute bottom-[calc(100%+0.5rem)] left-3 z-[100] hidden w-[30rem] max-w-[calc(100vw-3rem)] overflow-hidden rounded-2xl border border-[var(--color-border-strong)] bg-[var(--color-obsidian-elevated)] shadow-[0_24px_70px_rgba(0,0,0,0.65)] group-hover/child:block">
+                        <div class="border-b border-[var(--color-border)] bg-[var(--color-obsidian-panel)] px-5 py-4">
+                          <div class="mb-1.5 flex items-center gap-2">
+                            <span class="h-2 w-2 rounded-full {statusDotClass(child.status)}"></span>
+                            <span class="text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-muted-dim)]">Subtarea · {taskStatusLabel(child.status)}</span>
+                          </div>
+                          <p class="text-base font-semibold leading-snug text-[var(--color-text)]">{child.title}</p>
+                        </div>
+                        <div class="bg-[var(--color-obsidian-elevated)] px-5 py-4">
+                          <p class="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-muted-dim)]">Descripción</p>
+                          {#if child.description}
+                            <RichDescription value={child.description} class="text-sm leading-relaxed text-[var(--color-muted)]" />
+                          {:else}
+                            <p class="text-sm italic text-[var(--color-muted-dim)]">Sin descripción</p>
+                          {/if}
+                        </div>
+                      </div>
+                    </button>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          </Card>
+        {/each}
+      </div>
     {:else}
       <!-- Kanban Board View -->
       <div>
         <p class="mb-3 text-xs text-[var(--color-muted-dim)]">
-          Arrastra las tareas entre columnas para cambiar su estado. Mantén Mayús y suelta sobre una tarea para convertirla en subtarea.
+          Las subtareas permanecen agrupadas dentro de su tarea. Arrastra una tarea sin subtareas para cambiar su estado.
         </p>
         <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-5 items-start">
-        {#each kanbanColumns as col}
+        {#each kanbanColumns as col, colIndex}
           {@const colTasks = columnTasks(col.status)}
           <div
             role="group"
             aria-label={`Columna ${col.label}`}
-            class="rounded-2xl border p-3 flex flex-col min-h-[300px] transition-all {dragOverStatus === col.status
+            class="relative rounded-2xl border p-3 flex flex-col min-h-[300px] transition-all hover:z-50 {dragOverStatus === col.status
               ? 'border-[var(--color-purple-bright)] bg-purple-500/10 ring-2 ring-purple-400/20'
               : 'border-[var(--color-border)] bg-black/20'}"
             ondragover={(event) => handleColumnDragOver(event, col.status)}
@@ -1147,13 +1235,15 @@
             <!-- Column Task Cards -->
             <div class="space-y-2 flex-1">
               {#each colTasks as task (task.id)}
+                {@const subtasks = visibleSubtasks(task.id)}
+                {@const allSubtasks = taskSubtasks(task.id)}
+                {@const completedChildren = allSubtasks.filter((item) => item.status === "done").length}
+                {@const childProgress = allSubtasks.length ? Math.round((completedChildren / allSubtasks.length) * 100) : 0}
                 <Card
                   lift={true}
                   draggable={statusUpdatingTaskId !== task.id && !hasSubtasks(task.id)}
                   aria-label={hasSubtasks(task.id) ? `Tarea ${task.title} con estado automático` : `Arrastrar ${task.parent_id ? "subtarea" : "tarea"} ${task.title}`}
-                  class="relative border p-3 transition-all select-none {task.parent_id
-                    ? 'ml-4 cursor-grab active:cursor-grabbing border-purple-400/40 border-l-4 bg-purple-500/[0.09] shadow-[inset_0_0_18px_rgba(168,85,247,0.05)] hover:border-purple-400/65'
-                    : hasSubtasks(task.id)
+                  class="relative overflow-visible border p-0 transition-all hover:z-[60] select-none {hasSubtasks(task.id)
                       ? 'cursor-default border-[var(--color-border-strong)] bg-black/30'
                       : 'cursor-grab active:cursor-grabbing border-[var(--color-border-soft)] hover:border-[var(--color-border-strong)]'} {draggedTaskId === task.id
                     ? 'opacity-40 scale-[0.98]'
@@ -1169,10 +1259,7 @@
                   ondragleave={(event) => handleParentDragLeave(event, task)}
                   ondrop={(event) => handleParentDrop(event, task)}
                 >
-                  {#if task.parent_id}
-                    <span class="absolute -left-5 top-2 text-base font-bold text-[var(--color-purple-bright)]">↳</span>
-                  {/if}
-                  <div class="space-y-2">
+                  <div class="space-y-2 p-3">
                     {#if dragOverParentId === task.id}
                       <p class="rounded-md bg-purple-500/25 px-2 py-1 text-center text-[10px] font-bold text-[var(--color-purple-bright)]">
                         Suelta con Mayús para convertirla en subtarea
@@ -1182,39 +1269,29 @@
                       <h4 class="text-xs font-semibold text-[var(--color-text)] leading-snug">
                         {task.title}
                       </h4>
-                      {#if task.parent_id == null}
-                        <button
-                          type="button"
-                          title="Añadir subtarea"
-                          aria-label={`Añadir subtarea a ${task.title}`}
-                          class="shrink-0 rounded-md border border-purple-400/25 px-1.5 py-0.5 text-xs font-bold text-[var(--color-purple-bright)] hover:bg-purple-500/15"
-                          onclick={(event) => openNewSubtaskModal(event, task)}
-                        >
-                          +
-                        </button>
-                      {/if}
+                      <button
+                        type="button"
+                        title="Añadir subtarea"
+                        aria-label={`Añadir subtarea a ${task.title}`}
+                        class="shrink-0 rounded-md border border-purple-400/25 px-1.5 py-0.5 text-xs font-bold text-[var(--color-purple-bright)] hover:bg-purple-500/15"
+                        onclick={(event) => openNewSubtaskModal(event, task)}
+                      >+</button>
                     </div>
 
-                    {#if task.parent_id}
-                      <div class="flex items-center gap-1.5">
-                        <span class="rounded border border-purple-400/35 bg-purple-500/20 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-[var(--color-purple-bright)]">Subtarea</span>
-                        <span class="truncate text-[10px] font-medium text-[var(--color-muted)]">de {task.parent_title}</span>
-                      </div>
-                    {:else if hasSubtasks(task.id)}
-                      <div class="rounded-md border border-[var(--color-border-soft)] bg-black/20 px-2 py-1.5">
-                        <p class="text-[10px] font-semibold text-[var(--color-muted)]">
-                          🔒 Estado controlado por {taskSubtasks(task.id).length} subtareas
-                        </p>
-                        <p class="mt-0.5 text-[10px] text-[var(--color-muted-dim)]">
-                          {taskSubtasks(task.id).filter((item) => item.status === "done").length} realizadas
-                        </p>
+                    {#if allSubtasks.length > 0}
+                      <div class="space-y-1.5">
+                        <div class="flex items-center justify-between text-[10px] font-semibold text-[var(--color-muted)]">
+                          <span>{completedChildren}/{allSubtasks.length} subtareas</span>
+                          <span>{childProgress}%</span>
+                        </div>
+                        <div class="h-1.5 overflow-hidden rounded-full bg-white/10">
+                          <div class="h-full rounded-full bg-gradient-to-r from-purple-500 to-indigo-400" style="width: {childProgress}%"></div>
+                        </div>
                       </div>
                     {/if}
 
                     {#if task.description}
-                      <p class="text-[11px] text-[var(--color-muted-dim)] line-clamp-2">
-                        {task.description}
-                      </p>
+                      <RichDescription value={task.description} class="line-clamp-2 text-[11px] text-[var(--color-muted-dim)]" />
                     {/if}
 
                     <div class="flex flex-wrap items-center gap-1.5 pt-1">
@@ -1235,8 +1312,59 @@
                         <span>{task.due_date ? `📅 ${formatDate(task.due_date)}` : ""}</span>
                       </div>
                     {/if}
-
                   </div>
+
+                  {#if subtasks.length > 0}
+                    <div class="border-t border-[var(--color-border-soft)] bg-black/20 p-2">
+                      <div class="space-y-1 border-l border-purple-400/25 pl-2">
+                        {#each subtasks as child (child.id)}
+                          <div
+                            role="button"
+                            tabindex="0"
+                            draggable={statusUpdatingTaskId !== child.id}
+                            aria-label={`Arrastrar subtarea ${child.title}`}
+                            class="group/subtask relative flex w-full cursor-grab items-center gap-2 rounded-md px-2 py-1.5 text-left transition hover:z-[70] hover:bg-purple-500/10 active:cursor-grabbing {draggedTaskId === child.id ? 'scale-[0.98] opacity-40' : ''} {statusUpdatingTaskId === child.id ? 'cursor-wait opacity-60' : ''}"
+                            onclick={(event) => {
+                              event.stopPropagation();
+                              openEditTaskModal(child);
+                            }}
+                            onkeydown={(event) => event.key === "Enter" && openEditTaskModal(child)}
+                            ondragstart={(event) => {
+                              event.stopPropagation();
+                              handleTaskDragStart(event, child);
+                            }}
+                            ondragend={(event) => {
+                              event.stopPropagation();
+                              handleTaskDragEnd();
+                            }}
+                          >
+                            <span class="text-[9px] text-[var(--color-muted-dim)]" aria-hidden="true">⠇⠇</span>
+                            <span class="h-1.5 w-1.5 shrink-0 rounded-full {statusDotClass(child.status)}"></span>
+                            <span class="min-w-0 flex-1 truncate text-[10px] text-[var(--color-muted)] {child.status === 'done' ? 'line-through opacity-60' : ''}">{child.title}</span>
+                            {#if child.assignee_name}<span class="max-w-14 truncate text-[9px] text-[var(--color-muted-dim)]">{child.assignee_name}</span>{/if}
+                            <div class="pointer-events-none absolute bottom-[calc(100%+0.5rem)] z-[100] hidden w-[30rem] max-w-[calc(100vw-3rem)] overflow-hidden rounded-2xl border border-[var(--color-border-strong)] bg-[var(--color-obsidian-elevated)] shadow-[0_24px_70px_rgba(0,0,0,0.65)] group-hover/subtask:block {colIndex >= 3 ? 'right-0' : 'left-0'}">
+                              <div class="border-b border-[var(--color-border)] bg-[var(--color-obsidian-panel)] px-5 py-4">
+                                <div class="mb-1.5 flex items-center gap-2">
+                                  <span class="h-2 w-2 rounded-full {statusDotClass(child.status)}"></span>
+                                  <span class="text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-muted-dim)]">Subtarea · {taskStatusLabel(child.status)}</span>
+                                </div>
+                                <p class="text-base font-semibold leading-snug text-[var(--color-text)]">{child.title}</p>
+                              </div>
+                              <div class="bg-[var(--color-obsidian-elevated)] px-5 py-4">
+                                <p class="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-muted-dim)]">Descripción</p>
+                                {#if child.description}
+                                  <RichDescription value={child.description} class="text-sm leading-relaxed text-[var(--color-muted)]" />
+                                {:else}
+                                  <p class="text-sm italic text-[var(--color-muted-dim)]">Sin descripción</p>
+                                {/if}
+                              </div>
+                              <p class="border-t border-[var(--color-border-soft)] bg-black/15 px-5 py-2.5 text-[10px] font-medium text-[var(--color-purple-bright)]">Arrastra para cambiar de estado</p>
+                            </div>
+                          </div>
+                        {/each}
+                      </div>
+                    </div>
+                  {/if}
                 </Card>
               {/each}
               {#if colTasks.length === 0}
@@ -1277,15 +1405,7 @@
       />
     </div>
 
-    <div class="space-y-1">
-      <label for="edit-project-desc" class="text-xs font-medium text-[var(--color-muted)]">Descripción</label>
-      <textarea
-        id="edit-project-desc"
-        bind:value={editProjectForm.description}
-        rows={3}
-        class="field w-full text-sm"
-      ></textarea>
-    </div>
+    <RichDescriptionEditor id="edit-project-desc" bind:value={editProjectForm.description} />
 
     <Select
       label="Estado"
@@ -1427,16 +1547,7 @@
       />
     </div>
 
-    <div class="space-y-1">
-      <label for="task-desc" class="text-xs font-medium text-[var(--color-muted)]">Descripción</label>
-      <textarea
-        id="task-desc"
-        bind:value={detailForm.description}
-        placeholder="Añade detalles o notas..."
-        rows={3}
-        class="field w-full text-sm"
-      ></textarea>
-    </div>
+    <RichDescriptionEditor id="task-desc" bind:value={detailForm.description} />
 
     {#if editingTask}
       <div class="space-y-1">

@@ -107,5 +107,6 @@ describe("project revenue projection", () => {
     );
 
     expect(series[0].income_cents).toBe(125_000);
+    expect(series[0].expense_cents).toBe(50_000);
   });
 });
