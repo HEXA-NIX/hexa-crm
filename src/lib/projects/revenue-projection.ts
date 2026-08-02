@@ -4,6 +4,7 @@ export type ProjectRevenueMonth = {
   month: string;
   label: string;
   income_cents: number;
+  expense_cents: number;
   projection_cents: number;
   is_current: boolean;
 };
@@ -53,10 +54,19 @@ export function buildProjectRevenueProjection(
       )
       .reduce((total, movement) => total + movement.amount_cents, 0);
 
+    const expenseCents = movements
+      .filter(
+        (movement) =>
+          movement.kind === "expense" &&
+          movement.occurred_at.slice(0, 7) === month,
+      )
+      .reduce((total, movement) => total + movement.amount_cents, 0);
+
     return {
       month,
       label: date.toLocaleDateString("es-ES", { month: "short" }).replace(".", ""),
       income_cents: incomeCents,
+      expense_cents: expenseCents,
       projection_cents: projectionCents,
       is_current: month === currentMonth,
     };

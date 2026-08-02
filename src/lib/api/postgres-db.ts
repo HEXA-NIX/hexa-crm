@@ -2342,9 +2342,10 @@ export const postgresApi = {
       }
     }
 
+    const occurredAt = input.occurred_at?.trim() || null;
     const res = await sql`
-      INSERT INTO cash_movements (company_id, project_id, kind, amount_cents, category, description)
-      VALUES (${companyId}, ${input.project_id ?? null}, ${input.kind}, ${input.amount_cents}, ${input.category || "otros"}, ${input.description || ""})
+      INSERT INTO cash_movements (company_id, project_id, kind, amount_cents, category, description, occurred_at)
+      VALUES (${companyId}, ${input.project_id ?? null}, ${input.kind}, ${input.amount_cents}, ${input.category || "otros"}, ${input.description || ""}, COALESCE(${occurredAt}::timestamptz, NOW()))
       RETURNING *
     `;
     const m = res[0];

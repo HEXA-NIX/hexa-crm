@@ -7,12 +7,14 @@
     hint = "",
     icon = "◇",
     accent = "violet",
+    valueTone = "default",
   }: {
     label: string;
     value: string;
     hint?: string;
     icon?: string;
     accent?: "violet" | "emerald" | "cyan" | "amber" | "rose";
+    valueTone?: "default" | "danger" | "success";
   } = $props();
 
   const iconTone: Record<string, string> = {
@@ -32,6 +34,11 @@
           ? "text-base"
           : "text-3xl",
   );
+  const valueToneClass: Record<string, string> = {
+    default: "text-[var(--color-text)]",
+    danger: "text-rose-300",
+    success: "text-emerald-300",
+  };
 </script>
 
 <Card class="kpi-card relative overflow-hidden !p-5">
@@ -42,7 +49,7 @@
   <div class="relative min-w-0">
     <div class="kpi-icon absolute right-0 top-0 {iconTone[accent]}">{icon}</div>
     <p class="section-label min-w-0 pr-11 !text-[0.65rem] !tracking-[0.16em]">{label}</p>
-    <p title={value} class="kpi-value mt-3 max-w-full whitespace-nowrap pr-3 {valueSize} font-medium tabular tracking-tight text-[var(--color-text)]">
+    <p title={value} class="kpi-value mt-3 max-w-full whitespace-nowrap pr-3 {valueSize} font-medium tabular tracking-tight {valueToneClass[valueTone]}">
       {value}
     </p>
     {#if hint}
