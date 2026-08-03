@@ -19,13 +19,35 @@ describe("estructura UI de proyectos", () => {
 
   it("mantiene economía y salud bajo divulgación progresiva", () => {
     expect((DETAIL.match(/<details/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    expect((DETAIL.match(/<details open/g) ?? []).length).toBeGreaterThanOrEqual(2);
     expect(DETAIL).toContain("ECONOMÍA DEL PROYECTO");
     expect(DETAIL).toContain("SALUD Y SEÑALES");
+    expect(DETAIL).toContain("Hitos previstos");
+    expect(DETAIL).toContain("group-hover:block");
   });
 
   it("dispone de una vista explícita para archivadas y Kanban móvil", () => {
     expect(DETAIL).toContain('filterStatus === "archived"');
     expect(DETAIL).toContain("overflow-x-auto");
     expect(DETAIL).toContain("pantalla táctil");
+  });
+
+  it("permite ocultar o mostrar todas las subtareas de una vez", () => {
+    expect(DETAIL).toContain("toggleAllSubtasks");
+    expect(DETAIL).toContain("allSubtasksCollapsed");
+    expect(DETAIL).toContain("Ocultar subtareas");
+    expect(DETAIL).toContain("Mostrar subtareas");
+  });
+
+  it("separa los controles de vista y las acciones de edición en dos filas", () => {
+    expect(DETAIL).toContain("data-task-view-actions");
+    expect(DETAIL).toContain("data-task-edit-actions");
+  });
+
+  it("permite plegar individualmente las subtareas en Kanban", () => {
+    expect(DETAIL).toContain("data-kanban-subtask-toggle");
+    expect(DETAIL).toMatch(/data-kanban-subtask-toggle[\s\S]*?toggleParent\(event, task\.id\)/);
+    expect(DETAIL).toContain("data-kanban-card-actions");
+    expect(DETAIL).toMatch(/data-kanban-card-header[^>]*>[\s\S]*?w-full[\s\S]*?data-kanban-card-actions/);
   });
 });

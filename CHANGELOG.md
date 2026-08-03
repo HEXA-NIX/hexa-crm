@@ -11,14 +11,20 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Added
 
+- Integración inicial de tareas con Orca: despacho desde la ficha, cola RPC autenticada, worker local con worktree Codex y cierre automático condicionado a tests, build y commit.
+- Ajustes incorpora una sección administrativa de Orca para guardar la configuración local no sensible y copiar el comando de arranque sin persistir el token de sesión.
+- El worker Orca admite tareas del modo browser/localStorage mediante un puente emparejado en loopback, con origen restringido y sincronización automática del resultado en la página de proyecto.
+- La economía de cada proyecto incorpora una gráfica mensual acumulada y compacta que compara la facturación prevista con la registrada, ofrece detalle al pasar el cursor y sitúa los hitos junto a la gráfica.
 - Cada tarea principal puede copiarse junto con su descripción y subtareas como un encargo Markdown listo para enviar a una IA.
 - El detalle de un proyecto permite pegar listas de ChatGPT en Markdown, incluir descripciones, previsualizar su estructura y crear de una vez todas las tareas y subtareas detectadas.
+- Al pegar tareas se puede asignar una fecha de entrega común; las subtareas la heredan y cada elemento puede sobrescribirla con `Fecha: AAAA-MM-DD`.
 - Home y Proyectos permiten definir un objetivo económico por empresa y mes, seguir el porcentaje alcanzado con ingresos reales y consultar más indicadores de avance de la cartera.
 - El portafolio de Proyectos incorpora indicadores de salud, resumen de riesgos, bloqueos y entregas próximas, además de búsqueda y orden por atención, fecha, progreso o valor.
 - El detalle de cada proyecto muestra señales operativas de tareas vencidas, urgentes, próximas y sin responsable.
 - Las descripciones de proyectos, tareas y subtareas admiten negrita, cursiva y listas mediante un editor ligero con vista previa y renderizado seguro.
 - Las subtareas se presentan agrupadas bajo su tarea padre, con expansión, progreso agregado y filas compactas tanto en lista como en kanban.
 - En kanban, las subtareas vuelven a ser arrastrables entre estados, muestran título y descripción al pasar el cursor y comparten el código de color de las columnas.
+- Las acciones compactas de las tarjetas Kanban se colocan bajo el título para no desbordar las columnas en anchos responsive.
 - Caja permite indicar la fecha de un nuevo movimiento para registrar ingresos y gastos pasados, también en PostgreSQL.
 - El panel central incluye en «Gastado» todos los gastos de Caja, aunque no estén vinculados a un proyecto, y los descuenta del margen facturado.
 - Los márgenes negativos se muestran con signo y color rojo; el gráfico mensual representa los gastos como barras rojas bajo una línea de cero proporcional al rango real.
@@ -28,7 +34,9 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 - El progreso de proyectos y del portafolio excluye las tareas archivadas del total para no penalizar artificialmente los porcentajes.
 - El portafolio excluye proyectos archivados de sus indicadores operativos; los formularios validan fechas e importes, y la planificación económica ofrece siempre 36 meses.
 - Proyectos conserva filtros y vista preferida, permite limpiar filtros, muestra archivados correctamente y adapta el Kanban a móvil y navegación sin arrastre.
-- La ficha reduce densidad mediante secciones plegables de economía y salud, y diferencia valor contratado, cobros, gastos y resultado de caja.
+- El detalle de proyecto permite ocultar o mostrar todas las subtareas de una vez y plegar cada tarea padre individualmente tanto en Lista como en Kanban.
+- La barra de tareas separa los controles de visualización y las acciones de edición en dos filas responsive para acompañar mejor a los filtros.
+- La ficha muestra inicialmente las estadísticas de economía y salud, permite plegarlas manualmente y diferencia valor contratado, cobros, gastos y resultado de caja.
 - El detalle de proyecto deja de mostrar la acción de archivado para evitar confundirla con una eliminación definitiva.
 - Los administradores pueden seleccionar y eliminar varias tareas o todas las tareas de un proyecto, con confirmación previa y sin borrar el proyecto.
 - Las columnas del kanban de proyecto igualan su altura con la columna más larga para facilitar el movimiento de tareas entre estados.

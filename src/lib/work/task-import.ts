@@ -1,6 +1,7 @@
 export type ImportedTaskDetail = {
   title: string;
   description: string;
+  due_date?: string;
 };
 
 export type ImportedTask = ImportedTaskDetail & {
@@ -9,6 +10,7 @@ export type ImportedTask = ImportedTaskDetail & {
 
 const LIST_ITEM = /^(\s*)(?:(?:[-*+]\s+)|(?:\d+[.)]\s+))(?:\[[ xX]\]\s*)?(.+?)\s*$/;
 const DESCRIPTION_PREFIX = /^(?:descripci[oó]n|description)\s*:\s*/i;
+const DUE_DATE_LINE = /^(?:fecha(?:\s+de\s+entrega)?|due(?:\s+date)?)\s*:\s*(\d{4}-\d{2}-\d{2})\s*$/i;
 
 function indentation(raw: string): number {
   return [...raw].reduce((total, char) => total + (char === "\t" ? 2 : 1), 0);
@@ -63,6 +65,11 @@ export function parseTaskImport(source: string): ImportedTask[] {
     const text = rawLine.trim();
     if (!text || !currentItem || /^#{1,6}\s/.test(text)) continue;
     const indent = indentation(rawLine.slice(0, rawLine.length - rawLine.trimStart().length));
+    const dueDate = text.match(DUE_DATE_LINE);
+    if (dueDate && indent > currentItemIndent) {
+      currentItem.due_date = dueDate[1];
+      continue;
+    }
     if (DESCRIPTION_PREFIX.test(text) || indent > currentItemIndent) {
       appendDescription(currentItem, text);
     }

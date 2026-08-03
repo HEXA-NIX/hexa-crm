@@ -227,6 +227,17 @@ export function supportsWorkManagement(): boolean {
   return true;
 }
 
+/** Web central uses RPC; web local uses the paired loopback bridge. */
+export function supportsOrcaWorker(): boolean {
+  if (isTauri()) return false;
+  if (currentRemoteOperatorConfig() != null) return false;
+  return true;
+}
+
+export function usesLocalOrcaBridge(): boolean {
+  return supportsOrcaWorker() && WEB_DATA_MODE === "local";
+}
+
 export const api = {
   publicMeta: () => call<{ shop_name: string }>("public_meta"),
   login: (username: string, password: string) =>

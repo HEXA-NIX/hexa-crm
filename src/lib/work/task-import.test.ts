@@ -71,4 +71,20 @@ Plan propuesto:
       },
     ]);
   });
+
+  it("reads optional delivery dates without adding them to descriptions", () => {
+    expect(parseTaskImport(`
+- Preparar catálogo
+  Fecha de entrega: 2026-08-20
+  - Revisar duplicados
+    Fecha: 2026-08-18
+`)).toEqual([
+      {
+        title: "Preparar catálogo",
+        description: "",
+        due_date: "2026-08-20",
+        subtasks: [{ title: "Revisar duplicados", description: "", due_date: "2026-08-18" }],
+      },
+    ]);
+  });
 });

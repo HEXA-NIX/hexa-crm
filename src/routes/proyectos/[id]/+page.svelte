@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from "$app/stores";
   import { goto } from "$app/navigation";
-  import { api } from "$lib/api/client";
+  import { api, supportsOrcaWorker, usesLocalOrcaBridge } from "$lib/api/client";
   import { session, isAdmin } from "$lib/stores/session";
   import { showToast } from "$lib/stores/ui";
   import type {
@@ -29,8 +29,11 @@
   import RichDescriptionEditor from "$lib/components/RichDescriptionEditor.svelte";
   import { countImportedTasks, parseTaskImport } from "$lib/work/task-import";
   import { formatTaskForAi } from "$lib/work/task-ai-copy";
+  import { canDispatchToOrca, ORCA_SOURCE, orcaExecutionLabel, orcaExecutionState, workItemUpdateInput } from "$lib/work/orca-task";
+  import { dispatchToLocalOrca, getLocalOrcaRun } from "$lib/work/orca-bridge";
   import { calculateTaskProgress } from "$lib/projects/task-progress";
   import { projectStatusLabel, projectStatusTone } from "$lib/projects/presentation";
+  import { buildProjectEconomicSeries } from "$lib/projects/project-economics";
   import { hasInvalidDateRange, hasInvalidMoneyInput } from "$lib/projects/form-validation";
   import ProjectProgress from "$lib/components/projects/ProjectProgress.svelte";
   import { browser } from "$app/environment";
@@ -64,6 +67,7 @@
   // Paste/import tasks from ChatGPT or another Markdown source.
   let importModalOpen = $state(false);
   let importText = $state("");
+  let importDueDate = $state("");
   let importSaving = $state(false);
   let deletingProjectTasks = $state(false);
   let deleteTasksModalOpen = $state(false);
@@ -104,6 +108,8 @@
   let editingTask = $state<WorkItem | null>(null);
   let newTaskParent = $state<WorkItem | null>(null);
   let taskSaving = $state(false);
+  let orcaDispatchingTaskId = $state<number | null>(null);
+  let syncingLocalOrcaRuns = $state(false);
   let detailForm = $state({
     title: "",
     description: "",
@@ -286,6 +292,15 @@
     if (browser) localStorage.setItem("hexa-project-view", viewMode);
   });
 
+  $effect(() => {
+    if (!usesLocalOrcaBridge()) return;
+    const hasActiveRuns = tasks.some((task) => [ORCA_SOURCE.queued, ORCA_SOURCE.running].includes(task.source_type as typeof ORCA_SOURCE.queued));
+    if (!hasActiveRuns) return;
+    void syncLocalOrcaRuns();
+    const timer = setInterval(() => void syncLocalOrcaRuns(), 3_000);
+    return () => clearInterval(timer);
+  });
+
   function clearTaskFilters() {
     filterText = "";
     filterStatus = "";
@@ -340,6 +355,10 @@
       .filter((movement) => movement.kind === "expense")
       .reduce((sum, movement) => sum + movement.amount_cents, 0),
   );
+  const economicSeries = $derived(project ? buildProjectEconomicSeries(project, projectCashMovements) : []);
+  const economicChartMax = $derived(Math.max(1, ...economicSeries.flatMap((point) => [point.planned_cents, point.billed_cents])));
+  const economicPlannedPoints = $derived(economicSeries.map((point, index) => `${36 + index * (648 / Math.max(1, economicSeries.length - 1))},${112 - (point.planned_cents / economicChartMax) * 76}`).join(" "));
+  const economicBilledPoints = $derived(economicSeries.map((point, index) => `${36 + index * (648 / Math.max(1, economicSeries.length - 1))},${112 - (point.billed_cents / economicChartMax) * 76}`).join(" "));
 
   // Filter tasks
   const filteredTasks = $derived(
@@ -373,6 +392,14 @@
       return filteredTasks.some((visible) => visible.id === task.id || visible.parent_id === task.id);
     }),
   );
+  const parentIdsWithSubtasks = $derived(
+    tasks
+      .filter((task) => task.parent_id == null && taskSubtasks(task.id).length > 0)
+      .map((task) => task.id),
+  );
+  const allSubtasksCollapsed = $derived(
+    parentIdsWithSubtasks.length > 0 && parentIdsWithSubtasks.every((id) => collapsedParentIds.has(id)),
+  );
 
   function isParentCollapsed(taskId: number) {
     return collapsedParentIds.has(taskId);
@@ -384,6 +411,12 @@
     if (next.has(taskId)) next.delete(taskId);
     else next.add(taskId);
     collapsedParentIds = next;
+  }
+
+  function toggleAllSubtasks() {
+    collapsedParentIds = allSubtasksCollapsed
+      ? new Set()
+      : new Set(parentIdsWithSubtasks);
   }
 
   function hasSubtasks(taskId: number) {
@@ -655,6 +688,7 @@
 
   function openImportModal() {
     importText = "";
+    importDueDate = "";
     importModalOpen = true;
   }
 
@@ -664,6 +698,7 @@
     let created = 0;
     try {
       for (const imported of importedTasks) {
+        const parentDueDate = imported.due_date || importDueDate || null;
         const parent = await api.upsertWorkItem({
           title: imported.title,
           description: imported.description,
@@ -671,6 +706,7 @@
           type: "task",
           status: "inbox",
           priority: "normal",
+          due_date: parentDueDate,
         });
         created += 1;
 
@@ -683,6 +719,7 @@
             type: "task",
             status: "inbox",
             priority: "normal",
+            due_date: subtask.due_date || parentDueDate,
           });
           created += 1;
         }
@@ -690,6 +727,7 @@
 
       importModalOpen = false;
       importText = "";
+      importDueDate = "";
       showToast(`Se han creado ${created} tareas y subtareas`);
       await loadData();
     } catch (error) {
@@ -764,6 +802,107 @@
       showToast("Tarea y subtareas copiadas para la IA");
     } catch {
       showToast("El navegador no ha permitido copiar al portapapeles", "err");
+    }
+  }
+
+  async function dispatchTaskToOrca(task: WorkItem) {
+    if (!$isAdmin) {
+      showToast("Solo los administradores pueden enviar tareas a Orca", "err");
+      return;
+    }
+    if (!supportsOrcaWorker()) {
+      showToast("Orca requiere la versión web de Hexa", "err");
+      return;
+    }
+    if (!canDispatchToOrca(task)) {
+      showToast("Esta tarea no se puede enviar a Orca en su estado actual", "err");
+      return;
+    }
+    orcaDispatchingTaskId = task.id;
+    try {
+      if (usesLocalOrcaBridge()) {
+        const run = await dispatchToLocalOrca({
+          task,
+          subtasks: taskSubtasks(task.id),
+          project: project ? { name: project.name, description: project.description } : null,
+        });
+        await api.upsertWorkItem(workItemUpdateInput(task, {
+          status: "planned",
+          source_type: ORCA_SOURCE.queued,
+          source_key: run.id,
+          source_href: run.worktree_id,
+        }));
+      } else {
+        await api.upsertWorkItem(workItemUpdateInput(task, {
+          status: "planned",
+          source_type: ORCA_SOURCE.queued,
+          source_key: crypto.randomUUID(),
+          source_href: null,
+        }));
+      }
+      detailModalOpen = false;
+      showToast("Tarea enviada a la cola local de Orca");
+      await loadData();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo enviar la tarea a Orca", "err");
+    } finally {
+      orcaDispatchingTaskId = null;
+    }
+  }
+
+  async function syncLocalOrcaRuns() {
+    if (syncingLocalOrcaRuns || !usesLocalOrcaBridge()) return;
+    const activeTasks = tasks.filter(
+      (task) => task.parent_id == null && [ORCA_SOURCE.queued, ORCA_SOURCE.running].includes(task.source_type as typeof ORCA_SOURCE.queued) && task.source_key,
+    );
+    if (!activeTasks.length) return;
+    syncingLocalOrcaRuns = true;
+    let changed = false;
+    try {
+      for (const task of activeTasks) {
+        try {
+          const run = await getLocalOrcaRun(task.source_key!);
+          if (run.status === "running" && (task.source_type !== ORCA_SOURCE.running || task.source_href !== run.worktree_id)) {
+            await api.upsertWorkItem(workItemUpdateInput(task, {
+              status: "in_progress",
+              source_type: ORCA_SOURCE.running,
+              source_href: run.worktree_id,
+            }));
+            changed = true;
+          } else if (run.status === "completed") {
+            for (const child of taskSubtasks(task.id).filter((item) => item.status !== "done")) {
+              await api.upsertWorkItem(workItemUpdateInput(child, {
+                status: "done",
+                source_type: ORCA_SOURCE.completed,
+                source_key: run.commit,
+                source_href: run.worktree_id,
+              }));
+            }
+            await api.upsertWorkItem(workItemUpdateInput(task, {
+              status: "done",
+              source_type: ORCA_SOURCE.completed,
+              source_key: run.commit,
+              source_href: run.worktree_id,
+            }));
+            changed = true;
+            showToast(`Orca ha completado «${task.title}»`);
+          } else if (run.status === "failed") {
+            await api.upsertWorkItem(workItemUpdateInput(task, {
+              status: "blocked",
+              source_type: ORCA_SOURCE.failed,
+              source_key: run.error || "La ejecución local de Orca ha fallado",
+              source_href: run.worktree_id,
+            }));
+            changed = true;
+            showToast(`Orca ha bloqueado «${task.title}»`, "err");
+          }
+        } catch {
+          // El worker puede estar reiniciándose o temporalmente desconectado; se reintentará.
+        }
+      }
+      if (changed) await loadData();
+    } finally {
+      syncingLocalOrcaRuns = false;
     }
   }
 
@@ -1033,7 +1172,7 @@
     </Card>
 
     <Card lift={false} class="mb-6 border border-[var(--color-border-strong)] p-5">
-      <details>
+      <details open>
         <summary class="flex cursor-pointer list-none items-center justify-between gap-3 rounded-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-purple-400">
           <span class="section-label">ECONOMÍA DEL PROYECTO</span>
           <span class="text-xs text-[var(--color-purple-bright)]">Mostrar / ocultar</span>
@@ -1079,25 +1218,75 @@
             {formatEUR(project.revenue_milestones.reduce((sum, milestone) => sum + milestone.amount_cents, 0))}
           </p>
         </div>
-        {#if project.revenue_milestones.length > 0}
-          <div class="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {#each project.revenue_milestones as milestone (milestone.id)}
-              <div class="rounded-xl border border-[var(--color-border)] bg-black/20 p-3">
-                <p class="text-xs text-[var(--color-muted-dim)]">
-                  {new Date(`${milestone.target_month}-01T12:00:00`).toLocaleDateString("es-ES", { month: "long", year: "numeric" })}
-                </p>
-                <p class="mt-1 text-lg font-semibold text-cyan-300">{formatEUR(milestone.amount_cents)}</p>
-              </div>
-            {/each}
+      {/if}
+      {#if economicSeries.length > 0}
+        <div class="mt-3 grid items-stretch gap-3 {project.customer_id == null && project.revenue_milestones.length > 0 ? 'lg:grid-cols-[minmax(0,1fr)_15rem]' : ''}">
+        <div class="min-w-0 rounded-xl border border-white/[0.07] bg-black/10 p-3">
+          <div class="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p class="text-xs font-semibold text-[var(--color-text)]">Facturación prevista vs. real</p>
+              <p class="text-[11px] text-[var(--color-muted-dim)]">Evolución acumulada por mes</p>
+            </div>
+            <div class="flex gap-4 text-[11px]">
+              <span class="flex items-center gap-1.5 text-purple-200"><span class="h-0.5 w-5 bg-purple-400"></span>Previsto</span>
+              <span class="flex items-center gap-1.5 text-emerald-200"><span class="h-0.5 w-5 bg-emerald-400"></span>Facturado</span>
+            </div>
           </div>
-        {:else}
-          <p class="mt-3 text-xs text-[var(--color-muted-dim)]">No hay hitos económicos definidos.</p>
+          <div class="overflow-x-auto">
+            <svg viewBox="0 0 720 142" class="min-w-[560px] w-full opacity-80" role="img" aria-label="Comparación acumulada entre facturación prevista y real">
+              <line x1="36" y1="112" x2="684" y2="112" stroke="rgba(255,255,255,.1)" />
+              <line x1="36" y1="74" x2="684" y2="74" stroke="rgba(255,255,255,.045)" stroke-dasharray="3 6" />
+              <line x1="36" y1="36" x2="684" y2="36" stroke="rgba(255,255,255,.045)" stroke-dasharray="3 6" />
+              <polyline points={economicPlannedPoints} fill="none" stroke="#c084fc" stroke-opacity=".75" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+              <polyline points={economicBilledPoints} fill="none" stroke="#34d399" stroke-opacity=".8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+              {#each economicSeries as point, index (point.month)}
+                {@const x = 36 + index * (648 / Math.max(1, economicSeries.length - 1))}
+                {@const tooltipX = Math.min(558, Math.max(4, x - 79))}
+                <g class="group cursor-help">
+                  <rect x={x - 18} y="22" width="36" height="112" fill="transparent" />
+                  <circle cx={x} cy={112 - (point.planned_cents / economicChartMax) * 76} r="2.5" fill="#c084fc" class="transition group-hover:r-4" />
+                  <circle cx={x} cy={112 - (point.billed_cents / economicChartMax) * 76} r="2.5" fill="#34d399" class="transition group-hover:r-4" />
+                  <text x={x} y="135" text-anchor="middle" fill="rgba(226,232,240,.5)" font-size="9">{point.label}</text>
+                  <foreignObject x={tooltipX} y="2" width="158" height="68" class="pointer-events-none hidden overflow-visible group-hover:block">
+                    <div class="rounded-lg border border-[var(--color-border-strong)] bg-[var(--color-obsidian-elevated)] px-2.5 py-2 text-[10px] shadow-xl">
+                      <p class="mb-1 font-bold uppercase tracking-wide text-[var(--color-purple-bright)]">{point.label}</p>
+                      <p class="flex justify-between gap-3 text-[var(--color-muted)]"><span>Previsto</span><strong class="text-purple-200">{formatEUR(point.planned_cents)}</strong></p>
+                      <p class="flex justify-between gap-3 text-[var(--color-muted)]"><span>Facturado</span><strong class="text-emerald-300">{formatEUR(point.billed_cents)}</strong></p>
+                    </div>
+                  </foreignObject>
+                </g>
+              {/each}
+            </svg>
+          </div>
+          <div class="mt-2 flex flex-wrap justify-between gap-2 border-t border-white/5 pt-3 text-xs">
+            <span class="text-[var(--color-muted)]">Objetivo a fecha: <strong class="text-purple-200">{formatEUR(economicSeries.at(-1)?.planned_cents ?? 0)}</strong></span>
+            <span class="text-[var(--color-muted)]">Facturado: <strong class="text-emerald-200">{formatEUR(economicSeries.at(-1)?.billed_cents ?? 0)}</strong></span>
+            <span class={(economicSeries.at(-1)?.billed_cents ?? 0) >= (economicSeries.at(-1)?.planned_cents ?? 0) ? "text-emerald-300" : "text-amber-300"}>
+              Desviación: {formatEUR((economicSeries.at(-1)?.billed_cents ?? 0) - (economicSeries.at(-1)?.planned_cents ?? 0))}
+            </span>
+          </div>
+        </div>
+        {#if project.customer_id == null && project.revenue_milestones.length > 0}
+          <aside class="rounded-xl border border-white/[0.07] bg-black/10 p-3">
+            <p class="text-xs font-semibold text-[var(--color-text)]">Hitos previstos</p>
+            <div class="mt-2 space-y-1.5">
+              {#each [...project.revenue_milestones].sort((a, b) => a.target_month.localeCompare(b.target_month)) as milestone (milestone.id)}
+                <div class="flex items-center justify-between gap-3 rounded-lg bg-white/[0.025] px-2.5 py-2">
+                  <span class="text-[10px] capitalize text-[var(--color-muted-dim)]">
+                    {new Date(`${milestone.target_month}-01T12:00:00`).toLocaleDateString("es-ES", { month: "short", year: "numeric" }).replace(".", "")}
+                  </span>
+                  <strong class="text-xs tabular text-purple-200">{formatEUR(milestone.amount_cents)}</strong>
+                </div>
+              {/each}
+            </div>
+          </aside>
         {/if}
+        </div>
       {/if}
       </details>
     </Card>
 
-    <details class="mb-6 rounded-2xl border border-[var(--color-border)] bg-black/10 p-4">
+    <details open class="mb-6 rounded-2xl border border-[var(--color-border)] bg-black/10 p-4">
       <summary class="flex cursor-pointer list-none items-center justify-between gap-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-purple-400">
         <span class="section-label">SALUD Y SEÑALES</span>
         <span class="text-xs text-[var(--color-muted)]">{projectSignals.health.label} · {projectSignals.overdue} vencidas · {projectSignals.dueSoon} próximas</span>
@@ -1199,39 +1388,45 @@
       </div>
 
       <!-- View Switcher -->
-      <div class="flex items-center gap-2">
-        <div class="inline-flex rounded-xl border border-[var(--color-border)] bg-black/20 p-1">
-          <button
-            type="button"
-            class="rounded-lg px-3 py-1.5 text-xs font-medium transition {viewMode === 'lista'
-              ? 'bg-[var(--color-purple-deep)] text-white shadow'
-              : 'text-[var(--color-muted)] hover:text-[var(--color-text)]'}"
-            onclick={() => (viewMode = "lista")}
-          >
-            ☰ Lista
-          </button>
-          <button
-            type="button"
-            class="rounded-lg px-3 py-1.5 text-xs font-medium transition {viewMode === 'kanban'
-              ? 'bg-[var(--color-purple-deep)] text-white shadow'
-              : 'text-[var(--color-muted)] hover:text-[var(--color-text)]'}"
-            onclick={() => (viewMode = "kanban")}
-          >
-            ◫ Kanban
-          </button>
+      <div class="grid w-full gap-2 lg:w-auto">
+        <div class="flex flex-wrap items-center gap-2 lg:justify-end" data-task-view-actions>
+          <div class="inline-flex rounded-xl border border-[var(--color-border)] bg-black/20 p-1">
+            <button
+              type="button"
+              class="rounded-lg px-3 py-1.5 text-xs font-medium transition {viewMode === 'lista'
+                ? 'bg-[var(--color-purple-deep)] text-white shadow'
+                : 'text-[var(--color-muted)] hover:text-[var(--color-text)]'}"
+              onclick={() => (viewMode = "lista")}
+            >
+              ☰ Lista
+            </button>
+            <button
+              type="button"
+              class="rounded-lg px-3 py-1.5 text-xs font-medium transition {viewMode === 'kanban'
+                ? 'bg-[var(--color-purple-deep)] text-white shadow'
+                : 'text-[var(--color-muted)] hover:text-[var(--color-text)]'}"
+              onclick={() => (viewMode = "kanban")}
+            >
+              ◫ Kanban
+            </button>
+          </div>
+
+          {#if parentIdsWithSubtasks.length > 0}
+            <Button variant="secondary" onclick={toggleAllSubtasks} class="text-xs" aria-expanded={!allSubtasksCollapsed}>
+              {allSubtasksCollapsed ? "Mostrar subtareas" : "Ocultar subtareas"}
+            </Button>
+          {/if}
         </div>
 
-        <Button variant="primary" onclick={openNewTaskModal} class="text-xs">
-          + Nueva tarea
-        </Button>
-        <Button variant="secondary" onclick={openImportModal} class="text-xs">
-          Pegar tareas
-        </Button>
-        {#if $isAdmin && tasks.length > 0}
-          <Button variant="danger" onclick={openDeleteTasksModal} disabled={deletingProjectTasks} class="text-xs">
-            Eliminar tareas…
-          </Button>
-        {/if}
+        <div class="flex flex-wrap items-center gap-2 lg:justify-end" data-task-edit-actions>
+          <Button variant="primary" onclick={openNewTaskModal} class="text-xs">+ Nueva tarea</Button>
+          <Button variant="secondary" onclick={openImportModal} class="text-xs">Pegar tareas</Button>
+          {#if $isAdmin && tasks.length > 0}
+            <Button variant="danger" onclick={openDeleteTasksModal} disabled={deletingProjectTasks} class="text-xs">
+              Eliminar tareas…
+            </Button>
+          {/if}
+        </div>
       </div>
     </div>
 
@@ -1273,6 +1468,9 @@
                   <h3 class="text-sm font-semibold text-[var(--color-text)] group-hover:text-[var(--color-purple-bright)]">{task.title}</h3>
                   <Badge tone={statusBadgeTone(task.status)}>{taskStatusLabel(task.status)}</Badge>
                   <Badge tone={priorityBadgeTone(task.priority)}>{priorityLabel(task.priority)}</Badge>
+                  {#if orcaExecutionLabel(task)}
+                    <Badge tone={orcaExecutionState(task) === "failed" ? "danger" : orcaExecutionState(task) === "completed" ? "ok" : "ai"}>{orcaExecutionLabel(task)}</Badge>
+                  {/if}
                 </div>
                 {#if task.description}
                   <RichDescription value={task.description} class="mt-1 max-w-3xl line-clamp-2 text-xs text-[var(--color-muted-dim)]" />
@@ -1404,23 +1602,36 @@
                         Suelta con Mayús para convertirla en subtarea
                       </p>
                     {/if}
-                    <div class="flex items-start justify-between gap-1">
-                      <h4 class="text-xs font-semibold text-[var(--color-text)] leading-snug">
+                    <div class="flex min-w-0 flex-wrap items-start gap-1.5" data-kanban-card-header>
+                      <h4 class="w-full min-w-0 break-words text-xs font-semibold leading-snug text-[var(--color-text)]">
                         {task.title}
                       </h4>
-                      <div class="flex shrink-0 items-center gap-1">
+                      <div class="ml-auto flex max-w-full shrink-0 items-center gap-1" data-kanban-card-actions>
+                        {#if allSubtasks.length > 0}
+                          <button
+                            type="button"
+                            title={isParentCollapsed(task.id) ? "Mostrar subtareas" : "Ocultar subtareas"}
+                            aria-label={`${isParentCollapsed(task.id) ? "Mostrar" : "Ocultar"} subtareas de ${task.title}`}
+                            aria-expanded={!isParentCollapsed(task.id)}
+                            data-kanban-subtask-toggle
+                            class="inline-flex h-6 min-w-6 items-center justify-center rounded-md border border-[var(--color-border)] px-1.5 text-xs text-[var(--color-muted)] transition hover:bg-white/10 hover:text-white"
+                            onclick={(event) => toggleParent(event, task.id)}
+                          >
+                            <span class="transition-transform {isParentCollapsed(task.id) ? '-rotate-90' : ''}">▾</span>
+                          </button>
+                        {/if}
                         <button
                           type="button"
                           title="Copiar tarea y subtareas para la IA"
                           aria-label={`Copiar ${task.title} para la IA`}
-                          class="rounded-md border border-cyan-400/25 px-1.5 py-0.5 text-[10px] font-bold text-cyan-200 hover:bg-cyan-500/15"
+                          class="inline-flex h-6 min-w-6 items-center justify-center rounded-md border border-cyan-400/25 px-1.5 text-[10px] font-bold text-cyan-200 hover:bg-cyan-500/15"
                           onclick={(event) => copyTaskForAi(event, task)}
                         >IA</button>
                         <button
                           type="button"
                           title="Añadir subtarea"
                           aria-label={`Añadir subtarea a ${task.title}`}
-                          class="rounded-md border border-purple-400/25 px-1.5 py-0.5 text-xs font-bold text-[var(--color-purple-bright)] hover:bg-purple-500/15"
+                          class="inline-flex h-6 min-w-6 items-center justify-center rounded-md border border-purple-400/25 px-1.5 text-xs font-bold text-[var(--color-purple-bright)] hover:bg-purple-500/15"
                           onclick={(event) => openNewSubtaskModal(event, task)}
                         >+</button>
                       </div>
@@ -1444,6 +1655,9 @@
 
                     <div class="flex flex-wrap items-center gap-1.5 pt-1">
                       <Badge tone={priorityBadgeTone(task.priority)}>{priorityLabel(task.priority)}</Badge>
+                      {#if orcaExecutionLabel(task)}
+                        <Badge tone={orcaExecutionState(task) === "failed" ? "danger" : orcaExecutionState(task) === "completed" ? "ok" : "ai"}>{orcaExecutionLabel(task)}</Badge>
+                      {/if}
                       {#if task.category}
                         <span
                           class="inline-block rounded px-1.5 py-0.5 text-[10px] font-medium"
@@ -1462,7 +1676,7 @@
                     {/if}
                   </div>
 
-                  {#if subtasks.length > 0}
+                  {#if subtasks.length > 0 && !isParentCollapsed(task.id)}
                     <div class="border-t border-[var(--color-border-soft)] bg-black/20 p-2">
                       <div class="space-y-1 border-l border-purple-400/25 pl-2">
                         {#each subtasks as child (child.id)}
@@ -1678,15 +1892,23 @@
     </div>
 
     <div class="space-y-1.5">
+      <label for="task-import-due-date" class="text-xs font-medium text-[var(--color-muted)]">Fecha de entrega predeterminada</label>
+      <input id="task-import-due-date" type="date" class="field w-full" bind:value={importDueDate} />
+      <p class="text-[11px] text-[var(--color-muted-dim)]">
+        Se aplicará a las tareas pegadas y a sus subtareas. Puedes sobrescribirla en el texto con una línea indentada «Fecha: AAAA-MM-DD».
+      </p>
+    </div>
+
+    <div class="space-y-1.5">
       <label for="task-import-text" class="text-xs font-medium text-[var(--color-muted)]">Lista de tareas</label>
       <textarea
         id="task-import-text"
         bind:value={importText}
         class="field min-h-52 w-full resize-y font-mono text-sm leading-6"
-        placeholder={'1. Preparar catálogo\n   Descripción: Revisar antes de publicar.\n   - Revisar productos\n     Descripción: Comprobar SKU y precio.\n   - Añadir fotografías'}
+        placeholder={'1. Preparar catálogo\n   Fecha: 2026-08-20\n   Descripción: Revisar antes de publicar.\n   - Revisar productos\n     Descripción: Comprobar SKU y precio.\n   - Añadir fotografías'}
       ></textarea>
       <p class="text-[11px] text-[var(--color-muted-dim)]">
-        Admite listas con -, *, +, números y casillas Markdown. Usa «Descripción:» o texto indentado debajo del elemento.
+        Admite listas con -, *, +, números y casillas Markdown. Usa «Descripción:», «Fecha: AAAA-MM-DD» o texto indentado debajo del elemento.
       </p>
     </div>
 
@@ -1700,6 +1922,9 @@
           {#each importedTasks as imported, index (`${index}-${imported.title}`)}
             <div class="rounded-lg bg-white/[0.025] px-3 py-2">
               <p class="text-sm font-semibold text-[var(--color-text)]">{index + 1}. {imported.title}</p>
+              {#if imported.due_date || importDueDate}
+                <p class="mt-1 text-[11px] text-purple-200">📅 {formatDate(imported.due_date || importDueDate)}</p>
+              {/if}
               {#if imported.description}
                 <p class="mt-1 whitespace-pre-line text-xs text-[var(--color-muted)]">{imported.description}</p>
               {/if}
@@ -1708,6 +1933,9 @@
                   {#each imported.subtasks as subtask}
                     <li>
                       <span>↳ {subtask.title}</span>
+                      {#if subtask.due_date || imported.due_date || importDueDate}
+                        <span class="ml-2 text-[10px] text-purple-200">📅 {formatDate(subtask.due_date || imported.due_date || importDueDate)}</span>
+                      {/if}
                       {#if subtask.description}
                         <p class="ml-4 mt-0.5 whitespace-pre-line text-[11px] text-[var(--color-muted-dim)]">{subtask.description}</p>
                       {/if}
@@ -1812,6 +2040,20 @@
     }}
     class="space-y-4 pt-1"
   >
+    {#if editingTask && orcaExecutionLabel(editingTask)}
+      <div class="rounded-xl border border-purple-400/25 bg-purple-500/10 px-4 py-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <p class="text-xs font-bold uppercase tracking-wide text-[var(--color-purple-bright)]">{orcaExecutionLabel(editingTask)}</p>
+          {#if editingTask.source_href}
+            <span class="max-w-full truncate text-[10px] text-[var(--color-muted-dim)]" title={editingTask.source_href}>{editingTask.source_href}</span>
+          {/if}
+        </div>
+        {#if orcaExecutionState(editingTask) === "failed" && editingTask.source_key}
+          <p class="mt-2 text-xs leading-relaxed text-rose-200">{editingTask.source_key}</p>
+        {/if}
+      </div>
+    {/if}
+
     {#if newTaskParent}
       <div class="rounded-xl border border-purple-400/30 bg-purple-500/10 px-4 py-3">
         <p class="text-xs font-bold uppercase tracking-wide text-[var(--color-purple-bright)]">↳ Nueva subtarea</p>
@@ -1922,9 +2164,26 @@
 
     <div class="flex items-center justify-between border-t border-[var(--color-border)] pt-4">
       {#if editingTask}
-        <Button variant="danger" type="button" onclick={handleArchiveTask}>
-          Archivar
-        </Button>
+        <div class="flex flex-wrap items-center gap-2">
+          <Button variant="danger" type="button" onclick={handleArchiveTask}>Archivar</Button>
+          {#if $isAdmin && canDispatchToOrca(editingTask)}
+            <Button
+              variant="ai"
+              type="button"
+              onclick={() => dispatchTaskToOrca(editingTask!)}
+              disabled={orcaDispatchingTaskId === editingTask.id}
+              title={supportsOrcaWorker() ? "Crear una ejecución local en Orca" : "Requiere la versión web de Hexa"}
+            >
+              {orcaDispatchingTaskId === editingTask.id ? "Enviando…" : "Enviar a Orca"}
+            </Button>
+          {:else if orcaExecutionLabel(editingTask)}
+            <Badge tone={orcaExecutionState(editingTask) === "failed" ? "danger" : orcaExecutionState(editingTask) === "completed" ? "ok" : "ai"}>{orcaExecutionLabel(editingTask)}</Badge>
+          {:else if $isAdmin && editingTask.parent_id != null}
+            <Button variant="ai" type="button" disabled={true} title="Envía a Orca la tarea principal para incluir todas sus subtareas">
+              Orca · tarea principal
+            </Button>
+          {/if}
+        </div>
       {:else}
         <div></div>
       {/if}
