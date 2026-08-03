@@ -310,6 +310,7 @@ fn seed_if_empty(conn: &Connection) -> Result<(), String> {
         ("default_vat", "21"),
         ("idle_timeout_minutes", "15"),
         ("last_backup_at", ""),
+        ("monthly_economic_goals", "{}"),
     ];
     for (k, v) in defaults {
         conn.execute(

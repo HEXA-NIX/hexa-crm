@@ -11,6 +11,9 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Added
 
+- Cada tarea principal puede copiarse junto con su descripción y subtareas como un encargo Markdown listo para enviar a una IA.
+- El detalle de un proyecto permite pegar listas de ChatGPT en Markdown, incluir descripciones, previsualizar su estructura y crear de una vez todas las tareas y subtareas detectadas.
+- Home y Proyectos permiten definir un objetivo económico por empresa y mes, seguir el porcentaje alcanzado con ingresos reales y consultar más indicadores de avance de la cartera.
 - El portafolio de Proyectos incorpora indicadores de salud, resumen de riesgos, bloqueos y entregas próximas, además de búsqueda y orden por atención, fecha, progreso o valor.
 - El detalle de cada proyecto muestra señales operativas de tareas vencidas, urgentes, próximas y sin responsable.
 - Las descripciones de proyectos, tareas y subtareas admiten negrita, cursiva y listas mediante un editor ligero con vista previa y renderizado seguro.
@@ -19,6 +22,17 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 - Caja permite indicar la fecha de un nuevo movimiento para registrar ingresos y gastos pasados, también en PostgreSQL.
 - El panel central incluye en «Gastado» todos los gastos de Caja, aunque no estén vinculados a un proyecto, y los descuenta del margen facturado.
 - Los márgenes negativos se muestran con signo y color rojo; el gráfico mensual representa los gastos como barras rojas bajo una línea de cero proporcional al rango real.
+
+### Changed
+
+- El progreso de proyectos y del portafolio excluye las tareas archivadas del total para no penalizar artificialmente los porcentajes.
+- El portafolio excluye proyectos archivados de sus indicadores operativos; los formularios validan fechas e importes, y la planificación económica ofrece siempre 36 meses.
+- Proyectos conserva filtros y vista preferida, permite limpiar filtros, muestra archivados correctamente y adapta el Kanban a móvil y navegación sin arrastre.
+- La ficha reduce densidad mediante secciones plegables de economía y salud, y diferencia valor contratado, cobros, gastos y resultado de caja.
+- El detalle de proyecto deja de mostrar la acción de archivado para evitar confundirla con una eliminación definitiva.
+- Los administradores pueden seleccionar y eliminar varias tareas o todas las tareas de un proyecto, con confirmación previa y sin borrar el proyecto.
+- Las columnas del kanban de proyecto igualan su altura con la columna más larga para facilitar el movimiento de tareas entre estados.
+- Las cabeceras de estado del kanban permanecen visibles durante el desplazamiento vertical.
 
 ## [0.3.0] — 2026-07-30
 

@@ -146,6 +146,7 @@ async function callLocal<T>(cmd: string, args: Record<string, any>, token: strin
     case "get_work_project": return browserApi.getWorkProject(args.reference ?? args.id, token) as Promise<T>;
     case "upsert_work_project": return browserApi.upsertWorkProject(args.input, token) as Promise<T>;
     case "archive_work_project": return browserApi.archiveWorkProject(args.id, token) as Promise<T>;
+    case "delete_project_work_items": return browserApi.deleteProjectWorkItems(args.project_id, args.item_ids, token) as Promise<T>;
     case "list_work_categories": return browserApi.listWorkCategories(token) as Promise<T>;
     case "upsert_work_category": return browserApi.upsertWorkCategory(args.input, token) as Promise<T>;
     case "rename_work_category": return browserApi.renameWorkCategory(args.id, args.name, token) as Promise<T>;
@@ -334,6 +335,8 @@ export const api = {
     remoteOperatorConfig ? remoteWriteUnavailable() : call<WorkProject>("upsert_work_project", { input }),
   archiveWorkProject: (id: number) =>
     remoteOperatorConfig ? remoteWriteUnavailable() : call<WorkProject>("archive_work_project", { id }),
+  deleteProjectWorkItems: (projectId: number, itemIds?: number[]) =>
+    remoteOperatorConfig ? remoteWriteUnavailable() : call<number>("delete_project_work_items", { project_id: projectId, item_ids: itemIds }),
 
   list_work_projects: (statusFilter?: string) =>
     remoteOperatorConfig ? remoteWriteUnavailable() : call<WorkProject[]>("list_work_projects", { status_filter: statusFilter }),
@@ -343,6 +346,8 @@ export const api = {
     remoteOperatorConfig ? remoteWriteUnavailable() : call<WorkProject>("upsert_work_project", { input }),
   archive_work_project: (id: number) =>
     remoteOperatorConfig ? remoteWriteUnavailable() : call<WorkProject>("archive_work_project", { id }),
+  delete_project_work_items: (projectId: number, itemIds?: number[]) =>
+    remoteOperatorConfig ? remoteWriteUnavailable() : call<number>("delete_project_work_items", { project_id: projectId, item_ids: itemIds }),
 
   listWorkItems: (filters?: WorkItemFilters) =>
     remoteOperatorConfig ? remoteWriteUnavailable() : call<WorkItem[]>("list_work_items", { filters }),
