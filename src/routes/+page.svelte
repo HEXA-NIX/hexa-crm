@@ -23,6 +23,7 @@
   import { activeCompany, session } from "$lib/stores/session";
   import { PROJECT_COMPANY_CODE } from "$lib/company/context";
   import { buildProjectRevenueProjection } from "$lib/projects/revenue-projection";
+  import { economicGoalProgress, monthlyEconomicGoal } from "$lib/projects/economic-goal";
 
   let stats = $state<DashboardStats | null>(null);
   let sales = $state<Sale[]>([]);
@@ -198,6 +199,17 @@
   const currentRevenueProjection = $derived(
     projectRevenueProjection.find((month) => month.is_current),
   );
+  const currentMonthKey = $derived(new Date().toISOString().slice(0, 7));
+  const currentEconomicGoalCents = $derived(
+    monthlyEconomicGoal(settings?.monthly_economic_goals, $session.activeCompanyId, currentMonthKey),
+  );
+  const currentEconomicGoalProgress = $derived(
+    economicGoalProgress(currentRevenueProjection?.income_cents ?? 0, currentEconomicGoalCents),
+  );
+  const completedDevTasks = $derived(devTasks.filter((task) => task.status === "done").length);
+  const devTaskCompletion = $derived(
+    devTasks.length ? Math.round((completedDevTasks / devTasks.length) * 100) : 0,
+  );
   const upcomingDevTasks = $derived(
     openDevTasks
       .filter((task) => task.due_date)
@@ -260,7 +272,7 @@
           accent={billedMarginCents < 0 ? "rose" : "cyan"}
           valueTone={billedMarginCents < 0 ? "danger" : "default"}
         />
-        <KpiCard label="Proyección propia" value={formatEUR(currentRevenueProjection?.projection_cents ?? 0)} hint="Estimación mensual vigente" icon="↗" accent="violet" />
+        <KpiCard label="Objetivo mensual" value={currentEconomicGoalCents ? `${currentEconomicGoalProgress}%` : "Sin definir"} hint={currentEconomicGoalCents ? `${formatEUR(currentRevenueProjection?.income_cents ?? 0)} de ${formatEUR(currentEconomicGoalCents)}` : "Defínelo en Proyectos"} icon="◎" accent={currentEconomicGoalProgress >= 100 ? "emerald" : "violet"} />
       </div>
 
       {#if devProjects.length === 0}
@@ -295,7 +307,7 @@
           </div>
         </div>
 
-        <div class="mt-4 grid gap-3 sm:grid-cols-2">
+        <div class="mt-4 grid gap-3 sm:grid-cols-3">
           <div class="rounded-xl border border-[var(--color-border)] bg-black/20 px-3 py-2.5">
             <p class="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Ingresos este mes</p>
             <p class="mt-1 text-lg font-semibold tabular text-emerald-300">
@@ -308,7 +320,32 @@
               {formatEUR(currentRevenueProjection?.projection_cents ?? 0)}
             </p>
           </div>
+          <div class="rounded-xl border border-cyan-400/20 bg-cyan-500/[0.05] px-3 py-2.5">
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Ejecución de tareas</p>
+            <p class="mt-1 text-lg font-semibold tabular text-cyan-200">{devTaskCompletion}%</p>
+            <p class="mt-0.5 text-[11px] text-[var(--color-muted-dim)]">{completedDevTasks} de {devTasks.length} completadas</p>
+          </div>
         </div>
+
+        {#if currentEconomicGoalCents}
+          <div class="mt-4 rounded-xl border border-[var(--color-border)] bg-black/20 p-3">
+            <div class="flex items-center justify-between gap-3 text-xs">
+              <span class="font-medium text-[var(--color-text)]">Objetivo económico del mes</span>
+              <span class="font-semibold tabular {currentEconomicGoalProgress >= 100 ? 'text-emerald-300' : 'text-[var(--color-purple-bright)]'}">{currentEconomicGoalProgress}%</span>
+            </div>
+            <div class="mt-2 h-2 overflow-hidden rounded-full bg-white/10">
+              <div class="h-full rounded-full bg-gradient-to-r from-purple-500 to-emerald-400" style={`width: ${Math.min(currentEconomicGoalProgress, 100)}%`}></div>
+            </div>
+            <p class="mt-2 text-[11px] text-[var(--color-muted-dim)]">
+              {currentEconomicGoalProgress >= 100 ? `Objetivo superado en ${formatEUR((currentRevenueProjection?.income_cents ?? 0) - currentEconomicGoalCents)}.` : `Faltan ${formatEUR(Math.max(currentEconomicGoalCents - (currentRevenueProjection?.income_cents ?? 0), 0))} para alcanzarlo.`}
+            </p>
+          </div>
+        {:else}
+          <a href="/proyectos" class="mt-4 flex items-center justify-between rounded-xl border border-dashed border-purple-400/30 bg-purple-500/[0.05] p-3 text-xs text-[var(--color-muted)] transition hover:bg-purple-500/10">
+            <span>Define un objetivo económico para medir el avance mensual.</span>
+            <strong class="text-[var(--color-purple-bright)]">Configurar →</strong>
+          </a>
+        {/if}
 
         <div class="mt-5 overflow-x-auto pb-1">
           <div class="flex h-64 min-w-[780px]" aria-label="Gráfica mensual de ingresos, proyección propia y gastos">

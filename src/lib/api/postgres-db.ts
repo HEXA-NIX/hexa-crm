@@ -2539,6 +2539,14 @@ export const postgresApi = {
         return Number.isInteger(n) && n >= 0 && n <= 480 ? n : 15;
       })(),
       last_backup_at: settingsMap.get("last_backup_at") || null,
+      monthly_economic_goals: (() => {
+        try {
+          const parsed = JSON.parse(settingsMap.get("monthly_economic_goals") || "{}");
+          return parsed && typeof parsed === "object" ? parsed : {};
+        } catch {
+          return {};
+        }
+      })(),
     };
   },
 
@@ -2551,6 +2559,7 @@ export const postgresApi = {
       "default_vat",
       "idle_timeout_minutes",
       "last_backup_at",
+      "monthly_economic_goals",
     ];
     for (const key of allowed) {
       const value = partial[key];
@@ -2561,9 +2570,12 @@ export const postgresApi = {
         ) {
           throw new Error("El bloqueo automático debe estar entre 0 y 480 minutos");
         }
+        const storedValue = key === "monthly_economic_goals"
+          ? JSON.stringify(value)
+          : value == null ? "" : value.toString();
         await sql`
           INSERT INTO settings (key, value)
-          VALUES (${key}, ${value == null ? "" : value.toString()})
+          VALUES (${key}, ${storedValue})
           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
         `;
       }
@@ -2911,6 +2923,32 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     `;
     return formatWorkProject(fetched[0]);
   },
+
+  async deleteProjectWorkItems(projectId: number, itemIds?: number[], token?: string | null): Promise<number> {
+    const user = await requireAdminProjectManagementPg(token ?? null);
+    const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+    const project = await sql`
+      SELECT id FROM work_projects
+      WHERE id = ${projectId} AND company_id = ${companyId}
+    `;
+    if (project.length === 0) throw new Error("Proyecto no encontrado.");
+
+    const deleted = itemIds?.length
+      ? await sql`
+          DELETE FROM work_items
+          WHERE project_id = ${projectId}
+            AND company_id = ${companyId}
+            AND (id = ANY(${itemIds}::int[]) OR parent_id = ANY(${itemIds}::int[]))
+          RETURNING id
+        `
+      : await sql`
+          DELETE FROM work_items
+          WHERE project_id = ${projectId} AND company_id = ${companyId}
+          RETURNING id
+        `;
+    return deleted.length;
+  },
+
   async listWorkItems(filters?: WorkItemFilters, token?: string | null): Promise<WorkItem[]> {
     const user = await requireSession(token ?? null);
     const companyId = await resolveActiveCompanyId(token ?? null, user.id);
@@ -3501,6 +3539,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   get_work_project(reference: number | string, token?: string | null) { return this.getWorkProject(reference, token); },
   upsert_work_project(input: WorkProjectInput, token?: string | null) { return this.upsertWorkProject(input, token); },
   archive_work_project(id: number, token?: string | null) { return this.archiveWorkProject(id, token); },
+  delete_project_work_items(projectId: number, itemIds?: number[], token?: string | null) { return this.deleteProjectWorkItems(projectId, itemIds, token); },
   list_work_categories(token?: string | null) { return this.listWorkCategories(token); },
   upsert_work_category(input: any, token?: string | null) { return this.upsertWorkCategory(input, token); },
   merge_work_categories(sourceId: number, targetId: number, token?: string | null) { return this.mergeWorkCategory(sourceId, targetId, token); },

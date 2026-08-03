@@ -196,6 +196,7 @@ function defaultSettings(): Settings {
     default_vat: 21,
     idle_timeout_minutes: 15,
     last_backup_at: null,
+    monthly_economic_goals: {},
   };
 }
 
@@ -2391,6 +2392,36 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     save(s);
     return { ...proj };
   },
+
+  async deleteProjectWorkItems(projectId: number, itemIds?: number[], token?: string | null): Promise<number> {
+    const s = load();
+    requireAdminProjectManagement(s, token);
+    const companyId = sessionCompanyId(s, token);
+    const projectExists = s.workProjects.some(
+      (project) => project.id === projectId && project.company_id === companyId,
+    );
+    if (!projectExists) throw new Error("Proyecto no encontrado.");
+
+    const selectedIds = itemIds?.length ? new Set(itemIds) : null;
+    const idsToDelete = new Set<number>();
+    for (const item of s.workItems) {
+      if (item.company_id !== companyId || item.project_id !== projectId) continue;
+      if (selectedIds === null || selectedIds.has(item.id)) idsToDelete.add(item.id);
+    }
+    // A parent cannot be removed while leaving its subtasks orphaned.
+    for (const item of s.workItems) {
+      if (item.parent_id != null && idsToDelete.has(item.parent_id)) idsToDelete.add(item.id);
+    }
+
+    const previousLength = s.workItems.length;
+    s.workItems = s.workItems.filter(
+      (item) => !idsToDelete.has(item.id),
+    );
+    const deleted = previousLength - s.workItems.length;
+    save(s);
+    return deleted;
+  },
+
   async listWorkItems(filters?: WorkItemFilters, token?: string | null): Promise<WorkItem[]> {
     const s = load();
     const companyId = sessionCompanyId(s, token);
@@ -2767,6 +2798,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
   get_work_project(reference: number | string, token?: string | null) { return this.getWorkProject(reference, token); },
   upsert_work_project(input: WorkProjectInput, token?: string | null) { return this.upsertWorkProject(input, token); },
   archive_work_project(id: number, token?: string | null) { return this.archiveWorkProject(id, token); },
+  delete_project_work_items(project_id: number, item_ids?: number[], token?: string | null) { return this.deleteProjectWorkItems(project_id, item_ids, token); },
   list_work_categories(token?: string | null) { return this.listWorkCategories(token); },
   upsert_work_category(input: any, token?: string | null) { return this.upsertWorkCategory(input, token); },
   merge_work_categories(args: any, token?: string | null) {

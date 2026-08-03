@@ -27,6 +27,13 @@
   import EmptyState from "$lib/components/EmptyState.svelte";
   import RichDescription from "$lib/components/RichDescription.svelte";
   import RichDescriptionEditor from "$lib/components/RichDescriptionEditor.svelte";
+  import { countImportedTasks, parseTaskImport } from "$lib/work/task-import";
+  import { formatTaskForAi } from "$lib/work/task-ai-copy";
+  import { calculateTaskProgress } from "$lib/projects/task-progress";
+  import { projectStatusLabel, projectStatusTone } from "$lib/projects/presentation";
+  import { hasInvalidDateRange, hasInvalidMoneyInput } from "$lib/projects/form-validation";
+  import ProjectProgress from "$lib/components/projects/ProjectProgress.svelte";
+  import { browser } from "$app/environment";
 
   const projectReference = $derived($page.params.id);
 
@@ -40,7 +47,9 @@
   let cashMovements = $state<CashMovement[]>([]);
   let loading = $state(true);
 
-  let viewMode = $state<"lista" | "kanban">("lista");
+  let viewMode = $state<"lista" | "kanban">(
+    browser && localStorage.getItem("hexa-project-view") === "kanban" ? "kanban" : "lista",
+  );
   let draggedTaskId = $state<number | null>(null);
   let dragOverStatus = $state<WorkStatus | null>(null);
   let dragOverParentId = $state<number | null>(null);
@@ -51,6 +60,16 @@
   // Quick Capture State
   let quickTitle = $state("");
   let quickSaving = $state(false);
+
+  // Paste/import tasks from ChatGPT or another Markdown source.
+  let importModalOpen = $state(false);
+  let importText = $state("");
+  let importSaving = $state(false);
+  let deletingProjectTasks = $state(false);
+  let deleteTasksModalOpen = $state(false);
+  let selectedTaskIds = $state<Set<number>>(new Set());
+  const importedTasks = $derived(parseTaskImport(importText));
+  const importedTaskCount = $derived(countImportedTasks(importedTasks));
 
   // Filters State
   let filterText = $state("");
@@ -158,8 +177,7 @@
 
   const today = new Date();
   const currentMonth = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
-  const availableMilestoneMonths = 36 - today.getMonth();
-  const milestoneMonthOptions = Array.from({ length: availableMilestoneMonths }, (_, index) => {
+  const milestoneMonthOptions = Array.from({ length: 36 }, (_, index) => {
     const date = new Date(today.getFullYear(), today.getMonth() + index, 1);
     return {
       value: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`,
@@ -190,6 +208,11 @@
     { status: "blocked", label: "Bloqueado", tone: "danger" },
     { status: "done", label: "Hecho", tone: "ok" },
   ];
+  const visibleKanbanColumns = $derived(
+    filterStatus === "archived"
+      ? [{ status: "archived" as WorkStatus, label: "Archivado", tone: "neutral" as const }]
+      : kanbanColumns,
+  );
 
   const assigneeOptions = $derived([
     { value: "", label: "Todos los responsables" },
@@ -259,11 +282,24 @@
     loadData();
   });
 
+  $effect(() => {
+    if (browser) localStorage.setItem("hexa-project-view", viewMode);
+  });
+
+  function clearTaskFilters() {
+    filterText = "";
+    filterStatus = "";
+    filterType = "";
+    filterPriority = "";
+    filterAssignee = "";
+  }
+
   // Calculate metrics
-  const totalTasks = $derived(tasks.length);
-  const completedTasks = $derived(tasks.filter((t) => t.status === "done").length);
+  const taskProgress = $derived(calculateTaskProgress(tasks));
+  const totalTasks = $derived(taskProgress.total);
+  const completedTasks = $derived(taskProgress.completed);
   const blockedTasks = $derived(tasks.filter((t) => t.status === "blocked").length);
-  const progressPercent = $derived(totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0);
+  const progressPercent = $derived(taskProgress.progress);
   const projectSignals = $derived.by(() => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -332,7 +368,8 @@
 
   const parentTasksForView = $derived(
     tasks.filter((task) => {
-      if (task.parent_id != null || task.status === "archived") return false;
+      if (task.parent_id != null) return false;
+      if (task.status === "archived" && filterStatus !== "archived") return false;
       return filteredTasks.some((visible) => visible.id === task.id || visible.parent_id === task.id);
     }),
   );
@@ -354,29 +391,12 @@
   }
 
   function columnTasks(status: WorkStatus) {
+    if (status === "archived") {
+      return parentTasksForView.filter(
+        (task) => task.status === "archived" || visibleSubtasks(task.id).some((child) => child.status === "archived"),
+      );
+    }
     return parentTasksForView.filter((task) => task.status === status);
-  }
-
-  function projectStatusLabel(status?: string) {
-    switch (status) {
-      case "planned": return "Planificado";
-      case "active": return "Activo";
-      case "paused": return "En pausa";
-      case "done": return "Completado";
-      case "archived": return "Archivado";
-      default: return status || "";
-    }
-  }
-
-  function projectStatusTone(status?: string): "neutral" | "ok" | "warn" | "danger" | "ai" {
-    switch (status) {
-      case "active": return "ok";
-      case "planned": return "warn";
-      case "paused": return "neutral";
-      case "done": return "ok";
-      case "archived": return "neutral";
-      default: return "neutral";
-    }
   }
 
   function taskStatusLabel(s: string) {
@@ -476,7 +496,7 @@
     }
   }
 
-  // Admin Actions: Edit Project & Archive Project
+  // Admin action: edit project
   function openEditProjectModal() {
     if (!project) return;
     editProjectForm = {
@@ -501,6 +521,26 @@
       showToast("El nombre del proyecto es obligatorio", "err");
       return;
     }
+    if (hasInvalidDateRange(editProjectForm.start_date, editProjectForm.target_date)) {
+      showToast("La fecha objetivo no puede ser anterior a la fecha de inicio", "err");
+      return;
+    }
+    if (editProjectForm.status === "done" && tasks.some((task) => task.status !== "done" && task.status !== "archived")) {
+      showToast("Completa o archiva las tareas abiertas antes de marcar el proyecto como completado", "err");
+      return;
+    }
+    const projectValue = parseEurosInput(editProjectForm.value);
+    if (editProjectForm.customer_id && hasInvalidMoneyInput(editProjectForm.value)) {
+      showToast("Introduce un valor contratado válido", "err");
+      return;
+    }
+    const invalidMilestone = editProjectForm.milestones.some((milestone) => {
+      return hasInvalidMoneyInput(milestone.amount);
+    });
+    if (!editProjectForm.customer_id && invalidMilestone) {
+      showToast("Revisa los importes de los hitos mensuales", "err");
+      return;
+    }
     editProjectSaving = true;
     try {
       await api.upsertWorkProject({
@@ -510,7 +550,7 @@
         status: editProjectForm.status,
         customer_id: editProjectForm.customer_id ? Number(editProjectForm.customer_id) : null,
         value_cents: editProjectForm.customer_id
-          ? (parseEurosInput(editProjectForm.value) ?? 0)
+          ? (projectValue ?? 0)
           : 0,
         monthly_estimate_cents: editProjectForm.customer_id
           ? 0
@@ -538,18 +578,6 @@
       showToast(err instanceof Error ? err.message : "Error al actualizar proyecto", "err");
     } finally {
       editProjectSaving = false;
-    }
-  }
-
-  async function handleArchiveProject() {
-    if (!project) return;
-    if (!confirm(`¿Estás seguro de archivar el proyecto "${project.name}"?`)) return;
-    try {
-      await api.archiveWorkProject(project.id);
-      showToast("Proyecto archivado");
-      goto("/proyectos");
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Error al archivar proyecto", "err");
     }
   }
 
@@ -625,6 +653,89 @@
     detailModalOpen = true;
   }
 
+  function openImportModal() {
+    importText = "";
+    importModalOpen = true;
+  }
+
+  async function handleImportTasks() {
+    if (!project || importedTasks.length === 0 || importSaving) return;
+    importSaving = true;
+    let created = 0;
+    try {
+      for (const imported of importedTasks) {
+        const parent = await api.upsertWorkItem({
+          title: imported.title,
+          description: imported.description,
+          project_id: project.id,
+          type: "task",
+          status: "inbox",
+          priority: "normal",
+        });
+        created += 1;
+
+        for (const subtask of imported.subtasks) {
+          await api.upsertWorkItem({
+            title: subtask.title,
+            description: subtask.description,
+            parent_id: parent.id,
+            project_id: project.id,
+            type: "task",
+            status: "inbox",
+            priority: "normal",
+          });
+          created += 1;
+        }
+      }
+
+      importModalOpen = false;
+      importText = "";
+      showToast(`Se han creado ${created} tareas y subtareas`);
+      await loadData();
+    } catch (error) {
+      await loadData();
+      const reason = error instanceof Error ? error.message : "Error desconocido";
+      showToast(`Se crearon ${created} elementos antes del error: ${reason}`, "err");
+    } finally {
+      importSaving = false;
+    }
+  }
+
+  function openDeleteTasksModal() {
+    selectedTaskIds = new Set();
+    deleteTasksModalOpen = true;
+  }
+
+  function toggleTaskForDeletion(id: number) {
+    const next = new Set(selectedTaskIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    selectedTaskIds = next;
+  }
+
+  function toggleAllTasksForDeletion() {
+    selectedTaskIds = selectedTaskIds.size === tasks.length
+      ? new Set()
+      : new Set(tasks.map((task) => task.id));
+  }
+
+  async function handleDeleteSelectedProjectTasks() {
+    if (!project || selectedTaskIds.size === 0 || deletingProjectTasks) return;
+
+    deletingProjectTasks = true;
+    try {
+      const deleted = await api.deleteProjectWorkItems(project.id, [...selectedTaskIds]);
+      deleteTasksModalOpen = false;
+      selectedTaskIds = new Set();
+      showToast(`Se han eliminado ${deleted} tareas y subtareas`);
+      await loadData();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudieron eliminar las tareas", "err");
+    } finally {
+      deletingProjectTasks = false;
+    }
+  }
+
   function openNewSubtaskModal(event: MouseEvent, parent: WorkItem) {
     event.stopPropagation();
     editingTask = null;
@@ -643,6 +754,17 @@
       due_date: "",
     };
     detailModalOpen = true;
+  }
+
+  async function copyTaskForAi(event: MouseEvent, task: WorkItem) {
+    event.stopPropagation();
+    const text = formatTaskForAi(task, taskSubtasks(task.id), project);
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast("Tarea y subtareas copiadas para la IA");
+    } catch {
+      showToast("El navegador no ha permitido copiar al portapapeles", "err");
+    }
   }
 
   function openEditTaskModal(task: WorkItem) {
@@ -667,6 +789,10 @@
   async function handleSaveTask() {
     if (!detailForm.title.trim()) {
       showToast("El título de la tarea es obligatorio", "err");
+      return;
+    }
+    if (hasInvalidDateRange(detailForm.start_date, detailForm.due_date)) {
+      showToast("La fecha límite no puede ser anterior a la fecha de inicio", "err");
       return;
     }
     taskSaving = true;
@@ -867,9 +993,6 @@
           <Button variant="secondary" onclick={openEditProjectModal} class="text-xs">
             Editar proyecto
           </Button>
-          <Button variant="ghost" onclick={handleArchiveProject} class="text-xs text-rose-300 hover:text-rose-200">
-            Archivar proyecto
-          </Button>
         </div>
       {/if}
     </div>
@@ -905,44 +1028,28 @@
           </div>
         </div>
 
-        <!-- Progress Overview Box -->
-        <div class="w-full sm:w-64 shrink-0 space-y-3 rounded-xl border border-[var(--color-border-soft)] bg-black/30 p-4">
-          <div class="flex items-center justify-between text-xs">
-            <span class="font-medium text-[var(--color-muted)]">Progreso global</span>
-            <span class="font-bold text-[var(--color-purple-bright)]">{progressPercent}%</span>
-          </div>
-          <div class="h-2.5 w-full overflow-hidden rounded-full bg-white/10">
-            <div
-              class="h-full bg-gradient-to-r from-purple-500 to-indigo-400 transition-all duration-300"
-              style="width: {progressPercent}%"
-            ></div>
-          </div>
-
-          <div class="flex items-center justify-between gap-1 text-[11px] text-[var(--color-muted-dim)] pt-1">
-            <span>Tareas: <strong class="text-[var(--color-text)]">{totalTasks}</strong></span>
-            <span>Hechas: <strong class="text-emerald-300">{completedTasks}</strong></span>
-            {#if blockedTasks > 0}
-              <span>Bloqueadas: <strong class="text-rose-300">{blockedTasks}</strong></span>
-            {/if}
-          </div>
-        </div>
+        <ProjectProgress total={totalTasks} completed={completedTasks} blocked={blockedTasks} progress={progressPercent} />
       </div>
     </Card>
 
     <Card lift={false} class="mb-6 border border-[var(--color-border-strong)] p-5">
-      <div class="mb-4 flex flex-wrap items-start justify-between gap-3">
+      <details>
+        <summary class="flex cursor-pointer list-none items-center justify-between gap-3 rounded-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-purple-400">
+          <span class="section-label">ECONOMÍA DEL PROYECTO</span>
+          <span class="text-xs text-[var(--color-purple-bright)]">Mostrar / ocultar</span>
+        </summary>
+      <div class="mb-4 mt-4 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p class="section-label mb-1">ECONOMÍA DEL PROYECTO</p>
           <p class="text-xs text-[var(--color-muted-dim)]">
             {project.customer_id
-              ? "Valor contratado, facturación y costes registrados."
+              ? "Valor contratado, cobros y gastos registrados en Caja."
               : "Objetivo económico estimado para este proyecto propio."}
           </p>
         </div>
         {#if project.customer_id}
           <div class="flex gap-2">
             <Button variant="secondary" onclick={() => openCashModal("expense")}>− Registrar gasto</Button>
-            <Button variant="primary" onclick={() => openCashModal("income")}>+ Registrar factura</Button>
+            <Button variant="primary" onclick={() => openCashModal("income")}>+ Registrar cobro</Button>
           </div>
         {/if}
       </div>
@@ -953,7 +1060,7 @@
             <p class="mt-1 text-xl font-semibold text-radiant">{formatEUR(project.value_cents)}</p>
           </div>
           <div class="rounded-xl border border-emerald-400/20 bg-emerald-500/[0.06] p-3">
-            <p class="text-xs text-[var(--color-muted)]">Facturado</p>
+            <p class="text-xs text-[var(--color-muted)]">Cobrado</p>
             <p class="mt-1 text-xl font-semibold text-emerald-300">{formatEUR(projectBilledCents)}</p>
           </div>
           <div class="rounded-xl border border-rose-400/20 bg-rose-500/[0.06] p-3">
@@ -961,7 +1068,7 @@
             <p class="mt-1 text-xl font-semibold text-rose-300">{formatEUR(projectSpentCents)}</p>
           </div>
           <div class="rounded-xl border border-cyan-400/20 bg-cyan-500/[0.06] p-3">
-            <p class="text-xs text-[var(--color-muted)]">Margen cobrado</p>
+            <p class="text-xs text-[var(--color-muted)]">Resultado de caja</p>
             <p class="mt-1 text-xl font-semibold text-cyan-300">{formatEUR(projectBilledCents - projectSpentCents)}</p>
           </div>
         </div>
@@ -987,9 +1094,15 @@
           <p class="mt-3 text-xs text-[var(--color-muted-dim)]">No hay hitos económicos definidos.</p>
         {/if}
       {/if}
+      </details>
     </Card>
 
-    <div class="mb-6 grid gap-3 lg:grid-cols-[1.4fr_repeat(4,minmax(0,1fr))]">
+    <details class="mb-6 rounded-2xl border border-[var(--color-border)] bg-black/10 p-4">
+      <summary class="flex cursor-pointer list-none items-center justify-between gap-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-purple-400">
+        <span class="section-label">SALUD Y SEÑALES</span>
+        <span class="text-xs text-[var(--color-muted)]">{projectSignals.health.label} · {projectSignals.overdue} vencidas · {projectSignals.dueSoon} próximas</span>
+      </summary>
+    <div class="mt-4 grid gap-3 lg:grid-cols-[1.4fr_repeat(4,minmax(0,1fr))]">
       <div class="rounded-xl border p-4 {projectSignals.health.className}">
         <p class="text-[11px] font-bold uppercase tracking-wider opacity-75">Salud del proyecto</p>
         <div class="mt-1 flex items-center gap-2">
@@ -1015,6 +1128,7 @@
         <p class="mt-1 text-xs text-[var(--color-muted)]">Sin responsable</p>
       </div>
     </div>
+    </details>
 
     <!-- Quick Capture Form for this Project -->
     <Card lift={false} class="mb-6 border border-[var(--color-border)] bg-purple-950/10 p-4">
@@ -1070,6 +1184,18 @@
           placeholder="Todos los responsables"
           class="w-48"
         />
+        {#if filterText || filterStatus || filterType || filterPriority || filterAssignee}
+          <Button variant="ghost" onclick={clearTaskFilters} class="text-xs">Limpiar filtros</Button>
+        {/if}
+        {#if filterStatus}
+          <span class="rounded-full border border-purple-400/25 bg-purple-500/10 px-2.5 py-1 text-[11px] text-[var(--color-purple-bright)]">{statusOptions.find((option) => option.value === filterStatus)?.label}</span>
+        {/if}
+        {#if filterPriority}
+          <span class="rounded-full border border-amber-400/25 bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-200">{priorityOptions.find((option) => option.value === filterPriority)?.label}</span>
+        {/if}
+        {#if filterType || filterAssignee}
+          <span class="rounded-full border border-[var(--color-border)] px-2.5 py-1 text-[11px] text-[var(--color-muted)]">Filtros adicionales activos</span>
+        {/if}
       </div>
 
       <!-- View Switcher -->
@@ -1098,6 +1224,14 @@
         <Button variant="primary" onclick={openNewTaskModal} class="text-xs">
           + Nueva tarea
         </Button>
+        <Button variant="secondary" onclick={openImportModal} class="text-xs">
+          Pegar tareas
+        </Button>
+        {#if $isAdmin && tasks.length > 0}
+          <Button variant="danger" onclick={openDeleteTasksModal} disabled={deletingProjectTasks} class="text-xs">
+            Eliminar tareas…
+          </Button>
+        {/if}
       </div>
     </div>
 
@@ -1126,7 +1260,7 @@
             >
               <button
                 type="button"
-                class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-sm text-[var(--color-muted)] transition hover:bg-white/10 hover:text-white {subtasks.length === 0 ? 'invisible' : ''}"
+                class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-sm text-[var(--color-muted)] transition hover:bg-white/10 hover:text-white {visibleChildren.length === 0 ? 'invisible' : ''}"
                 aria-label={isParentCollapsed(task.id) ? "Mostrar subtareas" : "Ocultar subtareas"}
                 aria-expanded={!isParentCollapsed(task.id)}
                 onclick={(event) => toggleParent(event, task.id)}
@@ -1158,13 +1292,18 @@
                 {#if task.due_date}<span class="text-xs tabular text-[var(--color-muted-dim)]">📅 {formatDate(task.due_date)}</span>{/if}
                 <button
                   type="button"
+                  class="rounded-lg border border-cyan-400/25 px-2.5 py-1.5 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/10"
+                  onclick={(event) => copyTaskForAi(event, task)}
+                >Copiar para IA</button>
+                <button
+                  type="button"
                   class="rounded-lg border border-purple-400/25 px-2.5 py-1.5 text-[11px] font-semibold text-[var(--color-purple-bright)] hover:bg-purple-500/10"
                   onclick={(event) => openNewSubtaskModal(event, task)}
                 >+ Añadir subtarea</button>
               </div>
             </div>
 
-            {#if subtasks.length > 0 && !isParentCollapsed(task.id)}
+            {#if visibleChildren.length > 0 && !isParentCollapsed(task.id)}
               <div class="border-t border-[var(--color-border-soft)] bg-black/15 px-4 py-2 sm:pl-14">
                 <div class="divide-y divide-[var(--color-border-soft)] border-l border-purple-400/25 pl-3">
                   {#each visibleChildren as child (child.id)}
@@ -1210,22 +1349,22 @@
       <!-- Kanban Board View -->
       <div>
         <p class="mb-3 text-xs text-[var(--color-muted-dim)]">
-          Las subtareas permanecen agrupadas dentro de su tarea. Arrastra una tarea sin subtareas para cambiar su estado.
+          Las cabeceras permanecen visibles al desplazarte. Arrastra una tarea para cambiar su estado o ábrela y usa el selector «Estado» con teclado o pantalla táctil.
         </p>
-        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-5 items-start">
-        {#each kanbanColumns as col, colIndex}
+        <div class="flex snap-x items-stretch gap-4 overflow-x-auto pb-3 lg:grid lg:grid-cols-5 lg:overflow-visible">
+        {#each visibleKanbanColumns as col, colIndex}
           {@const colTasks = columnTasks(col.status)}
           <div
             role="group"
             aria-label={`Columna ${col.label}`}
-            class="relative rounded-2xl border p-3 flex flex-col min-h-[300px] transition-all hover:z-50 {dragOverStatus === col.status
+            class="relative flex h-full min-h-[300px] min-w-[18rem] snap-start flex-col rounded-2xl border p-3 transition-all hover:z-50 lg:min-w-0 {dragOverStatus === col.status
               ? 'border-[var(--color-purple-bright)] bg-purple-500/10 ring-2 ring-purple-400/20'
               : 'border-[var(--color-border)] bg-black/20'}"
             ondragover={(event) => handleColumnDragOver(event, col.status)}
             ondrop={(event) => handleTaskDrop(event, col.status)}
           >
             <!-- Column Header -->
-            <div class="flex items-center justify-between mb-3 px-1 pb-2 border-b border-[var(--color-border-soft)]">
+            <div class="sticky top-0 z-40 -mx-1 mb-3 flex items-center justify-between rounded-xl border-b border-[var(--color-border-soft)] bg-[var(--color-obsidian-panel)] px-2 py-2 shadow-[0_12px_24px_-18px_rgba(0,0,0,0.95)]">
               <div class="flex items-center gap-2">
                 <Badge tone={col.tone}>{col.label}</Badge>
               </div>
@@ -1269,13 +1408,22 @@
                       <h4 class="text-xs font-semibold text-[var(--color-text)] leading-snug">
                         {task.title}
                       </h4>
-                      <button
-                        type="button"
-                        title="Añadir subtarea"
-                        aria-label={`Añadir subtarea a ${task.title}`}
-                        class="shrink-0 rounded-md border border-purple-400/25 px-1.5 py-0.5 text-xs font-bold text-[var(--color-purple-bright)] hover:bg-purple-500/15"
-                        onclick={(event) => openNewSubtaskModal(event, task)}
-                      >+</button>
+                      <div class="flex shrink-0 items-center gap-1">
+                        <button
+                          type="button"
+                          title="Copiar tarea y subtareas para la IA"
+                          aria-label={`Copiar ${task.title} para la IA`}
+                          class="rounded-md border border-cyan-400/25 px-1.5 py-0.5 text-[10px] font-bold text-cyan-200 hover:bg-cyan-500/15"
+                          onclick={(event) => copyTaskForAi(event, task)}
+                        >IA</button>
+                        <button
+                          type="button"
+                          title="Añadir subtarea"
+                          aria-label={`Añadir subtarea a ${task.title}`}
+                          class="rounded-md border border-purple-400/25 px-1.5 py-0.5 text-xs font-bold text-[var(--color-purple-bright)] hover:bg-purple-500/15"
+                          onclick={(event) => openNewSubtaskModal(event, task)}
+                        >+</button>
+                      </div>
                     </div>
 
                     {#if allSubtasks.length > 0}
@@ -1485,7 +1633,7 @@
 
 <Modal
   open={cashModalOpen}
-  title={cashForm.kind === "income" ? "Registrar facturación" : "Registrar gasto"}
+  title={cashForm.kind === "income" ? "Registrar cobro" : "Registrar gasto"}
   onclose={() => (cashModalOpen = false)}
 >
   <form
@@ -1508,6 +1656,144 @@
       <Button variant="ghost" type="button" onclick={() => (cashModalOpen = false)}>Cancelar</Button>
       <Button variant="primary" type="submit" disabled={cashSaving}>
         {cashSaving ? "Registrando…" : "Registrar"}
+      </Button>
+    </div>
+  </form>
+</Modal>
+
+<Modal
+  open={importModalOpen}
+  title="Importar tareas desde texto"
+  onclose={() => !importSaving && (importModalOpen = false)}
+>
+  <form
+    class="space-y-4 pt-1"
+    onsubmit={(event) => {
+      event.preventDefault();
+      handleImportTasks();
+    }}
+  >
+    <div class="rounded-xl border border-purple-400/25 bg-purple-500/[0.07] px-4 py-3 text-sm text-[var(--color-muted)]">
+      Pega una lista de ChatGPT. Las líneas principales serán tareas; las listas indentadas, subtareas; y el texto indentado, su descripción.
+    </div>
+
+    <div class="space-y-1.5">
+      <label for="task-import-text" class="text-xs font-medium text-[var(--color-muted)]">Lista de tareas</label>
+      <textarea
+        id="task-import-text"
+        bind:value={importText}
+        class="field min-h-52 w-full resize-y font-mono text-sm leading-6"
+        placeholder={'1. Preparar catálogo\n   Descripción: Revisar antes de publicar.\n   - Revisar productos\n     Descripción: Comprobar SKU y precio.\n   - Añadir fotografías'}
+      ></textarea>
+      <p class="text-[11px] text-[var(--color-muted-dim)]">
+        Admite listas con -, *, +, números y casillas Markdown. Usa «Descripción:» o texto indentado debajo del elemento.
+      </p>
+    </div>
+
+    {#if importedTasks.length > 0}
+      <div class="space-y-2">
+        <div class="flex items-center justify-between gap-3">
+          <p class="text-xs font-bold uppercase tracking-[0.14em] text-[var(--color-muted)]">Vista previa</p>
+          <span class="text-xs text-purple-200">{importedTaskCount} elementos</span>
+        </div>
+        <div class="max-h-64 space-y-2 overflow-y-auto rounded-xl border border-[var(--color-border)] bg-black/20 p-3">
+          {#each importedTasks as imported, index (`${index}-${imported.title}`)}
+            <div class="rounded-lg bg-white/[0.025] px-3 py-2">
+              <p class="text-sm font-semibold text-[var(--color-text)]">{index + 1}. {imported.title}</p>
+              {#if imported.description}
+                <p class="mt-1 whitespace-pre-line text-xs text-[var(--color-muted)]">{imported.description}</p>
+              {/if}
+              {#if imported.subtasks.length > 0}
+                <ul class="mt-1.5 space-y-1 pl-5 text-xs text-[var(--color-muted)]">
+                  {#each imported.subtasks as subtask}
+                    <li>
+                      <span>↳ {subtask.title}</span>
+                      {#if subtask.description}
+                        <p class="ml-4 mt-0.5 whitespace-pre-line text-[11px] text-[var(--color-muted-dim)]">{subtask.description}</p>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      </div>
+    {:else if importText.trim()}
+      <p class="rounded-xl border border-amber-400/25 bg-amber-500/[0.07] px-4 py-3 text-sm text-amber-200">
+        No se ha detectado ninguna lista. Usa guiones o números delante de cada tarea.
+      </p>
+    {/if}
+
+    <div class="flex justify-end gap-2">
+      <Button variant="ghost" type="button" disabled={importSaving} onclick={() => (importModalOpen = false)}>Cancelar</Button>
+      <Button variant="primary" type="submit" disabled={importSaving || importedTasks.length === 0}>
+        {importSaving ? `Creando ${importedTaskCount} elementos…` : `Crear ${importedTaskCount} tareas y subtareas`}
+      </Button>
+    </div>
+  </form>
+</Modal>
+
+<Modal
+  open={deleteTasksModalOpen}
+  title="Eliminar tareas"
+  onclose={() => !deletingProjectTasks && (deleteTasksModalOpen = false)}
+>
+  <form
+    class="space-y-4 pt-1"
+    onsubmit={(event) => {
+      event.preventDefault();
+      handleDeleteSelectedProjectTasks();
+    }}
+  >
+    <div class="rounded-xl border border-rose-400/25 bg-rose-500/[0.07] px-4 py-3 text-sm text-rose-100">
+      Selecciona lo que quieras borrar. Esta acción es definitiva; el proyecto se conservará.
+    </div>
+
+    <label class="flex cursor-pointer items-center gap-3 rounded-xl border border-[var(--color-border)] bg-black/20 px-4 py-3">
+      <input
+        type="checkbox"
+        checked={selectedTaskIds.size === tasks.length}
+        onchange={toggleAllTasksForDeletion}
+        class="h-4 w-4 accent-rose-500"
+      />
+      <span class="text-sm font-semibold text-[var(--color-text)]">Seleccionar todas ({tasks.length})</span>
+    </label>
+
+    <div class="max-h-96 space-y-2 overflow-y-auto rounded-xl border border-[var(--color-border)] bg-black/20 p-3">
+      {#each tasks.filter((task) => task.parent_id == null) as parent (parent.id)}
+        <label class="flex cursor-pointer items-start gap-3 rounded-lg px-3 py-2 hover:bg-white/[0.04]">
+          <input
+            type="checkbox"
+            checked={selectedTaskIds.has(parent.id)}
+            onchange={() => toggleTaskForDeletion(parent.id)}
+            class="mt-0.5 h-4 w-4 accent-rose-500"
+          />
+          <span class="min-w-0 text-sm font-semibold text-[var(--color-text)]">{parent.title}</span>
+        </label>
+        {#each tasks.filter((task) => task.parent_id === parent.id) as child (child.id)}
+          <label class="ml-7 flex cursor-pointer items-start gap-3 rounded-lg px-3 py-2 hover:bg-white/[0.04]">
+            <input
+              type="checkbox"
+              checked={selectedTaskIds.has(child.id) || selectedTaskIds.has(parent.id)}
+              disabled={selectedTaskIds.has(parent.id)}
+              onchange={() => toggleTaskForDeletion(child.id)}
+              class="mt-0.5 h-4 w-4 accent-rose-500"
+            />
+            <span class="min-w-0 text-sm text-[var(--color-muted)]">↳ {child.title}</span>
+          </label>
+        {/each}
+      {/each}
+    </div>
+
+    <p class="text-xs text-[var(--color-muted-dim)]">
+      Al eliminar una tarea principal también se eliminarán sus subtareas.
+    </p>
+
+    <div class="flex justify-end gap-2">
+      <Button variant="ghost" type="button" disabled={deletingProjectTasks} onclick={() => (deleteTasksModalOpen = false)}>Cancelar</Button>
+      <Button variant="danger" type="submit" disabled={deletingProjectTasks || selectedTaskIds.size === 0}>
+        {deletingProjectTasks ? "Eliminando…" : `Eliminar selección (${selectedTaskIds.size})`}
       </Button>
     </div>
   </form>

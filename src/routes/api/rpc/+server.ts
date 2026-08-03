@@ -219,6 +219,13 @@ export const POST: RequestHandler = async ({ request }) => {
       case "archive_work_project":
         result = await postgresApi.archive_work_project(args?.id as number, token);
         break;
+      case "delete_project_work_items":
+        result = await postgresApi.delete_project_work_items(
+          args?.project_id as number,
+          Array.isArray(args?.item_ids) ? args.item_ids.map(Number) : undefined,
+          token,
+        );
+        break;
       case "list_work_categories":
         result = await postgresApi.list_work_categories(token);
         break;

@@ -220,6 +220,8 @@ export type Settings = {
   idle_timeout_minutes: number;
   /** ISO timestamp of the latest locally initiated backup. */
   last_backup_at: string | null;
+  /** Objetivos de ingresos en céntimos, indexados por `companyId:YYYY-MM`. */
+  monthly_economic_goals: Record<string, number>;
 };
 
 export type PluginKey = "database_bridge" | "stripe_mcp";
