@@ -9,6 +9,19 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-08-04
+
+### Fixed
+
+- En Ajustes web, la comprobación opcional de Ollama ya no bloquea el listado de usuarios administradores cuando el Worker no expone `ollama_health`.
+
+## [0.3.1] — 2026-08-04
+
+### Fixed
+
+- El Worker Cloudflare/D1 ya implementa el acceso de operador y la administración de usuarios: listado, alta, edición, membresías de empresa y contraseñas temporales de 14 caracteres con cambio obligatorio en menos de 24 horas.
+- El flujo de release estable inicializa recursivamente los submódulos de plugins antes de construir el bundle Cloudflare.
+
 ## [0.3.0] — 2026-07-30
 
 ### Added
@@ -133,7 +146,9 @@ Primera release pública (tag `v0.1.0`).
 
 ---
 
-[Unreleased]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.2.1-rc.2...v0.3.0
 [0.2.1-rc.2]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.2.1-rc.1...v0.2.1-rc.2
 [0.2.1-rc.1]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.2.0...v0.2.1-rc.1

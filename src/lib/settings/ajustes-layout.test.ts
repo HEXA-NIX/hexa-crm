@@ -85,6 +85,16 @@ describe("ajustes layout — category navigation", () => {
     }
   });
 
+  it("does not let optional Ollama health block the admin user directory", () => {
+    const load = src.match(/async function load\(\) \{([\s\S]*?)\n  \}/)?.[1] ?? "";
+    const ollamaCall = load.indexOf("health = await api.ollamaHealth()");
+    const usersCall = load.indexOf("users = await api.listUsers()");
+
+    expect(ollamaCall).toBeGreaterThanOrEqual(0);
+    expect(usersCall).toBeGreaterThan(ollamaCall);
+    expect(load.slice(0, usersCall)).toMatch(/try \{\s*health = await api\.ollamaHealth\(\);\s*\} catch \{\s*health = null;\s*\}/);
+  });
+
   it("admin-only equipo matches catalog filter", () => {
     expect(visibleAjustesSections(false).some((s) => s.id === "equipo")).toBe(false);
     expect(visibleAjustesSections(true).some((s) => s.id === "equipo")).toBe(true);
