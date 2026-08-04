@@ -9,6 +9,8 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-30
+
 ### Added
 
 - Módulo multiempresa Trabajo (fase 1): bandeja persistente y categorizada (`/trabajo`), migración browser store v6, esquema e índices PostgreSQL con RLS por tenant, captura de avisos desde el Dashboard y flag centralizado `supportsWorkManagement()`.
@@ -131,7 +133,8 @@ Primera release pública (tag `v0.1.0`).
 
 ---
 
-[Unreleased]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.2.1-rc.2...HEAD
+[Unreleased]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.2.1-rc.2...v0.3.0
 [0.2.1-rc.2]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.2.1-rc.1...v0.2.1-rc.2
 [0.2.1-rc.1]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.2.0...v0.2.1-rc.1
 [0.2.0]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.1.0...v0.2.0

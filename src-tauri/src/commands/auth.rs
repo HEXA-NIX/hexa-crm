@@ -3,7 +3,7 @@ use crate::db::{
     validate_permanent_password, verify_pin, Db,
 };
 use crate::models::{AuthUser, CreateUserResult, LoginResult, UserInput};
-use rand::RngCore;
+use rand::RngExt;
 use rusqlite::params;
 use tauri::State;
 
@@ -37,7 +37,7 @@ const USER_SELECT: &str = "SELECT id, username, display_name, role, active, crea
 
 fn random_token() -> String {
     let mut bytes = [0u8; 24];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill(&mut bytes);
     hex::encode(bytes)
 }
 

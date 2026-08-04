@@ -13,6 +13,7 @@ export function formatEUR(cents: number, opts?: { signed?: boolean }): string {
   const formatted = new Intl.NumberFormat("es-ES", {
     style: "currency",
     currency: "EUR",
+    useGrouping: true,
   }).format(Math.abs(value));
 
   if (opts?.signed && cents !== 0) {

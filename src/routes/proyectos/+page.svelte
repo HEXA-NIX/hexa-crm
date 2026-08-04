@@ -2,7 +2,8 @@
   import { api } from "$lib/api/client";
   import { session, isAdmin } from "$lib/stores/session";
   import { showToast } from "$lib/stores/ui";
-  import type { WorkProject, WorkItem, WorkProjectInput } from "$lib/types";
+  import { formatEUR, parseEurosInput } from "$lib/money";
+  import type { Customer, WorkProject, WorkItem, WorkProjectInput } from "$lib/types";
   import Button from "$lib/components/Button.svelte";
   import Card from "$lib/components/Card.svelte";
   import Badge from "$lib/components/Badge.svelte";
@@ -12,6 +13,7 @@
 
   let projects = $state<WorkProject[]>([]);
   let items = $state<WorkItem[]>([]);
+  let customers = $state<Customer[]>([]);
   let loading = $state(true);
 
   let filterStatus = $state("");
@@ -22,6 +24,9 @@
     name: "",
     description: "",
     status: "active" as WorkProject["status"],
+    customer_id: "",
+    value: "",
+    milestones: [] as { amount: string; target_month: string }[],
     start_date: "",
     target_date: "",
   });
@@ -43,15 +48,37 @@
     { value: "archived", label: "Archivado" },
   ];
 
+  const today = new Date();
+  const currentMonth = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
+  const availableMilestoneMonths = 36 - today.getMonth();
+  const milestoneMonthOptions = Array.from({ length: availableMilestoneMonths }, (_, index) => {
+    const date = new Date(today.getFullYear(), today.getMonth() + index, 1);
+    return {
+      value: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`,
+      label: date.toLocaleDateString("es-ES", { month: "long", year: "numeric" }),
+    };
+  });
+
+  const customerOptions = $derived([
+    { value: "", label: "Proyecto propio (sin cliente)" },
+    ...customers.map((customer) => ({
+      value: String(customer.id),
+      label: customer.name,
+      hint: customer.nif || customer.email || undefined,
+    })),
+  ]);
+
   async function loadData() {
     loading = true;
     try {
-      const [projList, itemList] = await Promise.all([
+      const [projList, itemList, customerList] = await Promise.all([
         api.listWorkProjects(),
         api.listWorkItems(),
+        api.listCustomers(),
       ]);
       projects = projList;
       items = itemList;
+      customers = customerList;
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Error al cargar proyectos", "err");
     } finally {
@@ -122,10 +149,24 @@
       name: "",
       description: "",
       status: "active",
+      customer_id: "",
+      value: "",
+      milestones: [],
       start_date: "",
       target_date: "",
     };
     modalOpen = true;
+  }
+
+  function addMilestone() {
+    form.milestones = [
+      ...form.milestones,
+      { amount: "", target_month: currentMonth },
+    ];
+  }
+
+  function removeMilestone(index: number) {
+    form.milestones = form.milestones.filter((_, itemIndex) => itemIndex !== index);
   }
 
   async function handleCreateProject() {
@@ -139,6 +180,23 @@
         name: form.name.trim(),
         description: form.description.trim(),
         status: form.status,
+        customer_id: form.customer_id ? Number(form.customer_id) : null,
+        value_cents: form.customer_id ? (parseEurosInput(form.value) ?? 0) : 0,
+        monthly_estimate_cents: form.customer_id
+          ? 0
+          : form.milestones.reduce(
+              (sum, milestone) => sum + (parseEurosInput(milestone.amount) ?? 0),
+              0,
+            ),
+        revenue_target_date: null,
+        revenue_milestones: form.customer_id
+          ? []
+          : form.milestones
+              .map((milestone) => ({
+                amount_cents: parseEurosInput(milestone.amount) ?? 0,
+                target_month: milestone.target_month,
+              }))
+              .filter((milestone) => milestone.amount_cents > 0 && milestone.target_month),
         start_date: form.start_date || null,
         target_date: form.target_date || null,
       };
@@ -206,7 +264,7 @@
       {#each filteredProjects as project (project.id)}
         {@const metrics = projectMetrics.get(project.id) ?? { total: 0, completed: 0, blocked: 0, progress: 0 }}
         <a
-          href="/proyectos/{project.id}"
+          href="/proyectos/{project.uid}"
           class="group block transition-transform duration-200 hover:-translate-y-0.5"
         >
           <Card lift={true} class="flex h-full flex-col justify-between border border-[var(--color-border)] p-5 hover:border-[var(--color-border-strong)]">
@@ -222,6 +280,16 @@
               </div>
 
               <!-- Description -->
+              <p class="mb-2 text-xs font-medium text-[var(--color-purple-bright)]">
+                {project.customer_id
+                  ? `Cliente: ${customers.find((customer) => customer.id === project.customer_id)?.name ?? "Cliente"}`
+                  : "Proyecto propio"}
+              </p>
+              <p class="mb-3 text-sm font-semibold text-emerald-300">
+                {project.customer_id
+                  ? `Valor: ${formatEUR(project.value_cents)}`
+                  : `Estimación mensual: ${formatEUR(project.monthly_estimate_cents)}`}
+              </p>
               {#if project.description}
                 <p class="text-xs text-[var(--color-muted-dim)] line-clamp-2 mb-4">
                   {project.description}
@@ -318,6 +386,44 @@
       label="Estado inicial"
       options={projectStatusOptions}
       bind:value={form.status}
+    />
+
+    {#if form.customer_id}
+      <div class="space-y-1">
+        <label for="project-value" class="text-xs font-medium text-[var(--color-muted)]">Valor contratado (€)</label>
+        <input id="project-value" type="text" inputmode="decimal" bind:value={form.value} placeholder="0,00" class="field w-full text-sm" />
+      </div>
+    {:else}
+      <div class="space-y-3 rounded-xl border border-[var(--color-border)] p-3">
+        <div class="flex items-center justify-between gap-3">
+          <div>
+            <p class="text-xs font-medium text-[var(--color-text)]">Hitos mensuales</p>
+            <p class="text-[11px] text-[var(--color-muted-dim)]">Importe estimado y mes/año objetivo.</p>
+          </div>
+          <Button type="button" variant="secondary" onclick={addMilestone}>+ Añadir hito</Button>
+        </div>
+        {#each form.milestones as milestone, index}
+          <div class="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+            <input class="field w-full text-sm" inputmode="decimal" bind:value={milestone.amount} placeholder="Importe (€)" />
+            <Select
+              options={milestoneMonthOptions}
+              bind:value={milestone.target_month}
+              placeholder="Mes y año"
+            />
+            <Button type="button" variant="ghost" onclick={() => removeMilestone(index)}>Eliminar</Button>
+          </div>
+        {/each}
+        {#if form.milestones.length === 0}
+          <p class="text-xs text-[var(--color-muted-dim)]">Todavía no hay hitos económicos.</p>
+        {/if}
+      </div>
+    {/if}
+
+    <Select
+      label="Cliente"
+      options={customerOptions}
+      bind:value={form.customer_id}
+      placeholder="Proyecto propio (sin cliente)"
     />
 
     <div class="grid gap-3 sm:grid-cols-2">

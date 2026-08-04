@@ -375,6 +375,23 @@ function normalizeUser(u: StoredUser): StoredUser {
   };
 }
 
+function newProjectUid(): string {
+  return globalThis.crypto?.randomUUID?.() ??
+    `00000000-0000-4000-8000-${Date.now().toString(16).padStart(12, "0").slice(-12)}`;
+}
+
+function normalizeWorkProject(project: WorkProject): WorkProject {
+  return {
+    ...project,
+    uid: project.uid || newProjectUid(),
+    customer_id: project.customer_id ?? null,
+    value_cents: project.value_cents ?? 0,
+    monthly_estimate_cents: project.monthly_estimate_cents ?? 0,
+    revenue_target_date: project.revenue_target_date ?? null,
+    revenue_milestones: project.revenue_milestones ?? [],
+  };
+}
+
 function load(): Store {
   if (typeof localStorage === "undefined") {
     if (!memoryStore) memoryStore = seed();
@@ -385,6 +402,7 @@ function load(): Store {
     if (!memoryStore.inventoryMovements) memoryStore.inventoryMovements = [];
     if (!memoryStore.workCategories) memoryStore.workCategories = [];
     if (!memoryStore.workProjects) memoryStore.workProjects = [];
+    else memoryStore.workProjects = memoryStore.workProjects.map(normalizeWorkProject);
     if (!memoryStore.workItems) memoryStore.workItems = [];
     if (!memoryStore.tenantPlugins) memoryStore.tenantPlugins = [];
     if (!memoryStore.pluginAuditLogs) memoryStore.pluginAuditLogs = [];
@@ -428,6 +446,7 @@ function load(): Store {
     if (!parsed.inventoryMovements) parsed.inventoryMovements = [];
     if (!parsed.workCategories) parsed.workCategories = [];
     if (!parsed.workProjects) parsed.workProjects = [];
+    else parsed.workProjects = parsed.workProjects.map(normalizeWorkProject);
     if (!parsed.workItems) parsed.workItems = [];
     if (!parsed.tenantPlugins) parsed.tenantPlugins = [];
     if (!parsed.pluginAuditLogs) parsed.pluginAuditLogs = [];
@@ -1841,10 +1860,20 @@ export const browserApi = {
     const s = load();
     ensureCompanies(s);
     const cid = sessionCompanyId(s, token);
+    if (input.project_id != null) {
+      const project = s.workProjects.find(
+        (candidate) => candidate.id === input.project_id && candidate.company_id === cid,
+      );
+      if (!project) throw new Error("Proyecto no encontrado.");
+      if (project.customer_id == null) {
+        throw new Error("Los proyectos propios no admiten movimientos de pago.");
+      }
+    }
     s.seq.cash += 1;
     const m: CashMovement = {
       id: s.seq.cash,
       company_id: cid,
+      project_id: input.project_id ?? null,
       kind: input.kind,
       amount_cents: Math.abs(input.amount_cents),
       category: input.category,
@@ -2136,7 +2165,9 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     const stockBalances = Array.isArray(payload.stockBalances) ? payload.stockBalances : [];
     const inventoryMovements = Array.isArray(payload.inventoryMovements) ? payload.inventoryMovements : [];
     const workCategories = Array.isArray(payload.workCategories) ? payload.workCategories : [];
-    const workProjects = Array.isArray(payload.workProjects) ? payload.workProjects : [];
+    const workProjects = Array.isArray(payload.workProjects)
+      ? payload.workProjects.map(normalizeWorkProject)
+      : [];
     const workItems = Array.isArray(payload.workItems) ? payload.workItems : [];
     const seq = {
       product: payload.seq?.product ?? 0,
@@ -2184,10 +2215,17 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     return projects.map((p) => ({ ...p }));
   },
 
-  async getWorkProject(id: number, token?: string | null): Promise<WorkProject> {
+  async getWorkProject(reference: number | string, token?: string | null): Promise<WorkProject> {
     const s = load();
     const companyId = sessionCompanyId(s, token);
-    const proj = s.workProjects.find((p) => p.id === id && p.company_id === companyId);
+    const numericId = typeof reference === "number" || /^\d+$/.test(reference)
+      ? Number(reference)
+      : null;
+    const proj = s.workProjects.find(
+      (p) =>
+        p.company_id === companyId &&
+        (p.uid === String(reference) || (numericId !== null && p.id === numericId)),
+    );
     if (!proj) throw new Error("Proyecto no encontrado.");
     return { ...proj };
   },
@@ -2199,6 +2237,35 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
 
     const name = (input.name ?? "").trim();
     if (!name) throw new Error("El nombre del proyecto es obligatorio.");
+    if (input.value_cents !== undefined && input.value_cents < 0) {
+      throw new Error("El valor del proyecto no puede ser negativo.");
+    }
+    if (input.monthly_estimate_cents !== undefined && input.monthly_estimate_cents < 0) {
+      throw new Error("La estimación mensual no puede ser negativa.");
+    }
+    if (input.revenue_milestones) {
+      const minimumMonth = new Date().toISOString().slice(0, 7);
+      for (const milestone of input.revenue_milestones) {
+        if (
+          milestone.amount_cents <= 0 ||
+          !/^\d{4}-\d{2}$/.test(milestone.target_month) ||
+          milestone.target_month < minimumMonth
+        ) {
+          throw new Error("Cada hito mensual debe tener un importe y un mes válidos.");
+        }
+      }
+    }
+    const customerId = input.customer_id !== undefined
+      ? input.customer_id
+      : undefined;
+    if (
+      customerId != null &&
+      !s.customers.some(
+        (customer) => customer.id === customerId && (customer.company_id ?? 1) === companyId,
+      )
+    ) {
+      throw new Error("Cliente no encontrado en la empresa activa.");
+    }
 
     let existing: WorkProject | undefined;
     if (input.id != null) {
@@ -2221,6 +2288,25 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     let saved: WorkProject;
     if (existing) {
       existing.name = name;
+      if (customerId !== undefined) existing.customer_id = customerId;
+      if (input.value_cents !== undefined) existing.value_cents = input.value_cents;
+      if (input.monthly_estimate_cents !== undefined) {
+        existing.monthly_estimate_cents = input.monthly_estimate_cents;
+      }
+      if (input.revenue_target_date !== undefined) {
+        existing.revenue_target_date = input.revenue_target_date;
+      }
+      if (input.revenue_milestones !== undefined) {
+        existing.revenue_milestones = input.revenue_milestones.map((milestone, index) => ({
+          id: milestone.id ?? Date.now() + index,
+          amount_cents: milestone.amount_cents,
+          target_month: milestone.target_month,
+        }));
+        existing.monthly_estimate_cents = input.revenue_milestones.reduce(
+          (sum, milestone) => sum + milestone.amount_cents,
+          0,
+        );
+      }
       if (input.description !== undefined) existing.description = input.description;
       if (input.status !== undefined) existing.status = input.status;
       existing.start_date = startDate;
@@ -2231,7 +2317,19 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       const newId = ++s.seq.workProject;
       saved = {
         id: newId,
+        uid: newProjectUid(),
         company_id: companyId,
+        customer_id: customerId ?? null,
+        value_cents: input.value_cents ?? 0,
+        monthly_estimate_cents: input.revenue_milestones
+          ? input.revenue_milestones.reduce((sum, milestone) => sum + milestone.amount_cents, 0)
+          : (input.monthly_estimate_cents ?? 0),
+        revenue_target_date: input.revenue_target_date ?? null,
+        revenue_milestones: (input.revenue_milestones ?? []).map((milestone, index) => ({
+          id: milestone.id ?? Date.now() + index,
+          amount_cents: milestone.amount_cents,
+          target_month: milestone.target_month,
+        })),
         name,
         description: input.description ?? "",
         status: input.status ?? "planned",
@@ -2599,7 +2697,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
 
   // Snake-case aliases for RPC dispatch
   list_work_projects(status_filter?: string, token?: string | null) { return this.listWorkProjects(status_filter, token); },
-  get_work_project(id: number, token?: string | null) { return this.getWorkProject(id, token); },
+  get_work_project(reference: number | string, token?: string | null) { return this.getWorkProject(reference, token); },
   upsert_work_project(input: WorkProjectInput, token?: string | null) { return this.upsertWorkProject(input, token); },
   archive_work_project(id: number, token?: string | null) { return this.archiveWorkProject(id, token); },
   list_work_categories(token?: string | null) { return this.listWorkCategories(token); },

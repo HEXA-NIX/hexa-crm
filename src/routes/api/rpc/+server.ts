@@ -208,7 +208,10 @@ export const POST: RequestHandler = async ({ request }) => {
         result = await postgresApi.list_work_projects(args?.status_filter as string | undefined, token);
         break;
       case "get_work_project":
-        result = await postgresApi.get_work_project(args?.id as number, token);
+        result = await postgresApi.get_work_project(
+          (args?.reference ?? args?.id) as number | string,
+          token,
+        );
         break;
       case "upsert_work_project":
         result = await postgresApi.upsert_work_project(args?.input, token);

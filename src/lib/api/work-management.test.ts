@@ -329,9 +329,12 @@ describe("Trabajo Backend & API Tests", () => {
     });
 
     it("supports project lifecycle: create, get, list with status filter, update, archive", async () => {
+      const [customer] = browserApi.list_customers(adminToken);
       const proj = await browserApi.upsertWorkProject(
         {
           name: "  Proyecto Rediseño  ",
+          customer_id: customer.id,
+          value_cents: 250000,
           description: "Nueva interfaz de usuario",
           status: "planned",
           start_date: "2026-06-01",
@@ -342,9 +345,28 @@ describe("Trabajo Backend & API Tests", () => {
 
       expect(proj.name).toBe("Proyecto Rediseño");
       expect(proj.status).toBe("planned");
+      expect(proj.customer_id).toBe(customer.id);
+      expect(proj.value_cents).toBe(250000);
+      expect(proj.uid).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
 
       const fetched = await browserApi.getWorkProject(proj.id, adminToken);
       expect(fetched.name).toBe("Proyecto Rediseño");
+      const fetchedByUid = await browserApi.getWorkProject(proj.uid, adminToken);
+      expect(fetchedByUid.id).toBe(proj.id);
+
+      const invoice = browserApi.create_cash_movement(
+        {
+          project_id: proj.id,
+          kind: "income",
+          amount_cents: 100000,
+          category: "facturacion_proyecto",
+          description: "Primer pago",
+        },
+        adminToken,
+      );
+      expect(invoice.project_id).toBe(proj.id);
 
       const plannedList = await browserApi.listWorkProjects("planned", adminToken);
       expect(plannedList.some((p) => p.id === proj.id)).toBe(true);
@@ -362,6 +384,51 @@ describe("Trabajo Backend & API Tests", () => {
       );
       expect(updated.name).toBe("Proyecto Rediseño V2");
       expect(updated.status).toBe("active");
+
+      const ownProject = await browserApi.upsertWorkProject(
+        {
+          name: "Proyecto interno",
+          customer_id: null,
+          revenue_milestones: [
+            { amount_cents: 20000, target_month: "2026-11" },
+            { amount_cents: 30000, target_month: "2026-12" },
+          ],
+        },
+        adminToken,
+      );
+      expect(ownProject.customer_id).toBeNull();
+      expect(ownProject.revenue_milestones).toHaveLength(2);
+      expect(ownProject.revenue_milestones[1].amount_cents).toBe(30000);
+      const updatedOwnProject = await browserApi.upsertWorkProject(
+        {
+          id: ownProject.id,
+          name: ownProject.name,
+          revenue_milestones: [
+            {
+              id: ownProject.revenue_milestones[0].id,
+              amount_cents: 25000,
+              target_month: "2027-01",
+            },
+          ],
+        },
+        adminToken,
+      );
+      expect(updatedOwnProject.revenue_milestones).toEqual([
+        expect.objectContaining({ amount_cents: 25000, target_month: "2027-01" }),
+      ]);
+      const reloadedOwnProject = await browserApi.getWorkProject(ownProject.uid, adminToken);
+      expect(reloadedOwnProject.revenue_milestones).toHaveLength(1);
+      expect(() =>
+        browserApi.create_cash_movement(
+          {
+            project_id: ownProject.id,
+            kind: "income",
+            amount_cents: 1000,
+            category: "facturacion_proyecto",
+          },
+          adminToken,
+        )
+      ).toThrow("Los proyectos propios no admiten movimientos de pago.");
 
       const archived = await browserApi.archiveWorkProject(proj.id, adminToken);
       expect(archived.status).toBe("archived");

@@ -374,6 +374,7 @@ export async function initDb() {
       category TEXT NOT NULL DEFAULT 'otros',
       description TEXT NOT NULL DEFAULT '',
       sale_id INTEGER REFERENCES sales(id) ON DELETE SET NULL,
+      project_id INTEGER,
       occurred_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     );
   `;
@@ -444,6 +445,7 @@ export async function initDb() {
   await sql`ALTER TABLE customers ADD COLUMN IF NOT EXISTS company_id INTEGER NOT NULL DEFAULT 1`;
   await sql`ALTER TABLE sales ADD COLUMN IF NOT EXISTS company_id INTEGER NOT NULL DEFAULT 1`;
   await sql`ALTER TABLE cash_movements ADD COLUMN IF NOT EXISTS company_id INTEGER NOT NULL DEFAULT 1`;
+  await sql`ALTER TABLE cash_movements ADD COLUMN IF NOT EXISTS project_id INTEGER`;
   // Central catalog metadata. Existing local products remain published by default.
   await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS publication_status TEXT NOT NULL DEFAULT 'published'`;
   await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'EUR'`;
@@ -532,7 +534,12 @@ export async function initDb() {
   await sql`
     CREATE TABLE IF NOT EXISTS work_projects (
       id SERIAL PRIMARY KEY,
+      uid UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
       company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL,
+      value_cents INTEGER NOT NULL DEFAULT 0 CHECK (value_cents >= 0),
+      monthly_estimate_cents INTEGER NOT NULL DEFAULT 0 CHECK (monthly_estimate_cents >= 0),
+      revenue_target_date DATE,
       name TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'planned' CHECK (status IN ('planned', 'active', 'paused', 'done', 'archived')),
@@ -543,6 +550,28 @@ export async function initDb() {
       updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     );
   `;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS uid UUID`;
+  await sql`UPDATE work_projects SET uid = gen_random_uuid() WHERE uid IS NULL`;
+  await sql`ALTER TABLE work_projects ALTER COLUMN uid SET DEFAULT gen_random_uuid()`;
+  await sql`ALTER TABLE work_projects ALTER COLUMN uid SET NOT NULL`;
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_work_projects_uid ON work_projects(uid)`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_work_projects_customer ON work_projects(company_id, customer_id)`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS value_cents INTEGER NOT NULL DEFAULT 0`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS monthly_estimate_cents INTEGER NOT NULL DEFAULT 0`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS revenue_target_date DATE`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_cash_movements_project ON cash_movements(company_id, project_id)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS work_project_revenue_milestones (
+      id SERIAL PRIMARY KEY,
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      project_id INTEGER NOT NULL REFERENCES work_projects(id) ON DELETE CASCADE,
+      amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+      target_month TEXT NOT NULL CHECK (target_month ~ '^[0-9]{4}-[0-9]{2}$'),
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_project_revenue_milestones ON work_project_revenue_milestones(company_id, project_id, target_month)`;
   await sql`
     CREATE TABLE IF NOT EXISTS work_items (
       id SERIAL PRIMARY KEY,
@@ -938,7 +967,13 @@ async function requireAdminProjectManagementPg(token: string | null): Promise<Au
 function formatWorkProject(r: any): WorkProject {
   return {
     id: r.id,
+    uid: String(r.uid),
     company_id: r.company_id,
+    customer_id: r.customer_id ?? null,
+    value_cents: r.value_cents ?? 0,
+    monthly_estimate_cents: r.monthly_estimate_cents ?? 0,
+    revenue_target_date: toIso(r.revenue_target_date) || null,
+    revenue_milestones: [],
     name: r.name,
     description: r.description ?? "",
     status: r.status,
@@ -948,6 +983,33 @@ function formatWorkProject(r: any): WorkProject {
     created_at: toIso(r.created_at),
     updated_at: toIso(r.updated_at),
   };
+}
+
+async function attachProjectRevenueMilestones(
+  projects: WorkProject[],
+  companyId: number,
+): Promise<WorkProject[]> {
+  if (projects.length === 0) return projects;
+  const rows = await sql`
+    SELECT id, project_id, amount_cents, target_month
+    FROM work_project_revenue_milestones
+    WHERE company_id = ${companyId}
+    ORDER BY target_month, id
+  `;
+  const byProject = new Map<number, WorkProject["revenue_milestones"]>();
+  for (const row of rows) {
+    const entries = byProject.get(row.project_id) ?? [];
+    entries.push({
+      id: row.id,
+      amount_cents: row.amount_cents,
+      target_month: row.target_month,
+    });
+    byProject.set(row.project_id, entries);
+  }
+  return projects.map((project) => ({
+    ...project,
+    revenue_milestones: byProject.get(project.id) ?? [],
+  }));
 }
 
 function formatWorkItem(r: any): WorkItem {
@@ -2237,15 +2299,19 @@ export const postgresApi = {
   },
 
   async list_cash_movements(token: string | null): Promise<CashMovement[]> {
-    await requireSession(token);
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
     const movements = await sql`
       SELECT cm.*, s.number as sale_number
       FROM cash_movements cm
       LEFT JOIN sales s ON cm.sale_id = s.id
+      WHERE cm.company_id = ${companyId}
       ORDER BY cm.occurred_at DESC
     `;
     return movements.map((m) => ({
       id: m.id,
+      company_id: m.company_id,
+      project_id: m.project_id ?? null,
       kind: m.kind,
       amount_cents: m.amount_cents,
       category: m.category,
@@ -2257,17 +2323,30 @@ export const postgresApi = {
   },
 
   async create_cash_movement(input: CashInput, token: string | null): Promise<CashMovement> {
-    await requireSession(token);
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
     if (input.amount_cents <= 0) throw new Error("El importe debe ser mayor que cero");
+    if (input.project_id != null) {
+      const projectRows = await sql`
+        SELECT id, customer_id FROM work_projects
+        WHERE id = ${input.project_id} AND company_id = ${companyId}
+      `;
+      if (projectRows.length === 0) throw new Error("Proyecto no encontrado.");
+      if (projectRows[0].customer_id == null) {
+        throw new Error("Los proyectos propios no admiten movimientos de pago.");
+      }
+    }
 
     const res = await sql`
-      INSERT INTO cash_movements (kind, amount_cents, category, description)
-      VALUES (${input.kind}, ${input.amount_cents}, ${input.category || "otros"}, ${input.description || ""})
+      INSERT INTO cash_movements (company_id, project_id, kind, amount_cents, category, description)
+      VALUES (${companyId}, ${input.project_id ?? null}, ${input.kind}, ${input.amount_cents}, ${input.category || "otros"}, ${input.description || ""})
       RETURNING *
     `;
     const m = res[0];
     return {
       id: m.id,
+      company_id: m.company_id,
+      project_id: m.project_id ?? null,
       kind: m.kind,
       amount_cents: m.amount_cents,
       category: m.category,
@@ -2278,13 +2357,15 @@ export const postgresApi = {
   },
 
   async get_cash_balance(token: string | null): Promise<number> {
-    await requireSession(token);
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
     const res = await sql`
       SELECT COALESCE(
         SUM(CASE WHEN kind = 'expense' THEN -ABS(amount_cents) ELSE ABS(amount_cents) END),
         0
       )::int as balance
       FROM cash_movements
+      WHERE company_id = ${companyId}
     `;
     return res[0].balance;
   },
@@ -2671,19 +2752,22 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     }
     query = sql`${query} ORDER BY created_at DESC, id DESC`;
     const rows = await query;
-    return rows.map(formatWorkProject);
+    return attachProjectRevenueMilestones(rows.map(formatWorkProject), companyId);
   },
 
-  async getWorkProject(id: number, token?: string | null): Promise<WorkProject> {
+  async getWorkProject(reference: number | string, token?: string | null): Promise<WorkProject> {
     const user = await requireSession(token ?? null);
     const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+    const ref = String(reference);
+    const numericId = /^\d+$/.test(ref) ? Number(ref) : null;
 
     const rows = await sql`
       SELECT * FROM work_projects
-      WHERE id = ${id} AND company_id = ${companyId}
+      WHERE company_id = ${companyId}
+        AND (uid::text = ${ref} OR (${numericId}::integer IS NOT NULL AND id = ${numericId}))
     `;
     if (rows.length === 0) throw new Error("Proyecto no encontrado.");
-    return formatWorkProject(rows[0]);
+    return (await attachProjectRevenueMilestones([formatWorkProject(rows[0])], companyId))[0];
   },
 
   async upsertWorkProject(input: WorkProjectInput, token?: string | null): Promise<WorkProject> {
@@ -2715,7 +2799,30 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     }
 
     const status = input.status ?? existing?.status ?? "planned";
+    const valueCents = input.value_cents ?? existing?.value_cents ?? 0;
+    if (valueCents < 0) throw new Error("El valor del proyecto no puede ser negativo.");
+    const monthlyEstimateCents = input.revenue_milestones !== undefined
+      ? input.revenue_milestones.reduce((sum, milestone) => sum + milestone.amount_cents, 0)
+      : (input.monthly_estimate_cents ?? existing?.monthly_estimate_cents ?? 0);
+    if (monthlyEstimateCents < 0) {
+      throw new Error("La estimación mensual no puede ser negativa.");
+    }
+    const revenueTargetDate = input.revenue_target_date !== undefined
+      ? input.revenue_target_date
+      : (existing?.revenue_target_date ? toIso(existing.revenue_target_date) : null);
     const description = input.description !== undefined ? (input.description ?? "") : (existing?.description ?? "");
+    const customerId = input.customer_id !== undefined
+      ? input.customer_id
+      : (existing?.customer_id ?? null);
+    if (customerId != null) {
+      const customerRows = await sql`
+        SELECT id FROM customers
+        WHERE id = ${customerId} AND company_id = ${companyId}
+      `;
+      if (customerRows.length === 0) {
+        throw new Error("Cliente no encontrado en la empresa activa.");
+      }
+    }
 
     let projectId: number;
     if (existing) {
@@ -2724,6 +2831,10 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
           name = ${name},
           description = ${description},
           status = ${status},
+          customer_id = ${customerId},
+          value_cents = ${valueCents},
+          monthly_estimate_cents = ${monthlyEstimateCents},
+          revenue_target_date = ${revenueTargetDate},
           start_date = ${startDate},
           target_date = ${targetDate},
           updated_at = NOW()
@@ -2734,19 +2845,47 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     } else {
       const inserted = await sql`
         INSERT INTO work_projects (
-          company_id, name, description, status, start_date, target_date, created_by
+          company_id, customer_id, value_cents, monthly_estimate_cents, revenue_target_date,
+          name, description, status, start_date, target_date, created_by
         ) VALUES (
-          ${companyId}, ${name}, ${description}, ${status}, ${startDate}, ${targetDate}, ${user.id}
+          ${companyId}, ${customerId}, ${valueCents}, ${monthlyEstimateCents}, ${revenueTargetDate},
+          ${name}, ${description}, ${status}, ${startDate}, ${targetDate}, ${user.id}
         )
         RETURNING id
       `;
       projectId = inserted[0].id;
     }
 
+    if (input.revenue_milestones !== undefined) {
+      const minimumMonth = new Date().toISOString().slice(0, 7);
+      for (const milestone of input.revenue_milestones) {
+        if (
+          milestone.amount_cents <= 0 ||
+          !/^\d{4}-\d{2}$/.test(milestone.target_month) ||
+          milestone.target_month < minimumMonth
+        ) {
+          throw new Error("Cada hito mensual debe tener un importe y un mes válidos.");
+        }
+      }
+      await sql`
+        DELETE FROM work_project_revenue_milestones
+        WHERE project_id = ${projectId} AND company_id = ${companyId}
+      `;
+      for (const milestone of input.revenue_milestones) {
+        await sql`
+          INSERT INTO work_project_revenue_milestones (
+            company_id, project_id, amount_cents, target_month
+          ) VALUES (
+            ${companyId}, ${projectId}, ${milestone.amount_cents}, ${milestone.target_month}
+          )
+        `;
+      }
+    }
+
     const fetched = await sql`
       SELECT * FROM work_projects WHERE id = ${projectId} AND company_id = ${companyId}
     `;
-    return formatWorkProject(fetched[0]);
+    return (await attachProjectRevenueMilestones([formatWorkProject(fetched[0])], companyId))[0];
   },
 
   async archiveWorkProject(id: number, token?: string | null): Promise<WorkProject> {
@@ -3246,7 +3385,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   },
 
   list_work_projects(status_filter?: string, token?: string | null) { return this.listWorkProjects(status_filter, token); },
-  get_work_project(id: number, token?: string | null) { return this.getWorkProject(id, token); },
+  get_work_project(reference: number | string, token?: string | null) { return this.getWorkProject(reference, token); },
   upsert_work_project(input: WorkProjectInput, token?: string | null) { return this.upsertWorkProject(input, token); },
   archive_work_project(id: number, token?: string | null) { return this.archiveWorkProject(id, token); },
   list_work_categories(token?: string | null) { return this.listWorkCategories(token); },
