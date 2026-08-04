@@ -90,7 +90,13 @@
       settings = await api.getSettings();
       defaultVatStr = String(settings.default_vat);
       setIdleTimeoutMinutes(settings.idle_timeout_minutes);
-      health = await api.ollamaHealth();
+      // Ollama is optional in the web Worker. Its unavailable RPC must not
+      // prevent the rest of Ajustes, especially the admin user directory.
+      try {
+        health = await api.ollamaHealth();
+      } catch {
+        health = null;
+      }
       if ($isAdmin) {
         users = await api.listUsers();
       }
