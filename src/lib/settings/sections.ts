@@ -10,6 +10,7 @@ export type AjustesSectionId =
   | "tienda"
   | "equipo"
   | "ia"
+  | "orca"
   | "plugins"
   | "actualizaciones"
   | "sistema";
@@ -61,6 +62,13 @@ export const AJUSTES_SECTIONS: readonly AjustesSectionDef[] = [
     hint: "URL y modelo del asistente local. Solo administradores.",
     adminOnly: true,
     hasSave: true,
+  },
+  {
+    id: "orca",
+    label: "Orca",
+    title: "Ejecución de tareas",
+    hint: "Configura el worker local que entrega tareas a Orca y devuelve su resultado a Hexa.",
+    adminOnly: true,
   },
   {
     id: "plugins",

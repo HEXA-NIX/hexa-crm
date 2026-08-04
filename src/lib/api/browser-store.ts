@@ -44,6 +44,7 @@ import type {
   WorkMember,
   WorkProject,
   WorkProjectInput,
+  WorkStatus,
 } from "../types";
 import {
   PLUGIN_CATALOG,
@@ -195,6 +196,7 @@ function defaultSettings(): Settings {
     default_vat: 21,
     idle_timeout_minutes: 15,
     last_backup_at: null,
+    monthly_economic_goals: {},
   };
 }
 
@@ -404,6 +406,7 @@ function load(): Store {
     if (!memoryStore.workProjects) memoryStore.workProjects = [];
     else memoryStore.workProjects = memoryStore.workProjects.map(normalizeWorkProject);
     if (!memoryStore.workItems) memoryStore.workItems = [];
+    else memoryStore.workItems = memoryStore.workItems.map((item) => ({ ...item, parent_id: item.parent_id ?? null }));
     if (!memoryStore.tenantPlugins) memoryStore.tenantPlugins = [];
     if (!memoryStore.pluginAuditLogs) memoryStore.pluginAuditLogs = [];
     if (memoryStore.seq.warehouse == null) memoryStore.seq.warehouse = 0;
@@ -448,6 +451,7 @@ function load(): Store {
     if (!parsed.workProjects) parsed.workProjects = [];
     else parsed.workProjects = parsed.workProjects.map(normalizeWorkProject);
     if (!parsed.workItems) parsed.workItems = [];
+    else parsed.workItems = parsed.workItems.map((item) => ({ ...item, parent_id: item.parent_id ?? null }));
     if (!parsed.tenantPlugins) parsed.tenantPlugins = [];
     if (!parsed.pluginAuditLogs) parsed.pluginAuditLogs = [];
     if (!parsed.seq) {
@@ -763,11 +767,43 @@ function populateWorkItem(item: WorkItem, s: Store): WorkItem {
       : null;
   const assignee =
     item.assignee_id != null ? s.users.find((u) => u.id === item.assignee_id) : null;
+  const parent =
+    item.parent_id != null ? s.workItems.find((candidate) => candidate.id === item.parent_id) : null;
   return {
     ...item,
+    parent_id: item.parent_id ?? null,
     category: category ? { ...category } : null,
     assignee_name: assignee ? assignee.display_name : null,
+    parent_title: parent?.title ?? null,
   };
+}
+
+function syncWorkItemParent(s: Store, child: WorkItem, timestamp: string) {
+  if (child.parent_id == null) return;
+  const parent = s.workItems.find(
+    (item) => item.id === child.parent_id && item.company_id === child.company_id,
+  );
+  if (!parent) return;
+  const children = s.workItems.filter(
+    (item) =>
+      item.parent_id === parent.id &&
+      item.company_id === parent.company_id &&
+      item.status !== "archived",
+  );
+  if (children.length === 0) return;
+  const nextStatus: WorkStatus = children.every((item) => item.status === "done")
+    ? "done"
+    : children.some((item) => item.status === "blocked")
+      ? "blocked"
+      : children.some((item) => item.status === "in_progress")
+        ? "in_progress"
+        : children.some((item) => item.status === "planned")
+          ? "planned"
+          : "inbox";
+  if (nextStatus === parent.status) return;
+  parent.status = nextStatus;
+  parent.completed_at = nextStatus === "done" ? timestamp : null;
+  parent.updated_at = timestamp;
 }
 
 function auth(s: Store, token?: string | null): AuthUser {
@@ -2356,6 +2392,36 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     save(s);
     return { ...proj };
   },
+
+  async deleteProjectWorkItems(projectId: number, itemIds?: number[], token?: string | null): Promise<number> {
+    const s = load();
+    requireAdminProjectManagement(s, token);
+    const companyId = sessionCompanyId(s, token);
+    const projectExists = s.workProjects.some(
+      (project) => project.id === projectId && project.company_id === companyId,
+    );
+    if (!projectExists) throw new Error("Proyecto no encontrado.");
+
+    const selectedIds = itemIds?.length ? new Set(itemIds) : null;
+    const idsToDelete = new Set<number>();
+    for (const item of s.workItems) {
+      if (item.company_id !== companyId || item.project_id !== projectId) continue;
+      if (selectedIds === null || selectedIds.has(item.id)) idsToDelete.add(item.id);
+    }
+    // A parent cannot be removed while leaving its subtasks orphaned.
+    for (const item of s.workItems) {
+      if (item.parent_id != null && idsToDelete.has(item.parent_id)) idsToDelete.add(item.id);
+    }
+
+    const previousLength = s.workItems.length;
+    s.workItems = s.workItems.filter(
+      (item) => !idsToDelete.has(item.id),
+    );
+    const deleted = previousLength - s.workItems.length;
+    save(s);
+    return deleted;
+  },
+
   async listWorkItems(filters?: WorkItemFilters, token?: string | null): Promise<WorkItem[]> {
     const s = load();
     const companyId = sessionCompanyId(s, token);
@@ -2449,6 +2515,31 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       if (!existingItem) throw new Error("Tarea no encontrada.");
     }
 
+    let parentId = input.parent_id !== undefined
+      ? input.parent_id
+      : (existingItem?.parent_id ?? null);
+    const previousParentId = existingItem?.parent_id ?? null;
+    if (parentId != null) {
+      const parent = s.workItems.find((item) => item.id === parentId && item.company_id === companyId);
+      if (!parent) throw new Error("La tarea padre no pertenece a esta empresa.");
+      if (parent.id === input.id) throw new Error("Una tarea no puede ser su propia subtarea.");
+      if (parent.parent_id != null) throw new Error("Las subtareas no pueden tener otras subtareas.");
+      if (parent.status === "archived") throw new Error("No se pueden añadir subtareas a una tarea archivada.");
+      if (
+        input.id != null &&
+        s.workItems.some(
+          (item) =>
+            item.parent_id === input.id &&
+            item.company_id === companyId &&
+            item.status !== "archived",
+        )
+      ) {
+        throw new Error("Una tarea con subtareas no puede convertirse en subtarea.");
+      }
+      parentId = parent.id;
+      input = { ...input, project_id: parent.project_id };
+    }
+
     const targetStatus = input.status ?? existingItem?.status ?? "inbox";
     const sourceType = input.source_type !== undefined ? input.source_type : (existingItem?.source_type ?? null);
     const sourceKey = input.source_key !== undefined ? input.source_key : (existingItem?.source_key ?? null);
@@ -2478,6 +2569,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     let savedItem: WorkItem;
 
     if (existingItem) {
+      existingItem.parent_id = parentId;
       existingItem.category_id = categoryId;
       existingItem.project_id = input.project_id !== undefined ? input.project_id : existingItem.project_id;
       existingItem.assignee_id = input.assignee_id !== undefined ? input.assignee_id : existingItem.assignee_id;
@@ -2500,6 +2592,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       savedItem = {
         id: newItemId,
         company_id: companyId,
+        parent_id: parentId,
         category_id: categoryId,
         project_id: input.project_id ?? null,
         assignee_id: input.assignee_id ?? null,
@@ -2522,6 +2615,10 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       s.workItems.push(savedItem);
     }
 
+    if (previousParentId != null && previousParentId !== parentId) {
+      syncWorkItemParent(s, { ...savedItem, parent_id: previousParentId }, nowTs);
+    }
+    syncWorkItemParent(s, savedItem, nowTs);
     save(s);
     return populateWorkItem(savedItem, s);
   },
@@ -2534,6 +2631,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     item.status = "archived";
     item.completed_at = null;
     item.updated_at = now();
+    syncWorkItemParent(s, item, item.updated_at);
     save(s);
     return populateWorkItem(item, s);
   },
@@ -2700,6 +2798,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
   get_work_project(reference: number | string, token?: string | null) { return this.getWorkProject(reference, token); },
   upsert_work_project(input: WorkProjectInput, token?: string | null) { return this.upsertWorkProject(input, token); },
   archive_work_project(id: number, token?: string | null) { return this.archiveWorkProject(id, token); },
+  delete_project_work_items(project_id: number, item_ids?: number[], token?: string | null) { return this.deleteProjectWorkItems(project_id, item_ids, token); },
   list_work_categories(token?: string | null) { return this.listWorkCategories(token); },
   upsert_work_category(input: any, token?: string | null) { return this.upsertWorkCategory(input, token); },
   merge_work_categories(args: any, token?: string | null) {

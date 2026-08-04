@@ -98,6 +98,7 @@ npm run test         # Vitest
 npm run check        # svelte-check / TS
 npm run tauri:dev    # app nativa
 npm run tauri:build  # empaquetado
+npm run orca:worker # ejecutor local de tareas Orca
 ```
 
 ## Documentación
@@ -109,6 +110,7 @@ npm run tauri:build  # empaquetado
 | [docs/BACKUP.md](./docs/BACKUP.md) | Copias y restauración |
 | [docs/BRANCH_PROTECTION.md](./docs/BRANCH_PROTECTION.md) | CI y protección de `main` |
 | [docs/CENTRAL_DEPLOYMENT.md](./docs/CENTRAL_DEPLOYMENT.md) | API central multi-tenant / Incus |
+| [docs/ORCA_TASKS.md](./docs/ORCA_TASKS.md) | Entrega y seguimiento automático de tareas mediante Orca |
 | [ROADMAP.md](./ROADMAP.md) | Fases de producto |
 
 ## Principios

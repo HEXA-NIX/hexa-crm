@@ -576,6 +576,7 @@ export async function initDb() {
     CREATE TABLE IF NOT EXISTS work_items (
       id SERIAL PRIMARY KEY,
       company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      parent_id INTEGER REFERENCES work_items(id) ON DELETE CASCADE,
       category_id INTEGER REFERENCES work_categories(id) ON DELETE SET NULL,
       project_id INTEGER REFERENCES work_projects(id) ON DELETE SET NULL,
       assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -596,11 +597,13 @@ export async function initDb() {
       updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     );
   `;
+  await sql`ALTER TABLE work_items ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES work_items(id) ON DELETE CASCADE`;
   await sql`CREATE INDEX IF NOT EXISTS idx_work_categories_company ON work_categories(company_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_work_projects_company ON work_projects(company_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_work_items_company ON work_items(company_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_work_items_category ON work_items(category_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_work_items_project ON work_items(project_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_work_items_parent ON work_items(parent_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_work_items_assignee ON work_items(assignee_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_work_items_source ON work_items(company_id, source_type, source_key)`;
   await sql`
@@ -1016,6 +1019,7 @@ function formatWorkItem(r: any): WorkItem {
   return {
     id: r.id,
     company_id: r.company_id,
+    parent_id: r.parent_id ?? null,
     category_id: r.category_id ?? null,
     project_id: r.project_id ?? null,
     assignee_id: r.assignee_id ?? null,
@@ -1034,6 +1038,7 @@ function formatWorkItem(r: any): WorkItem {
     completed_at: toIso(r.completed_at) || null,
     created_at: toIso(r.created_at),
     updated_at: toIso(r.updated_at),
+    parent_title: r.parent_title ?? null,
     category: r.category_name
       ? {
           id: r.category_id,
@@ -2337,9 +2342,10 @@ export const postgresApi = {
       }
     }
 
+    const occurredAt = input.occurred_at?.trim() || null;
     const res = await sql`
-      INSERT INTO cash_movements (company_id, project_id, kind, amount_cents, category, description)
-      VALUES (${companyId}, ${input.project_id ?? null}, ${input.kind}, ${input.amount_cents}, ${input.category || "otros"}, ${input.description || ""})
+      INSERT INTO cash_movements (company_id, project_id, kind, amount_cents, category, description, occurred_at)
+      VALUES (${companyId}, ${input.project_id ?? null}, ${input.kind}, ${input.amount_cents}, ${input.category || "otros"}, ${input.description || ""}, COALESCE(${occurredAt}::timestamptz, NOW()))
       RETURNING *
     `;
     const m = res[0];
@@ -2533,6 +2539,14 @@ export const postgresApi = {
         return Number.isInteger(n) && n >= 0 && n <= 480 ? n : 15;
       })(),
       last_backup_at: settingsMap.get("last_backup_at") || null,
+      monthly_economic_goals: (() => {
+        try {
+          const parsed = JSON.parse(settingsMap.get("monthly_economic_goals") || "{}");
+          return parsed && typeof parsed === "object" ? parsed : {};
+        } catch {
+          return {};
+        }
+      })(),
     };
   },
 
@@ -2545,6 +2559,7 @@ export const postgresApi = {
       "default_vat",
       "idle_timeout_minutes",
       "last_backup_at",
+      "monthly_economic_goals",
     ];
     for (const key of allowed) {
       const value = partial[key];
@@ -2555,9 +2570,12 @@ export const postgresApi = {
         ) {
           throw new Error("El bloqueo automático debe estar entre 0 y 480 minutos");
         }
+        const storedValue = key === "monthly_economic_goals"
+          ? JSON.stringify(value)
+          : value == null ? "" : value.toString();
         await sql`
           INSERT INTO settings (key, value)
-          VALUES (${key}, ${value == null ? "" : value.toString()})
+          VALUES (${key}, ${storedValue})
           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
         `;
       }
@@ -2905,6 +2923,32 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     `;
     return formatWorkProject(fetched[0]);
   },
+
+  async deleteProjectWorkItems(projectId: number, itemIds?: number[], token?: string | null): Promise<number> {
+    const user = await requireAdminProjectManagementPg(token ?? null);
+    const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+    const project = await sql`
+      SELECT id FROM work_projects
+      WHERE id = ${projectId} AND company_id = ${companyId}
+    `;
+    if (project.length === 0) throw new Error("Proyecto no encontrado.");
+
+    const deleted = itemIds?.length
+      ? await sql`
+          DELETE FROM work_items
+          WHERE project_id = ${projectId}
+            AND company_id = ${companyId}
+            AND (id = ANY(${itemIds}::int[]) OR parent_id = ANY(${itemIds}::int[]))
+          RETURNING id
+        `
+      : await sql`
+          DELETE FROM work_items
+          WHERE project_id = ${projectId} AND company_id = ${companyId}
+          RETURNING id
+        `;
+    return deleted.length;
+  },
+
   async listWorkItems(filters?: WorkItemFilters, token?: string | null): Promise<WorkItem[]> {
     const user = await requireSession(token ?? null);
     const companyId = await resolveActiveCompanyId(token ?? null, user.id);
@@ -2918,10 +2962,12 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
         wc.archived_at AS category_archived_at,
         wc.created_at AS category_created_at,
         wc.updated_at AS category_updated_at,
-        u.display_name AS assignee_name
+        u.display_name AS assignee_name,
+        parent.title AS parent_title
       FROM work_items wi
       LEFT JOIN work_categories wc ON wi.category_id = wc.id
       LEFT JOIN users u ON wi.assignee_id = u.id
+      LEFT JOIN work_items parent ON wi.parent_id = parent.id
       WHERE wi.company_id = ${companyId}
     `;
 
@@ -3015,6 +3061,33 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
       existing = existingRows[0];
     }
 
+    let parentId = input.parent_id !== undefined ? input.parent_id : (existing?.parent_id ?? null);
+    const previousParentId = existing?.parent_id ?? null;
+    if (parentId != null) {
+      const parentRows = await sql`
+        SELECT id, parent_id, project_id, status
+        FROM work_items
+        WHERE id = ${parentId} AND company_id = ${companyId}
+      `;
+      if (parentRows.length === 0) throw new Error("La tarea padre no pertenece a esta empresa.");
+      const parent = parentRows[0];
+      if (parent.id === input.id) throw new Error("Una tarea no puede ser su propia subtarea.");
+      if (parent.parent_id != null) throw new Error("Las subtareas no pueden tener otras subtareas.");
+      if (parent.status === "archived") throw new Error("No se pueden añadir subtareas a una tarea archivada.");
+      if (input.id != null) {
+        const childRows = await sql`
+          SELECT id FROM work_items
+          WHERE parent_id = ${input.id} AND company_id = ${companyId} AND status <> 'archived'
+          LIMIT 1
+        `;
+        if (childRows.length > 0) {
+          throw new Error("Una tarea con subtareas no puede convertirse en subtarea.");
+        }
+      }
+      parentId = parent.id;
+      input = { ...input, project_id: parent.project_id };
+    }
+
     const targetStatus = input.status ?? existing?.status ?? "inbox";
     const sourceType = input.source_type !== undefined ? input.source_type : (existing?.source_type ?? null);
     const sourceKey = input.source_key !== undefined ? input.source_key : (existing?.source_key ?? null);
@@ -3041,6 +3114,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     if (existing) {
       const updated = await sql`
         UPDATE work_items SET
+          parent_id = ${parentId},
           category_id = ${categoryId},
           project_id = ${input.project_id !== undefined ? input.project_id : existing.project_id},
           assignee_id = ${input.assignee_id !== undefined ? input.assignee_id : existing.assignee_id},
@@ -3064,11 +3138,11 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     } else {
       const inserted = await sql`
         INSERT INTO work_items (
-          company_id, category_id, project_id, assignee_id, created_by, title, description,
+          company_id, parent_id, category_id, project_id, assignee_id, created_by, title, description,
           type, status, priority, start_date, due_date, sort_order, source_type, source_key,
           source_href, completed_at
         ) VALUES (
-          ${companyId}, ${categoryId}, ${input.project_id ?? null}, ${input.assignee_id ?? null},
+          ${companyId}, ${parentId}, ${categoryId}, ${input.project_id ?? null}, ${input.assignee_id ?? null},
           ${user.id}, ${truncatedTitle}, ${input.description ?? ""}, ${input.type ?? "task"},
           ${targetStatus}, ${input.priority ?? "normal"}, ${input.start_date ?? null}, ${input.due_date ?? null},
           ${input.sort_order ?? 0}, ${sourceType}, ${sourceKey}, ${input.source_href ?? null}, ${completedAt}
@@ -3076,6 +3150,45 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
         RETURNING id
       `;
       itemId = inserted[0].id;
+    }
+
+    const affectedParentIds = Array.from(
+      new Set(
+        [previousParentId, parentId].filter((id): id is number => id != null),
+      ),
+    );
+    for (const affectedParentId of affectedParentIds) {
+      await sql`
+        UPDATE work_items parent SET
+          status = CASE
+            WHEN NOT EXISTS (
+              SELECT 1 FROM work_items child
+              WHERE child.parent_id = parent.id AND child.status NOT IN ('done', 'archived')
+            ) THEN 'done'
+            WHEN EXISTS (
+              SELECT 1 FROM work_items child
+              WHERE child.parent_id = parent.id AND child.status = 'blocked'
+            ) THEN 'blocked'
+            WHEN EXISTS (
+              SELECT 1 FROM work_items child
+              WHERE child.parent_id = parent.id AND child.status = 'in_progress'
+            ) THEN 'in_progress'
+            WHEN EXISTS (
+              SELECT 1 FROM work_items child
+              WHERE child.parent_id = parent.id AND child.status = 'planned'
+            ) THEN 'planned'
+            ELSE 'inbox'
+          END,
+          completed_at = CASE
+            WHEN NOT EXISTS (
+              SELECT 1 FROM work_items child
+              WHERE child.parent_id = parent.id AND child.status NOT IN ('done', 'archived')
+            ) THEN COALESCE(parent.completed_at, NOW())
+            ELSE NULL
+          END,
+          updated_at = NOW()
+        WHERE parent.id = ${affectedParentId} AND parent.company_id = ${companyId}
+      `;
     }
 
     const fetched = await sql`
@@ -3087,10 +3200,12 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
         wc.archived_at AS category_archived_at,
         wc.created_at AS category_created_at,
         wc.updated_at AS category_updated_at,
-        u.display_name AS assignee_name
+        u.display_name AS assignee_name,
+        parent.title AS parent_title
       FROM work_items wi
       LEFT JOIN work_categories wc ON wi.category_id = wc.id
       LEFT JOIN users u ON wi.assignee_id = u.id
+      LEFT JOIN work_items parent ON wi.parent_id = parent.id
       WHERE wi.id = ${itemId} AND wi.company_id = ${companyId}
     `;
     return formatWorkItem(fetched[0]);
@@ -3103,9 +3218,43 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
       UPDATE work_items
       SET status = 'archived', completed_at = NULL, updated_at = NOW()
       WHERE id = ${id} AND company_id = ${companyId}
-      RETURNING id
+      RETURNING id, parent_id
     `;
     if (res.length === 0) throw new Error("Tarea no encontrada.");
+    const parentId = res[0].parent_id ?? null;
+    if (parentId != null) {
+      await sql`
+        UPDATE work_items parent SET
+          status = CASE
+            WHEN NOT EXISTS (
+              SELECT 1 FROM work_items child
+              WHERE child.parent_id = parent.id AND child.status NOT IN ('done', 'archived')
+            ) THEN 'done'
+            WHEN EXISTS (
+              SELECT 1 FROM work_items child
+              WHERE child.parent_id = parent.id AND child.status = 'blocked'
+            ) THEN 'blocked'
+            WHEN EXISTS (
+              SELECT 1 FROM work_items child
+              WHERE child.parent_id = parent.id AND child.status = 'in_progress'
+            ) THEN 'in_progress'
+            WHEN EXISTS (
+              SELECT 1 FROM work_items child
+              WHERE child.parent_id = parent.id AND child.status = 'planned'
+            ) THEN 'planned'
+            ELSE 'inbox'
+          END,
+          completed_at = CASE
+            WHEN NOT EXISTS (
+              SELECT 1 FROM work_items child
+              WHERE child.parent_id = parent.id AND child.status NOT IN ('done', 'archived')
+            ) THEN COALESCE(parent.completed_at, NOW())
+            ELSE NULL
+          END,
+          updated_at = NOW()
+        WHERE parent.id = ${parentId} AND parent.company_id = ${companyId}
+      `;
+    }
 
     const fetched = await sql`
       SELECT
@@ -3116,10 +3265,12 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
         wc.archived_at AS category_archived_at,
         wc.created_at AS category_created_at,
         wc.updated_at AS category_updated_at,
-        u.display_name AS assignee_name
+        u.display_name AS assignee_name,
+        parent.title AS parent_title
       FROM work_items wi
       LEFT JOIN work_categories wc ON wi.category_id = wc.id
       LEFT JOIN users u ON wi.assignee_id = u.id
+      LEFT JOIN work_items parent ON wi.parent_id = parent.id
       WHERE wi.id = ${id} AND wi.company_id = ${companyId}
     `;
     return formatWorkItem(fetched[0]);
@@ -3388,6 +3539,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   get_work_project(reference: number | string, token?: string | null) { return this.getWorkProject(reference, token); },
   upsert_work_project(input: WorkProjectInput, token?: string | null) { return this.upsertWorkProject(input, token); },
   archive_work_project(id: number, token?: string | null) { return this.archiveWorkProject(id, token); },
+  delete_project_work_items(projectId: number, itemIds?: number[], token?: string | null) { return this.deleteProjectWorkItems(projectId, itemIds, token); },
   list_work_categories(token?: string | null) { return this.listWorkCategories(token); },
   upsert_work_category(input: any, token?: string | null) { return this.upsertWorkCategory(input, token); },
   merge_work_categories(sourceId: number, targetId: number, token?: string | null) { return this.mergeWorkCategory(sourceId, targetId, token); },

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api } from "$lib/api/client";
+  import { api, supportsOrcaWorker, usesLocalOrcaBridge } from "$lib/api/client";
   import type { AuthUser, Settings, UserInput, UserRole } from "$lib/types";
   import { VAT_RATES, vatLabel, type VatRate } from "$lib/vat";
   import Button from "$lib/components/Button.svelte";
@@ -14,6 +14,7 @@
   import {
     currentUser,
     isAdmin,
+    session,
     clearSession,
     setIdleTimeoutMinutes,
   } from "$lib/stores/session";
@@ -36,6 +37,14 @@
     sectionById,
     visibleAjustesSections,
   } from "$lib/settings/sections";
+  import {
+    defaultOrcaLocalConfig,
+    loadOrcaBridgeToken,
+    loadOrcaLocalConfig,
+    isLoopbackBridgeUrl,
+    saveOrcaBridgeToken,
+    saveOrcaLocalConfig,
+  } from "$lib/work/orca-bridge";
 
   let settings = $state<Settings | null>(null);
   let health = $state<{ ok: boolean; models: string[] } | null>(null);
@@ -65,6 +74,8 @@
   let restoreBusy = $state(false);
 
   let pinForm = $state({ current: "", next: "", confirm: "" });
+  let orcaConfig = $state(defaultOrcaLocalConfig());
+  let orcaBridgeToken = $state("");
 
   const runtimeMode = $derived(
     api.isTauri() ? "Tauri · SQLite" : "Web · API / Postgres o localStorage",
@@ -117,6 +128,8 @@
       }
     }
     activeSection = resolveActiveSection(stored, $isAdmin);
+    orcaConfig = loadOrcaLocalConfig();
+    orcaBridgeToken = loadOrcaBridgeToken();
     load();
   });
 
@@ -294,6 +307,77 @@
     } catch {
       showToast("Copia manualmente la contraseña", "info");
     }
+  }
+
+  function shellQuote(value: string) {
+    return `'${value.replaceAll("'", `'\\''`)}'`;
+  }
+
+  function saveOrcaConfig() {
+    try {
+      saveOrcaLocalConfig(orcaConfig);
+      saveOrcaBridgeToken(orcaBridgeToken);
+      showToast("Configuración local de Orca guardada");
+    } catch {
+      showToast("No se pudo guardar la configuración en este equipo", "err");
+    }
+  }
+
+  function orcaCommand(token: string) {
+    if (usesLocalOrcaBridge()) {
+      const bridgePort = new URL(orcaConfig.bridge_url).port || "4765";
+      return [
+        `HEXA_ORCA_BRIDGE_TOKEN=${shellQuote(orcaBridgeToken.trim())}`,
+        `HEXA_ORCA_BRIDGE_PORT=${shellQuote(bridgePort)}`,
+        `HEXA_ORCA_BRIDGE_ORIGINS=${shellQuote(window.location.origin)}`,
+        `HEXA_ORCA_REPO_PATH=${shellQuote(orcaConfig.repo_path.trim())}`,
+        `HEXA_ORCA_BASE_BRANCH=${shellQuote(orcaConfig.base_branch.trim() || "dev")}`,
+        "npm run orca:worker",
+      ].join(" \\\n  ");
+    }
+    const companyId = $session.activeCompanyId;
+    return [
+      `HEXA_CRM_URL=${shellQuote(orcaConfig.crm_url.trim())}`,
+      `HEXA_CRM_AGENT_TOKEN=${shellQuote(token)}`,
+      `HEXA_ORCA_COMPANY_ID=${shellQuote(String(companyId ?? ""))}`,
+      `HEXA_ORCA_REPO_PATH=${shellQuote(orcaConfig.repo_path.trim())}`,
+      `HEXA_ORCA_BASE_BRANCH=${shellQuote(orcaConfig.base_branch.trim() || "dev")}`,
+      `HEXA_ORCA_POLL_MS=${shellQuote(orcaConfig.poll_ms.trim() || "10000")}`,
+      "npm run orca:worker",
+    ].join(" \\\n  ");
+  }
+
+  async function copyOrcaCommand() {
+    if (!usesLocalOrcaBridge() && (!$session.token || !$session.activeCompanyId)) {
+      showToast("La sesión no tiene token o empresa activa", "err");
+      return;
+    }
+    if (!orcaConfig.crm_url.trim() || !orcaConfig.repo_path.trim()) {
+      showToast("Completa la URL de Hexa y la ruta local del repositorio", "err");
+      return;
+    }
+    if (usesLocalOrcaBridge() && !orcaBridgeToken.trim()) {
+      showToast("Genera o introduce una clave de emparejamiento local", "err");
+      return;
+    }
+    if (usesLocalOrcaBridge() && !isLoopbackBridgeUrl(orcaConfig.bridge_url)) {
+      showToast("La URL del puente debe ser http://127.0.0.1 o http://localhost", "err");
+      return;
+    }
+    saveOrcaConfig();
+    try {
+      await navigator.clipboard.writeText(orcaCommand($session.token ?? ""));
+      showToast(usesLocalOrcaBridge() ? "Comando del puente local copiado" : "Comando del worker copiado; contiene un token de sesión privado", "info");
+    } catch {
+      showToast("No se pudo copiar el comando", "err");
+    }
+  }
+
+  function generateOrcaBridgeToken() {
+    const bytes = crypto.getRandomValues(new Uint8Array(24));
+    orcaBridgeToken = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    saveOrcaBridgeToken(orcaBridgeToken);
+    showToast("Clave local generada para esta sesión");
   }
 
   function selectModel(m: string) {
@@ -652,6 +736,80 @@
                 o revisa la dirección.
               </p>
             {/if}
+          </div>
+        </Card>
+      {:else if activeSection === "orca" && $isAdmin}
+        <Card lift={false} class="relative overflow-hidden border border-cyan-400/25 !p-5" data-orca-settings>
+          <div class="pointer-events-none absolute -right-12 -top-12 h-40 w-40 rounded-full bg-cyan-500/10 blur-3xl"></div>
+          <div class="relative">
+            <div class="mb-5 flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p class="section-label mb-1">Automatización local</p>
+                <h2 class="text-lg font-semibold text-radiant-bright">{activeMeta.title}</h2>
+                <p class="mt-1 max-w-2xl text-sm text-[var(--color-muted)]">{activeMeta.hint}</p>
+              </div>
+              <Badge tone={supportsOrcaWorker() ? "ok" : "warn"}>
+                {usesLocalOrcaBridge() ? "Puente local" : supportsOrcaWorker() ? "Cola central" : "No compatible"}
+              </Badge>
+            </div>
+
+            {#if !supportsOrcaWorker()}
+              <div class="mb-5 rounded-xl border border-amber-400/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+                <p class="font-medium">El worker no está disponible en esta plataforma.</p>
+                <p class="mt-1 text-xs text-amber-100/75">Usa la versión web; localStorage se conecta mediante un puente emparejado y PostgreSQL mediante la cola RPC.</p>
+              </div>
+            {/if}
+
+            <div class="grid gap-3 md:grid-cols-2">
+              <Input label="URL de Hexa CRM" bind:value={orcaConfig.crm_url} placeholder="https://crm.example.com" />
+              <Input label="Ruta local del repositorio" bind:value={orcaConfig.repo_path} placeholder="/Users/tu_usuario/proyectos/hexa-crm" />
+              <Input label="Rama base" bind:value={orcaConfig.base_branch} placeholder="dev" />
+              <Input label="Intervalo de consulta (ms)" type="number" min="2000" bind:value={orcaConfig.poll_ms} />
+              {#if usesLocalOrcaBridge()}
+                <Input label="URL del puente local" bind:value={orcaConfig.bridge_url} placeholder="http://127.0.0.1:4765" />
+                <div class="flex items-end gap-2">
+                  <Input label="Clave de emparejamiento" type="password" bind:value={orcaBridgeToken} placeholder="Genera una clave local" class="min-w-0 flex-1" />
+                  <Button variant="secondary" onclick={generateOrcaBridgeToken}>Generar</Button>
+                </div>
+              {/if}
+            </div>
+
+            <div class="mt-4 grid gap-3 sm:grid-cols-2">
+              <div class="rounded-xl border border-[var(--color-border)] bg-black/20 p-3">
+                <p class="text-xs font-medium text-[var(--color-text)]">Empresa activa</p>
+                <p class="mt-1 font-mono text-sm text-cyan-200">{usesLocalOrcaBridge() ? "Datos de este navegador" : ($session.activeCompanyId ?? "Sin empresa")}</p>
+                <p class="mt-1 text-[11px] text-[var(--color-muted-dim)]">{usesLocalOrcaBridge() ? "La página sincroniza el resultado con localStorage." : "El worker solo reclamará tareas de esta empresa."}</p>
+              </div>
+              <div class="rounded-xl border border-[var(--color-border)] bg-black/20 p-3">
+                <p class="text-xs font-medium text-[var(--color-text)]">Credencial</p>
+                <p class="mt-1 text-sm text-emerald-200">{usesLocalOrcaBridge() ? "Clave local emparejada" : "Sesión administrativa actual"}</p>
+                <p class="mt-1 text-[11px] text-[var(--color-muted-dim)]">{usesLocalOrcaBridge() ? "La clave vive solo en sessionStorage y debe coincidir con el worker." : "El token no se guarda en esta configuración; solo se añade al comando al copiarlo."}</p>
+              </div>
+            </div>
+
+            <div class="mt-4 rounded-xl border border-[var(--color-border)] bg-black/30 p-4">
+              <p class="text-xs font-medium text-[var(--color-text)]">Comando generado</p>
+              {#if usesLocalOrcaBridge()}
+                <pre class="mt-2 overflow-x-auto whitespace-pre-wrap break-all text-[11px] leading-relaxed text-[var(--color-muted)]">HEXA_ORCA_BRIDGE_TOKEN=&lt;CLAVE_EMPAREJAMIENTO&gt; \
+HEXA_ORCA_BRIDGE_PORT=4765 \
+HEXA_ORCA_REPO_PATH={orcaConfig.repo_path || "/ruta/hexa-crm"} \
+npm run orca:worker</pre>
+              {:else}
+                <pre class="mt-2 overflow-x-auto whitespace-pre-wrap break-all text-[11px] leading-relaxed text-[var(--color-muted)]">HEXA_CRM_URL={orcaConfig.crm_url || "https://crm.example.com"} \
+HEXA_CRM_AGENT_TOKEN=&lt;TOKEN_PRIVADO&gt; \
+HEXA_ORCA_COMPANY_ID={$session.activeCompanyId ?? "..."} \
+HEXA_ORCA_REPO_PATH={orcaConfig.repo_path || "/ruta/hexa-crm"} \
+npm run orca:worker</pre>
+              {/if}
+            </div>
+
+            <div class="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--color-border)] pt-4">
+              <p class="max-w-xl text-xs text-[var(--color-muted-dim)]">Ejecuta el comando en el equipo donde están Orca y el repositorio. El worker no hace push ni merge automáticamente.</p>
+              <div class="flex flex-wrap gap-2">
+                <Button variant="secondary" onclick={saveOrcaConfig}>Guardar en este equipo</Button>
+                <Button variant="primary" onclick={copyOrcaCommand} disabled={!supportsOrcaWorker()}>Copiar y arrancar</Button>
+              </div>
+            </div>
           </div>
         </Card>
       {:else if activeSection === "plugins" && $isAdmin}

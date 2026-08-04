@@ -184,6 +184,7 @@ pub struct Settings {
     pub default_vat: i32,
     pub idle_timeout_minutes: i32,
     pub last_backup_at: Option<String>,
+    pub monthly_economic_goals: std::collections::HashMap<String, i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

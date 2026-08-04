@@ -220,6 +220,8 @@ export type Settings = {
   idle_timeout_minutes: number;
   /** ISO timestamp of the latest locally initiated backup. */
   last_backup_at: string | null;
+  /** Objetivos de ingresos en céntimos, indexados por `companyId:YYYY-MM`. */
+  monthly_economic_goals: Record<string, number>;
 };
 
 export type PluginKey = "database_bridge" | "stripe_mcp";
@@ -401,6 +403,7 @@ export type WorkProjectRevenueMilestoneInput = {
 export type WorkItem = {
   id: number;
   company_id: number;
+  parent_id: number | null;
   category_id: number | null;
   project_id: number | null;
   assignee_id: number | null;
@@ -421,6 +424,7 @@ export type WorkItem = {
   updated_at: string;
   category?: WorkCategory | null;
   assignee_name?: string | null;
+  parent_title?: string | null;
 };
 
 export type WorkMember = {
@@ -447,6 +451,8 @@ export type WorkItemFilters = {
 
 export type WorkItemInput = {
   id?: number | null;
+  /** Tarea padre. Las subtareas solo admiten un nivel de profundidad. */
+  parent_id?: number | null;
   title: string;
   description?: string;
   type?: WorkItemType;

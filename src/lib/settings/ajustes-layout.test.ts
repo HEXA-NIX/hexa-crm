@@ -29,6 +29,7 @@ describe("ajustes layout — category navigation", () => {
     expect(src).toMatch(/activeSection === ["']cuenta["']/);
     expect(src).toMatch(/activeSection === ["']tienda["']/);
     expect(src).toMatch(/activeSection === ["']ia["']/);
+    expect(src).toMatch(/activeSection === ["']orca["']/);
     expect(src).toMatch(/activeSection === ["']actualizaciones["']/);
     expect(src).toMatch(/activeSection === ["']sistema["']/);
     expect(src).toMatch(/activeSection === ["']equipo["']/);
@@ -93,6 +94,14 @@ describe("ajustes layout — category navigation", () => {
     expect(ollamaCall).toBeGreaterThanOrEqual(0);
     expect(usersCall).toBeGreaterThan(ollamaCall);
     expect(load.slice(0, usersCall)).toMatch(/try \{\s*health = await api\.ollamaHealth\(\);\s*\} catch \{\s*health = null;\s*\}/);
+  });
+
+  it("configura el worker Orca sin persistir el token de sesión", () => {
+    expect(src).toContain("data-orca-settings");
+    expect(src).toContain("copyOrcaCommand");
+    expect(src).toContain("HEXA_CRM_AGENT_TOKEN");
+    expect(src).toContain("El token no se guarda");
+    expect(src).not.toMatch(/localStorage\.setItem\([^\n]*token/i);
   });
 
   it("admin-only equipo matches catalog filter", () => {

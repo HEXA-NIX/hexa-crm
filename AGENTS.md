@@ -27,24 +27,25 @@ feat/*  →  PR/merge a dev  →  tests+build verdes  →  [humano] decide merge
 El director de dev puede mergear a **`dev`** y pushear `origin/dev`.  
 **No** mergear a `main` sin autorización explícita del responsable del producto.
 
-### Corta vida (siempre desde `main`)
+### Corta vida
 
 | Prefijo | Uso | Ejemplo |
 |---------|-----|---------|
-| `feat/` | Features | `feat/ai-popup` |
-| `fix/` | Bugs | `fix/vat-rounding` |
-| `chore/` | Tooling, CI, deps | `chore/nightly-workflow` |
-| `docs/` | Documentación | `docs/agents-branching` |
-| `release/x.y` | Solo al congelar una versión | `release/0.2` (corta vida) |
-| `hotfix/x.y.z` | Parche urgente sobre release | `hotfix/0.2.1` |
+| `feat/` | Features; siempre desde `dev` | `feat/ai-popup` |
+| `fix/` | Bugs ordinarios; siempre desde `dev` | `fix/vat-rounding` |
+| `chore/` | Tooling, CI, deps; siempre desde `dev` | `chore/nightly-workflow` |
+| `docs/` | Documentación; siempre desde `dev` | `docs/agents-branching` |
+| `release/x.y` | Congelar una versión desde `dev` | `release/0.2` (corta vida) |
+| `hotfix/x.y.z` | Parche urgente; desde `main` o el tag estable | `hotfix/0.2.1` |
 
 ### Flujo
 
-1. `git checkout main && git pull`
+1. `git checkout dev && git pull`
 2. `git checkout -b feat/mi-cambio`
-3. PR → `main` (preferir **squash merge**)
+3. PR → `dev` (preferir **squash merge**)
 4. CI debe pasar (test + build) antes de merge
-5. **No force-push** a `main`
+5. **No force-push** a `dev` ni a `main`
+6. El paso de `dev` a `main` requiere decisión y autorización humana explícita
 
 ### Releases y documentación de cambios (obligatorio)
 
@@ -63,7 +64,7 @@ Despliegue Incus (`voura:nix-c-web` / `nix-c-srv`): ver `docs/RELEASES.md`.
 
 | Canal | Origen | Cómo |
 |-------|--------|------|
-| **nightly** | Último `main` verde | CI cron; Release GitHub `prerelease` o artefacto “nightly” (evitar miles de tags) |
+| **nightly** | Último `dev` verde | CI cron; Release GitHub `prerelease` o artefacto “nightly” (evitar miles de tags) |
 | **beta / rc** | Tag pre-release | `v0.2.0-beta.1`, `v0.2.0-rc.1` |
 | **stable** | Tag semver | `v0.2.0` |
 
@@ -75,13 +76,13 @@ vMAJOR.MINOR.PATCH-beta.N
 vMAJOR.MINOR.PATCH-rc.N
 ```
 
-Al estabilizar sin parar `main`:
+Al estabilizar una versión:
 
 ```
-main → branch release/X.Y → solo fixes → tag vX.Y.Z → merge back a main
+dev → branch release/X.Y → solo fixes → tag vX.Y.Z → merge a main y back-merge a dev
 ```
 
-### Protección de `main` (local + GitHub)
+### Protección de `main` y `dev` (local + GitHub)
 
 **Hooks versionados** (en el repo):
 
@@ -106,12 +107,13 @@ ALLOW_MAIN_COMMIT=1 git commit ...
 ALLOW_MAIN_PUSH=1 git push origin main
 ```
 
-**GitHub Branch protection** (Settings → Branches → regla para `main`) — el hook local no basta en el servidor:
+**GitHub Branch protection** (Settings → Branches → reglas para `main` y `dev`) — el hook local no basta en el servidor:
 
-- Require a pull request before merging
+- Require a pull request before merging en ambas ramas
 - Require status checks: `test`, `build` (cuando existan workflows)
 - Do not allow force pushes / deletions
 - Prefer squash merge / linear history
+- Restringir el merge de `dev` a `main` al responsable humano del producto
 
 ---
 
@@ -195,7 +197,7 @@ hexa-crm/
 - **Selects:** componente custom `Select.svelte` (no nativos del SO)
 - **Importes:** céntimos enteros; IVA ES 0/4/10/21; PVP con IVA incluido
 - **Tests:** Vitest en `src/**/*.test.ts`; no mockear la unidad bajo test
-- **Commits:** mensajes en oraciones completas; PRs a `main`
+- **Commits:** mensajes en oraciones completas; PRs de trabajo a `dev`; promoción de `dev` a `main` solo con autorización humana
 
 ### Qué no versionar
 
@@ -217,4 +219,4 @@ Demo seed (browser/Tauri): `admin` / `1234` · `cajero` / `0000`
 
 ---
 
-*Última actualización de convenciones de ramas/carpetas: 2026-07-18. Mantener este archivo al cambiar la topología del repo.*
+*Última actualización de convenciones de ramas/carpetas: 2026-07-31. Mantener este archivo al cambiar la topología del repo.*
