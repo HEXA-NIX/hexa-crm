@@ -9,6 +9,12 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-08-04
+
+### Fixed
+
+- En Ajustes web, la comprobación opcional de Ollama ya no bloquea el listado de usuarios administradores cuando el Worker no expone `ollama_health`.
+
 ## [0.3.1] — 2026-08-04
 
 ### Fixed
