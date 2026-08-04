@@ -9,6 +9,8 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-04
+
 ### Added
 
 - Integración inicial de tareas con Orca: despacho desde la ficha, cola RPC autenticada, worker local con worktree Codex y cierre automático condicionado a tests, build y commit.
@@ -31,6 +33,8 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Changed
 
+- Actualizado el toolchain web a SvelteKit 2.70.2, Svelte 5.56.8, Vite 8.2.0, Vitest 4.1.10 y TypeScript 6.0.3; la configuración de pruebas usa la API tipada de Vitest 4.
+- Actualizados `svelte-check` 4.7.4, `@types/node` 26.1.2 y `serde_json` 1.0.151.
 - El progreso de proyectos y del portafolio excluye las tareas archivadas del total para no penalizar artificialmente los porcentajes.
 - El portafolio excluye proyectos archivados de sus indicadores operativos; los formularios validan fechas e importes, y la planificación económica ofrece siempre 36 meses.
 - Proyectos conserva filtros y vista preferida, permite limpiar filtros, muestra archivados correctamente y adapta el Kanban a móvil y navegación sin arrastre.
