@@ -54,11 +54,11 @@ Desde **0.2.0**, **todo cambio que vaya a una release debe documentarse**:
 | Artefacto | Uso |
 |-----------|-----|
 | [`CHANGELOG.md`](./CHANGELOG.md) | Historial Keep a Changelog; sección `[Unreleased]` al cerrar cada feature |
-| [`docs/RELEASES.md`](./docs/RELEASES.md) | Checklist de versión, tag, GitHub Release y deploy Incus |
+| [`docs/RELEASES.md`](./docs/RELEASES.md) | Checklist de versión, tag, GitHub Release y despliegues Cloudflare/Incus |
 | `package.json` / Tauri / Cargo `version` | Siempre alineados entre sí |
 
 No publicar tag/Release sin entrada de CHANGELOG para esa versión.  
-Despliegue Incus (`voura:nix-c-web` / `nix-c-srv`): ver `docs/RELEASES.md`.
+Para el despliegue Worker/D1 actual y el modo Incus alternativo, ver `docs/RELEASES.md`.
 
 ### Canales de entrega (≠ ramas eternas)
 

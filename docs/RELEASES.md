@@ -62,7 +62,38 @@ Prefijos de pre-release: `v0.2.0-beta.1`, `v0.2.0-rc.1`.
 
 Cada **ciclo de mejora continua** que entre en `dev` debe dejar al menos una línea en `[Unreleased]` el mismo día.
 
-## Despliegue Incus (hexa-crm)
+## Despliegue Cloudflare/D1 (web de producción actual)
+
+La web actual de `crm.nix-0.com` se publica desde
+`.github/workflows/cloudflare-stable-release.yml`, no mediante un push directo
+desde un checkout local. Una GitHub Release estable hace checkout del tag y sus
+submódulos, ejecuta `npm ci` y `npm run build:cloudflare`, aplica las
+migraciones D1 y despliega el Worker con `--keep-vars`.
+
+El token Cloudflare pertenece exclusivamente a los secretos de GitHub. Tras el
+workflow, verifica al menos:
+
+```bash
+curl -fsS https://crm.nix-0.com/api/health
+```
+
+El dispatch manual está destinado a redesplegar un tag estable publicado. La
+validación actual del workflow no fuerza el resultado de su filtro `jq`, por lo
+que, antes de usarlo, exige autorización y verifica de forma explícita que la
+Release no es draft ni prerelease:
+
+```bash
+gh release view TAG --repo HEXA-NIX/hexa-crm --json isDraft,isPrerelease
+```
+
+Devuelve código/assets a ese tag, pero **no revierte migraciones D1**; evalúa
+el schema antes de llamarlo rollback.
+
+## Despliegue Incus/PostgreSQL (modo central alternativo)
+
+Este camino corresponde al runtime Node central con PostgreSQL. No es el
+despliegue Worker/D1 actual y no comparten datos ni migraciones. Úsalo solo si
+el objetivo explícito es ese modo; consulta también `CENTRAL_DEPLOYMENT.md`.
 
 Remoto habitual: **`voura`** (túnel SSH → `127.0.0.1:8443`).
 
