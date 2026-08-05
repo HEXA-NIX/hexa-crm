@@ -78,6 +78,7 @@ import {
   sanitizePluginConfig,
   stripeToolAccess,
 } from "../plugins/catalog";
+import { normalizeProjectDocuments, validateProjectDocuments } from "../projects/project-documents";
 import {
   callStripeTool,
   listStripeTools,
@@ -540,6 +541,7 @@ export async function initDb() {
       value_cents INTEGER NOT NULL DEFAULT 0 CHECK (value_cents >= 0),
       monthly_estimate_cents INTEGER NOT NULL DEFAULT 0 CHECK (monthly_estimate_cents >= 0),
       revenue_target_date DATE,
+      documents JSONB NOT NULL DEFAULT '[]'::jsonb,
       name TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'planned' CHECK (status IN ('planned', 'active', 'paused', 'done', 'archived')),
@@ -560,6 +562,7 @@ export async function initDb() {
   await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS value_cents INTEGER NOT NULL DEFAULT 0`;
   await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS monthly_estimate_cents INTEGER NOT NULL DEFAULT 0`;
   await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS revenue_target_date DATE`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS documents JSONB NOT NULL DEFAULT '[]'::jsonb`;
   await sql`CREATE INDEX IF NOT EXISTS idx_cash_movements_project ON cash_movements(company_id, project_id)`;
   await sql`
     CREATE TABLE IF NOT EXISTS work_project_revenue_milestones (
@@ -977,6 +980,7 @@ function formatWorkProject(r: any): WorkProject {
     monthly_estimate_cents: r.monthly_estimate_cents ?? 0,
     revenue_target_date: toIso(r.revenue_target_date) || null,
     revenue_milestones: [],
+    documents: Array.isArray(r.documents) ? r.documents : [],
     name: r.name,
     description: r.description ?? "",
     status: r.status,
@@ -2794,6 +2798,10 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
 
     const name = (input.name ?? "").trim();
     if (!name) throw new Error("El nombre del proyecto es obligatorio.");
+    if (input.documents) {
+      const documentError = validateProjectDocuments(input.documents);
+      if (documentError) throw new Error(documentError);
+    }
 
     let existing: any = null;
     if (input.id != null) {
@@ -2829,6 +2837,9 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
       ? input.revenue_target_date
       : (existing?.revenue_target_date ? toIso(existing.revenue_target_date) : null);
     const description = input.description !== undefined ? (input.description ?? "") : (existing?.description ?? "");
+    const documents = input.documents !== undefined
+      ? normalizeProjectDocuments(input.documents)
+      : (Array.isArray(existing?.documents) ? existing.documents : []);
     const customerId = input.customer_id !== undefined
       ? input.customer_id
       : (existing?.customer_id ?? null);
@@ -2853,6 +2864,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
           value_cents = ${valueCents},
           monthly_estimate_cents = ${monthlyEstimateCents},
           revenue_target_date = ${revenueTargetDate},
+          documents = ${sql.json(documents as any)},
           start_date = ${startDate},
           target_date = ${targetDate},
           updated_at = NOW()
@@ -2863,10 +2875,10 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     } else {
       const inserted = await sql`
         INSERT INTO work_projects (
-          company_id, customer_id, value_cents, monthly_estimate_cents, revenue_target_date,
+          company_id, customer_id, value_cents, monthly_estimate_cents, revenue_target_date, documents,
           name, description, status, start_date, target_date, created_by
         ) VALUES (
-          ${companyId}, ${customerId}, ${valueCents}, ${monthlyEstimateCents}, ${revenueTargetDate},
+          ${companyId}, ${customerId}, ${valueCents}, ${monthlyEstimateCents}, ${revenueTargetDate}, ${sql.json(documents as any)},
           ${name}, ${description}, ${status}, ${startDate}, ${targetDate}, ${user.id}
         )
         RETURNING id

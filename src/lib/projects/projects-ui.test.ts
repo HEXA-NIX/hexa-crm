@@ -26,6 +26,13 @@ describe("estructura UI de proyectos", () => {
     expect(DETAIL).toContain("group-hover:block");
   });
 
+  it("muestra y permite gestionar documentación vinculada al proyecto", () => {
+    expect(DETAIL).toContain("data-project-documents");
+    expect(DETAIL).toContain("Documentación del proyecto");
+    expect(DETAIL).toContain("saveProjectDocuments");
+    expect(DETAIL).toContain("projectDocumentHref");
+  });
+
   it("dispone de una vista explícita para archivadas y Kanban móvil", () => {
     expect(DETAIL).toContain('filterStatus === "archived"');
     expect(DETAIL).toContain("overflow-x-auto");

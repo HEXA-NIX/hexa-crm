@@ -5,6 +5,7 @@ import { buildProjectEconomicSeries } from "./project-economics";
 const baseProject: WorkProject = {
   id: 1, uid: "p", company_id: 1, customer_id: 2, value_cents: 120_000,
   monthly_estimate_cents: 0, revenue_target_date: null, revenue_milestones: [],
+  documents: [],
   name: "Proyecto", description: "", status: "active", start_date: "2026-01-01",
   target_date: "2026-03-31", created_by: 1, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
 };

@@ -11,6 +11,8 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Added
 
+- Cada proyecto puede reunir documentación mediante enlaces, rutas de archivos y notas internas, con gestión administrativa y persistencia local/PostgreSQL.
+
 - Integración inicial de tareas con Orca: despacho desde la ficha, cola RPC autenticada, worker local con worktree Codex y cierre automático condicionado a tests, build y commit.
 - Ajustes incorpora una sección administrativa de Orca para guardar la configuración local no sensible y copiar el comando de arranque sin persistir el token de sesión.
 - El worker Orca admite tareas del modo browser/localStorage mediante un puente emparejado en loopback, con origen restringido y sincronización automática del resultado en la página de proyecto.

@@ -17,6 +17,7 @@
     Customer,
     CashKind,
     CashMovement,
+    WorkProjectDocumentInput,
   } from "$lib/types";
   import { formatEUR, parseEurosInput } from "$lib/money";
   import Button from "$lib/components/Button.svelte";
@@ -34,6 +35,7 @@
   import { calculateTaskProgress } from "$lib/projects/task-progress";
   import { projectStatusLabel, projectStatusTone } from "$lib/projects/presentation";
   import { buildProjectEconomicSeries } from "$lib/projects/project-economics";
+  import { normalizeProjectDocuments, projectDocumentHref, validateProjectDocuments } from "$lib/projects/project-documents";
   import { hasInvalidDateRange, hasInvalidMoneyInput } from "$lib/projects/form-validation";
   import ProjectProgress from "$lib/components/projects/ProjectProgress.svelte";
   import { browser } from "$app/environment";
@@ -102,6 +104,9 @@
     amount: "",
     description: "",
   });
+  let documentsModalOpen = $state(false);
+  let documentsSaving = $state(false);
+  let documentsForm = $state<WorkProjectDocumentInput[]>([]);
 
   // Task Detail Modal State
   let detailModalOpen = $state(false);
@@ -625,6 +630,50 @@
     editProjectForm.milestones = editProjectForm.milestones.filter(
       (_, itemIndex) => itemIndex !== index,
     );
+  }
+
+  function openDocumentsModal() {
+    if (!project) return;
+    documentsForm = project.documents.map((document) => ({
+      id: document.id,
+      title: document.title,
+      kind: document.kind,
+      location: document.location,
+      notes: document.notes,
+    }));
+    documentsModalOpen = true;
+  }
+
+  function addProjectDocument() {
+    documentsForm = [...documentsForm, { title: "", kind: "link", location: "", notes: "" }];
+  }
+
+  function removeProjectDocument(index: number) {
+    documentsForm = documentsForm.filter((_, itemIndex) => itemIndex !== index);
+  }
+
+  async function saveProjectDocuments() {
+    if (!project || documentsSaving) return;
+    const validationError = validateProjectDocuments(documentsForm);
+    if (validationError) {
+      showToast(validationError, "err");
+      return;
+    }
+    documentsSaving = true;
+    try {
+      await api.upsertWorkProject({
+        id: project.id,
+        name: project.name,
+        documents: normalizeProjectDocuments(documentsForm),
+      });
+      documentsModalOpen = false;
+      showToast("Documentación del proyecto actualizada");
+      await loadData();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Error al guardar la documentación", "err");
+    } finally {
+      documentsSaving = false;
+    }
   }
 
   function openCashModal(kind: CashKind) {
@@ -1169,6 +1218,46 @@
 
         <ProjectProgress total={totalTasks} completed={completedTasks} blocked={blockedTasks} progress={progressPercent} />
       </div>
+    </Card>
+
+    <Card lift={false} class="mb-6 border border-[var(--color-border)] bg-black/10 p-4" data-project-documents>
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <span class="section-label">DOCUMENTACIÓN</span>
+          <p class="mt-1 text-xs text-[var(--color-muted-dim)]">Enlaces, rutas de archivos y notas útiles del proyecto.</p>
+        </div>
+        {#if $isAdmin}
+          <Button variant="secondary" onclick={openDocumentsModal}>{project.documents.length ? "Gestionar" : "+ Añadir documento"}</Button>
+        {/if}
+      </div>
+      {#if project.documents.length > 0}
+        <div class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          {#each project.documents as document (document.id)}
+            {@const href = projectDocumentHref(document)}
+            <div class="min-w-0 rounded-xl border border-white/[0.07] bg-white/[0.025] p-3">
+              <div class="flex items-start justify-between gap-2">
+                <div class="min-w-0">
+                  <p class="truncate text-sm font-semibold text-[var(--color-text)]">{document.title}</p>
+                  <p class="mt-0.5 text-[10px] font-bold uppercase tracking-wide text-purple-300/80">
+                    {document.kind === "link" ? "Enlace" : document.kind === "file" ? "Archivo / ruta" : "Nota"}
+                  </p>
+                </div>
+                {#if href}
+                  <a href={href} target="_blank" rel="noreferrer" class="shrink-0 text-xs text-[var(--color-purple-bright)] hover:underline">Abrir ↗</a>
+                {/if}
+              </div>
+              {#if document.location}
+                <p class="mt-2 truncate font-mono text-[10px] text-[var(--color-muted-dim)]" title={document.location}>{document.location}</p>
+              {/if}
+              {#if document.notes}
+                <p class="mt-2 line-clamp-3 whitespace-pre-line text-xs leading-relaxed text-[var(--color-muted)]">{document.notes}</p>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <p class="mt-3 rounded-xl border border-dashed border-[var(--color-border)] px-4 py-3 text-xs text-[var(--color-muted-dim)]">Todavía no hay documentación vinculada.</p>
+      {/if}
     </Card>
 
     <Card lift={false} class="mb-6 border border-[var(--color-border-strong)] p-5">
@@ -1841,6 +1930,50 @@
       <Button variant="primary" type="submit" disabled={editProjectSaving}>
         Guardar cambios
       </Button>
+    </div>
+  </form>
+</Modal>
+
+<Modal
+  open={documentsModalOpen}
+  title="Documentación del proyecto"
+  onclose={() => !documentsSaving && (documentsModalOpen = false)}
+>
+  <form class="space-y-4" onsubmit={(event) => { event.preventDefault(); saveProjectDocuments(); }}>
+    <div class="flex items-center justify-between gap-3">
+      <p class="text-xs text-[var(--color-muted)]">Añade enlaces web, rutas de archivos compartidos o notas internas.</p>
+      <Button type="button" variant="secondary" onclick={addProjectDocument}>+ Documento</Button>
+    </div>
+    <div class="max-h-[55vh] space-y-3 overflow-y-auto pr-1">
+      {#each documentsForm as document, index}
+        <div class="space-y-3 rounded-xl border border-[var(--color-border)] bg-black/15 p-3">
+          <div class="grid gap-3 sm:grid-cols-[1fr_11rem_auto]">
+            <div class="space-y-1">
+              <label for={`project-document-title-${index}`} class="text-xs text-[var(--color-muted)]">Título</label>
+              <input id={`project-document-title-${index}`} class="field w-full text-sm" bind:value={document.title} placeholder="PRD, Figma, acta…" required />
+            </div>
+            <Select label="Tipo" options={[{ value: "link", label: "Enlace" }, { value: "file", label: "Archivo / ruta" }, { value: "note", label: "Nota" }]} bind:value={document.kind} />
+            <Button type="button" variant="ghost" onclick={() => removeProjectDocument(index)}>Eliminar</Button>
+          </div>
+          {#if document.kind !== "note"}
+            <div class="space-y-1">
+              <label for={`project-document-location-${index}`} class="text-xs text-[var(--color-muted)]">{document.kind === "link" ? "URL" : "Ruta o ubicación"}</label>
+              <input id={`project-document-location-${index}`} class="field w-full font-mono text-xs" bind:value={document.location} placeholder={document.kind === "link" ? "https://…" : "/proyectos/documentos/…"} required />
+            </div>
+          {/if}
+          <div class="space-y-1">
+            <label for={`project-document-notes-${index}`} class="text-xs text-[var(--color-muted)]">Notas</label>
+            <textarea id={`project-document-notes-${index}`} class="field min-h-20 w-full resize-y text-sm" bind:value={document.notes} placeholder="Contexto, versión o instrucciones de acceso…"></textarea>
+          </div>
+        </div>
+      {/each}
+      {#if documentsForm.length === 0}
+        <p class="rounded-xl border border-dashed border-[var(--color-border)] p-4 text-center text-xs text-[var(--color-muted-dim)]">Pulsa «+ Documento» para empezar.</p>
+      {/if}
+    </div>
+    <div class="flex justify-end gap-2 border-t border-[var(--color-border)] pt-4">
+      <Button type="button" variant="ghost" disabled={documentsSaving} onclick={() => (documentsModalOpen = false)}>Cancelar</Button>
+      <Button type="submit" variant="primary" disabled={documentsSaving}>{documentsSaving ? "Guardando…" : "Guardar documentación"}</Button>
     </div>
   </form>
 </Modal>

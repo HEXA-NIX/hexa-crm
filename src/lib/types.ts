@@ -344,6 +344,21 @@ export type WorkStatus =
 
 export type WorkPriority = "low" | "normal" | "high" | "urgent";
 
+export type WorkProjectDocumentKind = "link" | "file" | "note";
+
+export type WorkProjectDocument = {
+  id: string;
+  title: string;
+  kind: WorkProjectDocumentKind;
+  location: string;
+  notes: string;
+  updated_at: string;
+};
+
+export type WorkProjectDocumentInput = Omit<WorkProjectDocument, "id" | "updated_at"> & {
+  id?: string;
+};
+
 export type WorkCategory = {
   id: number;
   company_id: number;
@@ -364,6 +379,7 @@ export type WorkProject = {
   monthly_estimate_cents: number;
   revenue_target_date: string | null;
   revenue_milestones: WorkProjectRevenueMilestone[];
+  documents: WorkProjectDocument[];
   name: string;
   description: string;
   status: "planned" | "active" | "paused" | "done" | "archived";
@@ -381,6 +397,7 @@ export type WorkProjectInput = {
   monthly_estimate_cents?: number;
   revenue_target_date?: string | null;
   revenue_milestones?: WorkProjectRevenueMilestoneInput[];
+  documents?: WorkProjectDocumentInput[];
   name: string;
   description?: string;
   status?: "planned" | "active" | "paused" | "done" | "archived";

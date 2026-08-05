@@ -11,6 +11,7 @@ const project = (overrides: Partial<WorkProject>): WorkProject => ({
   monthly_estimate_cents: 0,
   revenue_target_date: null,
   revenue_milestones: [],
+  documents: [],
   name: "Proyecto propio",
   description: "",
   status: "active",

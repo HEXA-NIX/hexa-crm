@@ -63,6 +63,7 @@ import {
   seedCompanies,
   seedCompanyMembers,
 } from "../company/context";
+import { normalizeProjectDocuments, validateProjectDocuments } from "../projects/project-documents";
 import type { VatRate } from "../vat";
 import { isVatRate, splitInclusive } from "../vat";
 import { hashCredential, hashPin, validatePin, verifyCredential } from "../auth/pin";
@@ -391,6 +392,7 @@ function normalizeWorkProject(project: WorkProject): WorkProject {
     monthly_estimate_cents: project.monthly_estimate_cents ?? 0,
     revenue_target_date: project.revenue_target_date ?? null,
     revenue_milestones: project.revenue_milestones ?? [],
+    documents: Array.isArray(project.documents) ? project.documents : [],
   };
 }
 
@@ -2273,6 +2275,10 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
 
     const name = (input.name ?? "").trim();
     if (!name) throw new Error("El nombre del proyecto es obligatorio.");
+    if (input.documents) {
+      const documentError = validateProjectDocuments(input.documents);
+      if (documentError) throw new Error(documentError);
+    }
     if (input.value_cents !== undefined && input.value_cents < 0) {
       throw new Error("El valor del proyecto no puede ser negativo.");
     }
@@ -2343,6 +2349,9 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
           0,
         );
       }
+      if (input.documents !== undefined) {
+        existing.documents = normalizeProjectDocuments(input.documents, nowTs);
+      }
       if (input.description !== undefined) existing.description = input.description;
       if (input.status !== undefined) existing.status = input.status;
       existing.start_date = startDate;
@@ -2366,6 +2375,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
           amount_cents: milestone.amount_cents,
           target_month: milestone.target_month,
         })),
+        documents: normalizeProjectDocuments(input.documents ?? [], nowTs),
         name,
         description: input.description ?? "",
         status: input.status ?? "planned",
