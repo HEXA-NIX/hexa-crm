@@ -12,6 +12,15 @@
 
 Los hooks **no** protegen el remoto. Hace falta un **ruleset** o branch protection en GitHub.
 
+La política del equipo también exige integración revisada en `dev`, pero este
+documento solo acredita el ruleset de `main`. Antes de integrar una PR en `dev`,
+consulta su protección remota; no infieras que existe por los hooks locales:
+
+```bash
+gh api repos/HEXA-NIX/hexa-crm/branches/dev --jq .protected
+gh api repos/HEXA-NIX/hexa-crm/rulesets
+```
+
 ## Ruleset requerido (GitHub — org admin)
 
 Quien tenga permisos **admin** en `HEXA-NIX/hexa-crm` debe configurar:
@@ -53,7 +62,8 @@ check exacto `quality` de `.github/workflows/ci.yml`.
 ## Flujo de entrega
 
 ```
-feat/*  → PR a main → quality verde + review humana → squash merge
+feat/*  → PR a dev → quality verde + review → squash merge
+dev     → autorización humana explícita → PR/merge a main
 ```
 
 Ver también `AGENTS.md`.

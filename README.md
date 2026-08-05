@@ -34,7 +34,7 @@ Ver [NOTICE](./NOTICE) y [docs/ADR-001-verifactu-plan.md](./docs/ADR-001-verifac
 |------|------|
 | UI | Svelte 5 + SvelteKit + Tailwind CSS 4 |
 | Desktop | Tauri 2 + SQLite (`rusqlite`) |
-| Web / API | SvelteKit + PostgreSQL opcional (`/api/rpc`) |
+| Web / API | SvelteKit + PostgreSQL opcional; web desplegada en Cloudflare Worker + D1 (`/api/rpc`) |
 | IA | Ollama local (p. ej. `qwen3.5:4b`) |
 
 ## Arranque rápido (contribuidores y curiosos)
@@ -106,11 +106,12 @@ npm run orca:worker # ejecutor local de tareas Orca
 | Doc | Contenido |
 |-----|-----------|
 | [docs/MARKET.md](./docs/MARKET.md) | Posicionamiento y mercado |
-| [docs/MULTI_COMPANY_ANALYSIS.md](./docs/MULTI_COMPANY_ANALYSIS.md) | Multi-empresa (análisis; no implementado) |
+| [docs/MULTI_COMPANY_ANALYSIS.md](./docs/MULTI_COMPANY_ANALYSIS.md) | Diseño multiempresa; contrastar su estado histórico con el Worker/D1 actual |
 | [docs/BACKUP.md](./docs/BACKUP.md) | Copias y restauración |
 | [docs/BRANCH_PROTECTION.md](./docs/BRANCH_PROTECTION.md) | CI y protección de `main` |
 | [docs/CENTRAL_DEPLOYMENT.md](./docs/CENTRAL_DEPLOYMENT.md) | API central multi-tenant / Incus |
 | [docs/ORCA_TASKS.md](./docs/ORCA_TASKS.md) | Entrega y seguimiento automático de tareas mediante Orca |
+| [docs/SESSION_HANDOFF.md](./docs/SESSION_HANDOFF.md) | Relevo operativo para nuevas sesiones, ramas, Worker/D1 y releases |
 | [ROADMAP.md](./ROADMAP.md) | Fases de producto |
 
 ## Principios
