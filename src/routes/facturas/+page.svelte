@@ -29,6 +29,8 @@
   let products = $state<Product[]>([]);
   let manualOpen = $state(false);
   let manualSaving = $state(false);
+  let previewOpen = $state(false);
+  let previewInvoice = $state<Invoice | null>(null);
   let manualForm = $state({ series: "F", kind: "complete" as "complete" | "simplified", customer_id: "", customer_name: "", customer_nif: "", customer_email: "", operation_date: new Date().toISOString().slice(0, 10), due_at: "", irpf_rate: "", notes: "" });
   let manualLines = $state<ManualLine[]>([{ product_id: "", description: "", quantity: "1", unit_price: "", vat_rate: "21" }]);
 
@@ -82,6 +84,8 @@
       const invoice = await api.issueInvoice({ series: manualForm.series, kind: manualForm.kind, customer_id: manualForm.customer_id ? Number(manualForm.customer_id) : null, customer_name: manualForm.customer_name, customer_nif: manualForm.customer_nif, customer_email: manualForm.customer_email, lines, operation_date: manualForm.operation_date || null, due_at: manualForm.due_at || null, irpf_rate: manualForm.irpf_rate ? Number(manualForm.irpf_rate) : undefined, notes: manualForm.notes });
       showToast(`Factura ${invoice.series}-${invoice.number} emitida`);
       manualOpen = false;
+      previewInvoice = invoice;
+      previewOpen = true;
       await load();
     } catch (error) { showToast(error instanceof Error ? error.message : "No se pudo crear la factura", "err"); }
     finally { manualSaving = false; }
@@ -159,4 +163,18 @@
     <div class="grid gap-3 sm:grid-cols-3"><label class="text-sm"><span class="mb-1 block text-slate-400">IRPF %</span><input type="number" min="0" max="100" step="0.01" class="field w-full" bind:value={manualForm.irpf_rate} /></label><label class="text-sm sm:col-span-2"><span class="mb-1 block text-slate-400">Notas</span><input class="field w-full" placeholder="Condiciones de pago, referencia…" bind:value={manualForm.notes} /></label></div>
     <div class="flex justify-end gap-2"><Button variant="ghost" onclick={() => (manualOpen = false)}>Cancelar</Button><Button variant="primary" disabled={manualSaving} onclick={saveManualInvoice}>{manualSaving ? "Guardando…" : "Emitir factura"}</Button></div>
   </div>
+</Modal>
+
+<Modal open={previewOpen} title={previewInvoice ? `Vista previa · ${previewInvoice.series}-${previewInvoice.number}` : "Vista previa de factura"} size="xl" onclose={() => (previewOpen = false)}>
+  {#if previewInvoice}
+    <div class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-400/20 bg-emerald-400/[0.06] px-4 py-3"><div><p class="font-semibold text-emerald-200">Factura emitida correctamente</p><p class="text-xs text-slate-400">Revísala antes de imprimirla o guardarla como PDF.</p></div><Button variant="primary" onclick={() => print(previewInvoice)}>Imprimir / guardar PDF</Button></div>
+    <div class="mx-auto max-w-3xl rounded-lg bg-white p-7 text-slate-900 shadow-2xl sm:p-10">
+      <div class="flex flex-wrap justify-between gap-8 border-b border-slate-200 pb-7"><div><p class="text-2xl font-bold tracking-tight">{previewInvoice.seller_trade_name}</p><p class="mt-2 text-sm text-slate-500">{previewInvoice.seller_legal_name}<br />NIF: {previewInvoice.seller_nif}</p></div><div class="text-right"><p class="text-sm font-semibold uppercase tracking-[0.18em] text-violet-600">{previewInvoice.kind === "simplified" ? "Factura simplificada" : "Factura"}</p><p class="mt-2 text-xl font-bold">{previewInvoice.series}-{previewInvoice.number}</p><p class="mt-1 text-sm text-slate-500">Emisión: {new Date(previewInvoice.issued_at).toLocaleDateString("es-ES")}<br />Operación: {previewInvoice.operation_date}{#if previewInvoice.due_at}<br />Vencimiento: {previewInvoice.due_at}{/if}</p></div></div>
+      <div class="grid gap-4 border-b border-slate-200 py-6 sm:grid-cols-2"><div><p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Cliente</p><p class="mt-1 font-semibold">{previewInvoice.customer_name}</p>{#if previewInvoice.customer_nif}<p class="text-sm text-slate-500">NIF: {previewInvoice.customer_nif}</p>{/if}{#if previewInvoice.customer_email}<p class="text-sm text-slate-500">{previewInvoice.customer_email}</p>{/if}</div><div class="sm:text-right"><p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Estado</p><p class="mt-1 font-semibold text-emerald-600">Emitida · Pendiente de cobro</p></div></div>
+      <table class="w-full text-sm"><thead><tr class="border-b border-slate-200 text-left text-xs uppercase tracking-wider text-slate-400"><th class="py-3">Concepto</th><th class="py-3 text-right">Cant.</th><th class="py-3 text-right">Precio</th><th class="py-3 text-right">IVA</th><th class="py-3 text-right">Importe</th></tr></thead><tbody>{#each previewInvoice.lines as line}<tr class="border-b border-slate-100"><td class="py-3 font-medium">{line.description}</td><td class="py-3 text-right">{line.quantity}</td><td class="py-3 text-right">{formatEUR(line.unit_price_cents)}</td><td class="py-3 text-right">{line.vat_rate}%</td><td class="py-3 text-right font-medium">{formatEUR(line.total_cents)}</td></tr>{/each}</tbody></table>
+      <div class="ml-auto mt-7 max-w-xs space-y-2 text-sm"><div class="flex justify-between"><span class="text-slate-500">Base imponible</span><strong>{formatEUR(previewInvoice.base_cents)}</strong></div><div class="flex justify-between"><span class="text-slate-500">IVA</span><strong>{formatEUR(previewInvoice.vat_cents)}</strong></div>{#if previewInvoice.irpf_cents}<div class="flex justify-between"><span class="text-slate-500">IRPF ({previewInvoice.irpf_rate}%)</span><strong>-{formatEUR(previewInvoice.irpf_cents)}</strong></div>{/if}<div class="flex justify-between border-t border-slate-300 pt-3 text-lg"><span class="font-semibold">Total</span><strong>{formatEUR(previewInvoice.total_cents)}</strong></div></div>
+      {#if previewInvoice.notes}<p class="mt-8 border-t border-slate-200 pt-4 text-sm text-slate-500">{previewInvoice.notes}</p>{/if}
+    </div>
+    <div class="mt-4 flex justify-end"><Button variant="ghost" onclick={() => (previewOpen = false)}>Cerrar vista previa</Button></div>
+  {/if}
 </Modal>
