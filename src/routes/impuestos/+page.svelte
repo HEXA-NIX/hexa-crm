@@ -23,7 +23,7 @@
   let range = $state(monthRange());
   let summary = $state<VatSummary | null>(null);
   let draft = $state<Model303Draft | null>(null);
-  let profile = $state<FiscalProfile>({ company_id: 0, regime: "general", period: "quarterly", irpf_enabled: false, default_irpf_rate: 0, sii_enabled: false, updated_at: "" });
+  let profile = $state<FiscalProfile>({ company_id: 0, invoice_series: "F", regime: "general", period: "quarterly", irpf_enabled: false, default_irpf_rate: 0, sii_enabled: false, updated_at: "" });
   let verifactuRecords = $state<VerifactuRecord[]>([]);
   let verifactuChain = $state<{ ok: boolean; error?: string }>({ ok: true });
   let loading = $state(true);
@@ -141,6 +141,7 @@
       <Button onclick={saveProfile} disabled={savingProfile}>{savingProfile ? "Guardando…" : "Guardar perfil"}</Button>
     </div>
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <label class="text-sm"><span class="mb-1 block text-slate-400">Serie de facturación</span><input maxlength="8" bind:value={profile.invoice_series} class="field w-full" placeholder="F" /></label>
       <label class="text-sm"><span class="mb-1 block text-slate-400">Régimen</span><select bind:value={profile.regime} class="field w-full"><option value="general">General</option><option value="simplified">Simplificado</option><option value="recargo_equivalencia">Recargo de equivalencia</option><option value="other">Otro</option></select></label>
       <label class="text-sm"><span class="mb-1 block text-slate-400">Periodicidad</span><select bind:value={profile.period} class="field w-full"><option value="quarterly">Trimestral</option><option value="monthly">Mensual</option></select></label>
       <label class="text-sm"><span class="mb-1 block text-slate-400">IRPF por defecto (%)</span><input type="number" min="0" max="100" step="0.01" bind:value={profile.default_irpf_rate} class="field w-full" /></label>

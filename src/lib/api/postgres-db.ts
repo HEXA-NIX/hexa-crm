@@ -184,6 +184,7 @@ export async function initDb() {
   await sql`
     CREATE TABLE IF NOT EXISTS fiscal_profiles (
       company_id INTEGER PRIMARY KEY REFERENCES companies(id) ON DELETE CASCADE,
+      invoice_series TEXT NOT NULL DEFAULT 'F',
       regime TEXT NOT NULL DEFAULT 'general',
       period TEXT NOT NULL DEFAULT 'quarterly',
       irpf_enabled BOOLEAN NOT NULL DEFAULT FALSE,
@@ -199,6 +200,7 @@ export async function initDb() {
     );
   `;
   await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS verifactu_mode TEXT NOT NULL DEFAULT 'disabled'`;
+  await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS invoice_series TEXT NOT NULL DEFAULT 'F'`;
   await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS verifactu_software_id TEXT NOT NULL DEFAULT 'hexa-crm'`;
   await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS verifactu_software_name TEXT NOT NULL DEFAULT 'Hexa CRM'`;
   await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS verifactu_software_version TEXT NOT NULL DEFAULT '0.3.2'`;
@@ -1224,6 +1226,7 @@ function formatExpenseDocument(r: any): ExpenseDocument {
 function formatFiscalProfile(r: any): FiscalProfile {
   return {
     company_id: Number(r.company_id),
+    invoice_series: String(r.invoice_series ?? "F").trim().toUpperCase() || "F",
     regime: r.regime,
     period: r.period,
     irpf_enabled: !!r.irpf_enabled,
@@ -2647,7 +2650,7 @@ export const postgresApi = {
       if (!company) throw new Error("Empresa no encontrada");
       const customer = customerRows[0] ? { id: customerRows[0].id, company_id: companyId, name: customerRows[0].name, email: customerRows[0].email ?? "", phone: customerRows[0].phone ?? "", nif: customerRows[0].nif ?? "", notes: customerRows[0].notes ?? "", created_at: toIso(customerRows[0].created_at) } : (input.customer_name || input.customer_nif || input.customer_email ? { id: 0, company_id: companyId, name: input.customer_name?.trim() || "Cliente contado", email: input.customer_email?.trim() || "", phone: "", nif: input.customer_nif?.trim() || "", notes: "", created_at: new Date().toISOString() } : null);
       const issuedAt = new Date().toISOString();
-      const series = (input.series ?? "F").trim().toUpperCase() || "F";
+      const series = (input.series ?? profileRows[0]?.invoice_series ?? "F").trim().toUpperCase() || "F";
       const year = issuedAt.slice(0, 4);
       const countRows = await sql`SELECT COUNT(*)::int AS count FROM invoices WHERE company_id = ${companyId} AND series = ${series} AND issued_at >= ${new Date(`${year}-01-01T00:00:00Z`)}`;
       const number = `${year}-${String(Number(countRows[0]?.count ?? 0) + 1).padStart(5, "0")}`;
@@ -2672,7 +2675,7 @@ export const postgresApi = {
     const sale = { ...saleRows[0], sold_at: toIso(saleRows[0].sold_at), company_id: companyId };
     const customer = customerRows[0] ? { id: customerRows[0].id, company_id: companyId, name: customerRows[0].name, email: customerRows[0].email ?? "", phone: customerRows[0].phone ?? "", nif: customerRows[0].nif ?? "", notes: customerRows[0].notes ?? "", created_at: toIso(customerRows[0].created_at) } : null;
     const issuedAt = new Date().toISOString();
-    const series = (input.series ?? "F").trim().toUpperCase() || "F";
+    const series = (input.series ?? profileRows[0]?.invoice_series ?? "F").trim().toUpperCase() || "F";
     const year = issuedAt.slice(0, 4);
     const countRows = await sql`SELECT COUNT(*)::int AS count FROM invoices WHERE company_id = ${companyId} AND series = ${series} AND issued_at >= ${new Date(`${year}-01-01T00:00:00Z`)}`;
     const number = `${year}-${String(Number(countRows[0]?.count ?? 0) + 1).padStart(5, "0")}`;
@@ -3003,9 +3006,10 @@ export const postgresApi = {
     const producerNif = String(input?.verifactu_producer_nif ?? "").trim().toUpperCase();
     if (verifactuMode !== "disabled" && !producerNif) throw new Error("El NIF emisor es obligatorio para activar VERI*FACTU");
     const rows = await sql`
-      INSERT INTO fiscal_profiles (company_id, regime, period, irpf_enabled, default_irpf_rate, sii_enabled, verifactu_mode, verifactu_software_id, verifactu_software_name, verifactu_software_version, verifactu_producer_name, verifactu_producer_nif, updated_at)
-      VALUES (${companyId}, ${regime}, ${period}, ${!!input?.irpf_enabled}, ${rate}, ${!!input?.sii_enabled}, ${verifactuMode}, ${String(input?.verifactu_software_id ?? "hexa-crm")}, ${String(input?.verifactu_software_name ?? "Hexa CRM")}, ${String(input?.verifactu_software_version ?? "0.3.2")}, ${String(input?.verifactu_producer_name ?? "")}, ${producerNif}, NOW())
+      INSERT INTO fiscal_profiles (company_id, invoice_series, regime, period, irpf_enabled, default_irpf_rate, sii_enabled, verifactu_mode, verifactu_software_id, verifactu_software_name, verifactu_software_version, verifactu_producer_name, verifactu_producer_nif, updated_at)
+      VALUES (${companyId}, ${String(input?.invoice_series ?? "F").trim().toUpperCase() || "F"}, ${regime}, ${period}, ${!!input?.irpf_enabled}, ${rate}, ${!!input?.sii_enabled}, ${verifactuMode}, ${String(input?.verifactu_software_id ?? "hexa-crm")}, ${String(input?.verifactu_software_name ?? "Hexa CRM")}, ${String(input?.verifactu_software_version ?? "0.3.2")}, ${String(input?.verifactu_producer_name ?? "")}, ${producerNif}, NOW())
       ON CONFLICT (company_id) DO UPDATE SET regime=EXCLUDED.regime, period=EXCLUDED.period,
+        invoice_series=EXCLUDED.invoice_series,
         irpf_enabled=EXCLUDED.irpf_enabled, default_irpf_rate=EXCLUDED.default_irpf_rate,
         sii_enabled=EXCLUDED.sii_enabled, verifactu_mode=EXCLUDED.verifactu_mode,
         verifactu_software_id=EXCLUDED.verifactu_software_id, verifactu_software_name=EXCLUDED.verifactu_software_name,

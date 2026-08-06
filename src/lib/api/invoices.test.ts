@@ -40,4 +40,11 @@ describe("ciclo de facturas emitidas", () => {
     expect(invoice.vat_cents).toBe(420);
     expect(invoice.total_cents).toBe(2420);
   });
+
+  it("usa la serie configurada en el perfil fiscal si no se envía una serie", async () => {
+    const { token } = await browserApi.login("admin", "1234");
+    await browserApi.upsert_fiscal_profile({ invoice_series: "S" }, token);
+    const invoice = browserApi.issue_invoice({ kind: "simplified", lines: [{ description: "Servicio", quantity: 1, unit_price_cents: 500, vat_rate: 21 }] }, token);
+    expect(invoice.series).toBe("S");
+  });
 });

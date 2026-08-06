@@ -2126,7 +2126,7 @@ export const browserApi = {
       const company = s.companies.find((item) => item.id === cid);
       if (!company) throw new Error("Empresa no encontrada");
       const customer = input.customer_id ? s.customers.find((item) => item.id === input.customer_id && (item.company_id ?? 1) === cid) ?? null : (input.customer_name || input.customer_nif || input.customer_email ? { id: 0, company_id: cid, name: input.customer_name?.trim() || "Cliente contado", email: input.customer_email?.trim() || "", phone: "", nif: input.customer_nif?.trim() || "", notes: "", created_at: now() } : null);
-      const series = (input.series ?? "F").trim().toUpperCase() || "F";
+      const series = (input.series ?? s.fiscalProfiles.find((item) => item.company_id === cid)?.invoice_series ?? "F").trim().toUpperCase() || "F";
       const year = new Date().getFullYear();
       const count = s.invoices.filter((item) => item.company_id === cid && item.series === series && item.issued_at.startsWith(String(year))).length + 1;
       s.seq.invoice += 1;
@@ -2144,7 +2144,7 @@ export const browserApi = {
     const company = s.companies.find((item) => item.id === cid);
     if (!company) throw new Error("Empresa no encontrada");
     const customer = sale.customer_id == null ? null : s.customers.find((item) => item.id === sale.customer_id && (item.company_id ?? 1) === cid) ?? null;
-    const series = (input.series ?? "F").trim().toUpperCase() || "F";
+    const series = (input.series ?? s.fiscalProfiles.find((item) => item.company_id === cid)?.invoice_series ?? "F").trim().toUpperCase() || "F";
     const year = new Date().getFullYear();
     const count = s.invoices.filter((item) => item.company_id === cid && item.series === series && item.issued_at.startsWith(String(year))).length + 1;
     s.seq.invoice += 1;
@@ -2319,8 +2319,10 @@ export const browserApi = {
     if (!["disabled", "test", "production"].includes(verifactuMode)) throw new Error("Modo VERI*FACTU no válido");
     const producerNif = (input.verifactu_producer_nif ?? "").trim().toUpperCase();
     if (verifactuMode !== "disabled" && !producerNif) throw new Error("El NIF emisor es obligatorio para activar VERI*FACTU");
+    const previous = s.fiscalProfiles.find((item) => item.company_id === cid);
     const profile: FiscalProfile = {
       company_id: cid,
+      invoice_series: input.invoice_series?.trim().toUpperCase() || previous?.invoice_series || "F",
       regime: regime as FiscalProfile["regime"],
       period: period as FiscalProfile["period"],
       irpf_enabled: !!input.irpf_enabled,

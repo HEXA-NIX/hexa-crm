@@ -33,7 +33,7 @@ export function buildManualInvoice(input: {
   const irpf_cents = Math.round(base_cents * irpf_rate / 100);
   const issued_at = input.issued_at ?? new Date().toISOString();
   return {
-    id: input.id, company_id: input.company.id, sale_id: null, series: (input.invoice.series ?? "F").trim().toUpperCase() || "F", number: input.number,
+    id: input.id, company_id: input.company.id, sale_id: null, series: (input.invoice.series ?? input.profile?.invoice_series ?? "F").trim().toUpperCase() || "F", number: input.number,
     kind, status: "issued", issued_at, operation_date: input.invoice.operation_date || issued_at.slice(0, 10), due_at: input.invoice.due_at ?? null,
     seller_legal_name: input.company.legal_name, seller_nif: input.company.nif, seller_trade_name: input.company.trade_name,
     customer_id: input.customer?.id && input.customer.id > 0 ? input.customer.id : null, customer_name: input.customer?.name || input.invoice.customer_name?.trim() || "Cliente contado",
@@ -59,7 +59,7 @@ export function buildInvoiceFromSale(input: {
   if (kind === "complete" && !input.customer?.nif?.trim()) {
     throw new Error("Una factura completa necesita el NIF del cliente");
   }
-  const series = (input.invoice.series ?? "F").trim().toUpperCase() || "F";
+  const series = (input.invoice.series ?? input.profile?.invoice_series ?? "F").trim().toUpperCase() || "F";
   const lines = input.lines.map((line) => ({
     description: line.product_name || `Producto ${line.product_id}`,
     quantity: line.qty,

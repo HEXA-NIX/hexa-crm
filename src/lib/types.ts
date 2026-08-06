@@ -239,6 +239,7 @@ export type VerifactuRecordType = "alta" | "anulacion";
 export type VerifactuRecordStatus = "generated" | "queued" | "sent" | "accepted" | "accepted_with_errors" | "rejected";
 export type FiscalProfile = {
   company_id: number;
+  invoice_series?: string;
   regime: FiscalRegime;
   period: FiscalPeriod;
   irpf_enabled: boolean;

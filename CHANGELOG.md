@@ -21,6 +21,7 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 - Preparación VERI*FACTU por empresa: registros de alta y anulación encadenados con SHA-256, URL del QR tributario de pruebas, exportación JSON y comprobación de integridad local. La remisión automática a la AEAT queda pendiente de certificado, firma y conexión homologada.
 - Las facturas emitidas pueden crearse directamente sin venta, con cliente, líneas, IVA, IRPF, vencimiento, notas e impresión, manteniendo la trazabilidad VERI*FACTU.
 - El editor de facturas usa un flujo por secciones con selector de productos, líneas y totales automáticos, y abre una vista previa limpia tras emitir para imprimir o guardar en PDF.
+- La serie de facturación queda configurada por empresa en el perfil fiscal; la factura toma automáticamente los datos de la empresa activa y permite crear o actualizar el cliente desde el propio formulario.
 
 ### Fixed
 

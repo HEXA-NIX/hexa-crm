@@ -13,6 +13,7 @@
   import { showToast } from "$lib/stores/ui";
   import {
     currentUser,
+    activeCompany,
     isAdmin,
     session,
     clearSession,
@@ -746,6 +747,14 @@
                 options={VAT_RATES.map((r) => ({ value: String(r), label: vatLabel(r) }))}
               />
             </div>
+            {#if $activeCompany}
+              <div class="mt-5 rounded-xl border border-cyan-400/20 bg-cyan-400/[0.05] p-4">
+                <p class="section-label mb-1 !text-cyan-300/80">Empresa emisora</p>
+                <p class="font-medium text-[var(--color-text)]">{$activeCompany.legal_name}</p>
+                <p class="mt-1 text-sm text-[var(--color-muted)]">NIF: {$activeCompany.nif || "Sin configurar"} · Nombre comercial: {$activeCompany.trade_name}</p>
+                <p class="mt-2 text-xs text-[var(--color-muted-dim)]">Estos datos se toman automáticamente de la empresa activa y aparecen en las facturas. No tendrás que escribirlos al emitir.</p>
+              </div>
+            {/if}
             <p class="mt-4 text-xs text-[var(--color-muted-dim)]">
               Los cambios de nombre e IVA no se aplican hasta pulsar «Guardar ajustes».
             </p>
