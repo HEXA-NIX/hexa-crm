@@ -19,6 +19,8 @@ import type {
   FiscalProfile,
   Invoice,
   InvoiceInput,
+  InvoicePayment,
+  InvoicePaymentInput,
   Model303Draft,
   DashboardStats,
   InventoryMovement,
@@ -55,7 +57,7 @@ import type {
   WorkStatus,
 } from "../types";
 import { buildModel303Draft } from "../taxes/model303";
-import { buildInvoiceFromSale } from "../invoicing/invoice";
+import { buildInvoiceFromSale, buildRectifyingInvoice } from "../invoicing/invoice";
 import {
   PLUGIN_CATALOG,
   listStripeTools,
@@ -163,6 +165,7 @@ type Store = {
   cash: CashMovement[];
   expenses: ExpenseDocument[];
   invoices: Invoice[];
+  invoicePayments: InvoicePayment[];
   fiscalProfiles: FiscalProfile[];
   stockMovements: {
     id: number;
@@ -191,6 +194,7 @@ type Store = {
     cash: number;
     expense: number;
     invoice: number;
+    invoicePayment: number;
     stock: number;
     user: number;
     company: number;
@@ -360,6 +364,7 @@ function seed(): Store {
     cash: [],
     expenses: [],
     invoices: [],
+    invoicePayments: [],
     fiscalProfiles: [],
     stockMovements: [],
     warehouses: [],
@@ -382,6 +387,7 @@ function seed(): Store {
       cash: 0,
       expense: 0,
       invoice: 0,
+      invoicePayment: 0,
       stock: 0,
       user: 0,
       company: 2,
@@ -445,6 +451,8 @@ function load(): Store {
     if (!memoryStore.pluginAuditLogs) memoryStore.pluginAuditLogs = [];
     if (!memoryStore.fiscalProfiles) memoryStore.fiscalProfiles = [];
     if (!memoryStore.invoices) memoryStore.invoices = [];
+    if (!memoryStore.invoicePayments) memoryStore.invoicePayments = [];
+    if (memoryStore.seq.invoicePayment == null) memoryStore.seq.invoicePayment = memoryStore.invoicePayments.length;
     if (memoryStore.seq.warehouse == null) memoryStore.seq.warehouse = 0;
     if (memoryStore.seq.stockLocation == null) memoryStore.seq.stockLocation = 0;
     if (memoryStore.seq.inventoryMovement == null) memoryStore.seq.inventoryMovement = 0;
@@ -494,6 +502,7 @@ function load(): Store {
     if (!parsed.expenses) parsed.expenses = [];
     if (!parsed.fiscalProfiles) parsed.fiscalProfiles = [];
     if (!parsed.invoices) parsed.invoices = [];
+    if (!parsed.invoicePayments) parsed.invoicePayments = [];
     if (!parsed.seq) {
       parsed.seq = {
         product: 0,
@@ -503,6 +512,7 @@ function load(): Store {
         cash: 0,
         expense: 0,
         invoice: 0,
+        invoicePayment: 0,
         stock: 0,
         user: 0,
         company: 0,
@@ -518,6 +528,7 @@ function load(): Store {
     if (parsed.seq.user == null) parsed.seq.user = parsed.users.length;
     if (parsed.seq.expense == null) parsed.seq.expense = parsed.expenses.length;
     if (parsed.seq.invoice == null) parsed.seq.invoice = parsed.invoices.length;
+    if (parsed.seq.invoicePayment == null) parsed.seq.invoicePayment = parsed.invoicePayments.length;
     if (parsed.seq.company == null) parsed.seq.company = parsed.companies?.length ?? 0;
     if (parsed.seq.warehouse == null) parsed.seq.warehouse = parsed.warehouses.length;
     if (parsed.seq.stockLocation == null) parsed.seq.stockLocation = parsed.stockLocations.length;
@@ -2028,6 +2039,24 @@ export const browserApi = {
     const user = requireSession(s, token);
     ensureCompanies(s);
     const cid = sessionCompanyId(s, token);
+    if (input.rectifies_invoice_id) {
+      const base = s.invoices.find((item) => item.id === input.rectifies_invoice_id && item.company_id === cid);
+      if (!base) throw new Error("Factura original no encontrada");
+      if (base.status !== "issued") throw new Error("Solo se pueden rectificar facturas emitidas");
+      const company = s.companies.find((item) => item.id === cid);
+      if (!company) throw new Error("Empresa no encontrada");
+      const series = (input.series ?? base.series).trim().toUpperCase() || base.series;
+      const year = new Date().getFullYear();
+      const count = s.invoices.filter((item) => item.company_id === cid && item.series === series && item.issued_at.startsWith(String(year))).length + 1;
+      s.seq.invoice += 1;
+      const rectifying = buildRectifyingInvoice({ id: s.seq.invoice, base, number: `${year}-${String(count).padStart(5, "0")}`, created_by: user.id, notes: input.notes });
+      rectifying.series = series;
+      rectifying.operation_date = input.operation_date || base.operation_date;
+      s.invoices.push(rectifying);
+      save(s);
+      return { ...rectifying };
+    }
+    if (!input.sale_id) throw new Error("La venta es obligatoria");
     const sale = s.sales.find((item) => item.id === input.sale_id && (item.company_id ?? 1) === cid);
     if (!sale) throw new Error("Venta no encontrada");
     const existing = s.invoices.find((item) => item.sale_id === sale.id && item.status !== "cancelled");
@@ -2056,6 +2085,35 @@ export const browserApi = {
     invoice.updated_at = now();
     save(s);
     return { ...invoice };
+  },
+
+  list_invoice_payments(invoiceId: number, token?: string | null): InvoicePayment[] {
+    const s = load();
+    const cid = sessionCompanyId(s, token);
+    return s.invoicePayments.filter((payment) => payment.invoice_id === invoiceId && payment.company_id === cid).sort((a, b) => b.paid_at.localeCompare(a.paid_at));
+  },
+
+  add_invoice_payment(input: InvoicePaymentInput, token?: string | null): InvoicePayment {
+    const s = load();
+    const user = requireSession(s, token);
+    const cid = sessionCompanyId(s, token);
+    const invoice = s.invoices.find((item) => item.id === input.invoice_id && item.company_id === cid);
+    if (!invoice) throw new Error("Factura no encontrada");
+    if (invoice.status !== "issued") throw new Error("Solo se pueden cobrar facturas emitidas");
+    const amount = Math.round(Number(input.amount_cents));
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error("El importe debe ser mayor que cero");
+    if (amount > invoice.total_cents - invoice.paid_cents) throw new Error("El cobro supera el importe pendiente");
+    const paid_at = input.paid_at || now();
+    s.seq.invoicePayment += 1;
+    const payment: InvoicePayment = { id: s.seq.invoicePayment, invoice_id: invoice.id, company_id: cid, amount_cents: amount, paid_at, method: input.method ?? "bank_transfer", notes: input.notes?.trim() ?? "", created_by: user.id };
+    s.invoicePayments.push(payment);
+    invoice.paid_cents += amount;
+    invoice.payment_status = invoice.paid_cents >= invoice.total_cents ? "paid" : "partial";
+    invoice.updated_at = now();
+    s.seq.cash += 1;
+    s.cash.push({ id: s.seq.cash, company_id: cid, project_id: null, kind: "income", amount_cents: amount, category: "cobro_factura", description: `Cobro ${invoice.series}-${invoice.number}`, sale_id: invoice.sale_id, occurred_at: paid_at });
+    save(s);
+    return payment;
   },
 
   create_cash_movement(input: CashInput, token?: string | null): CashMovement {
@@ -2422,6 +2480,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     const workItems = Array.isArray(payload.workItems) ? payload.workItems : [];
     const expenses = Array.isArray(payload.expenses) ? payload.expenses : [];
     const invoices = Array.isArray(payload.invoices) ? payload.invoices : [];
+    const invoicePayments = Array.isArray(payload.invoicePayments) ? payload.invoicePayments : [];
     const seq = {
       product: payload.seq?.product ?? 0,
       customer: payload.seq?.customer ?? 0,
@@ -2430,6 +2489,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       cash: payload.seq?.cash ?? 0,
       expense: payload.seq?.expense ?? expenses.length,
       invoice: payload.seq?.invoice ?? invoices.length,
+      invoicePayment: payload.seq?.invoicePayment ?? invoicePayments.length,
       stock: payload.seq?.stock ?? 0,
       user: payload.seq?.user ?? 0,
       company: payload.seq?.company ?? 0,
@@ -2453,6 +2513,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       workItems,
       expenses,
       invoices,
+      invoicePayments,
       seq,
       sessions: {},
     });

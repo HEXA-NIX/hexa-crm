@@ -40,6 +40,7 @@ export function buildInvoiceFromSale(input: {
     kind,
     status: "issued",
     issued_at,
+    operation_date: input.invoice.operation_date || input.sale.sold_at.slice(0, 10),
     due_at: input.invoice.due_at ?? null,
     seller_legal_name: input.company.legal_name,
     seller_nif: input.company.nif,
@@ -54,7 +55,46 @@ export function buildInvoiceFromSale(input: {
     irpf_rate,
     irpf_cents,
     total_cents: base_cents + vat_cents - irpf_cents,
+    paid_cents: 0,
+    payment_status: "pending",
     notes: input.invoice.notes?.trim() ?? "",
+    created_by: input.created_by,
+    created_at: issued_at,
+    updated_at: issued_at,
+  };
+}
+
+export function buildRectifyingInvoice(input: {
+  id: number;
+  base: Invoice;
+  number: string;
+  created_by: number;
+  issued_at?: string;
+  notes?: string;
+}): Invoice {
+  const issued_at = input.issued_at ?? new Date().toISOString();
+  const lines = input.base.lines.map((line) => ({ ...line, base_cents: -Math.abs(line.base_cents), vat_cents: -Math.abs(line.vat_cents), total_cents: -Math.abs(line.total_cents) }));
+  const base_cents = -Math.abs(input.base.base_cents);
+  const vat_cents = -Math.abs(input.base.vat_cents);
+  const irpf_cents = -Math.abs(input.base.irpf_cents);
+  return {
+    ...input.base,
+    id: input.id,
+    sale_id: input.base.sale_id,
+    number: input.number,
+    kind: "rectifying",
+    status: "issued",
+    issued_at,
+    operation_date: input.base.operation_date,
+    due_at: null,
+    lines,
+    base_cents,
+    vat_cents,
+    irpf_cents,
+    total_cents: base_cents + vat_cents - irpf_cents,
+    paid_cents: 0,
+    payment_status: "pending",
+    notes: input.notes?.trim() || `Rectifica ${input.base.series}-${input.base.number}`,
     created_by: input.created_by,
     created_at: issued_at,
     updated_at: issued_at,

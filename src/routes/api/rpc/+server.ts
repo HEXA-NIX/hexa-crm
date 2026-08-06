@@ -180,6 +180,8 @@ export const POST: RequestHandler = async ({ request }) => {
       case "list_invoices": result = await postgresApi.list_invoices(token); break;
       case "issue_invoice": result = await postgresApi.issue_invoice(args?.input, token); break;
       case "cancel_invoice": result = await postgresApi.cancel_invoice(Number(args?.id), token); break;
+      case "list_invoice_payments": result = await postgresApi.list_invoice_payments(Number(args?.invoice_id), token); break;
+      case "add_invoice_payment": result = await postgresApi.add_invoice_payment(args?.input, token); break;
       case "sync_whatsapp_expense": result = await postgresApi.sync_whatsapp_expense(token, args?.kind); break;
       case "get_cash_balance":
         result = await postgresApi.get_cash_balance(token);

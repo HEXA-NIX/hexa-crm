@@ -36,6 +36,8 @@ import type {
   FiscalProfile,
   Invoice,
   InvoiceInput,
+  InvoicePayment,
+  InvoicePaymentInput,
   Model303Draft,
   DashboardStats,
   InventoryMovement,
@@ -69,7 +71,7 @@ import type {
   WorkProjectInput,
 } from "../types";
 import { buildModel303Draft } from "../taxes/model303";
-import { buildInvoiceFromSale } from "../invoicing/invoice";
+import { buildInvoiceFromSale, buildRectifyingInvoice } from "../invoicing/invoice";
 import {
   billingByCompany,
   canAccessCompany,
@@ -433,11 +435,23 @@ export async function initDb() {
       customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, customer_name TEXT NOT NULL DEFAULT '', customer_nif TEXT NOT NULL DEFAULT '', customer_email TEXT NOT NULL DEFAULT '',
       lines JSONB NOT NULL DEFAULT '[]'::jsonb, base_cents INTEGER NOT NULL DEFAULT 0, vat_cents INTEGER NOT NULL DEFAULT 0,
       irpf_rate NUMERIC(5,2) NOT NULL DEFAULT 0, irpf_cents INTEGER NOT NULL DEFAULT 0, total_cents INTEGER NOT NULL DEFAULT 0,
+      paid_cents INTEGER NOT NULL DEFAULT 0, payment_status TEXT NOT NULL DEFAULT 'pending', operation_date DATE NOT NULL DEFAULT CURRENT_DATE,
       notes TEXT NOT NULL DEFAULT '', created_by INTEGER NOT NULL, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(), updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
       UNIQUE(company_id, series, number)
     );
   `;
+  await sql`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS operation_date DATE NOT NULL DEFAULT CURRENT_DATE`;
+  await sql`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS paid_cents INTEGER NOT NULL DEFAULT 0`;
+  await sql`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS payment_status TEXT NOT NULL DEFAULT 'pending'`;
   await sql`CREATE INDEX IF NOT EXISTS idx_invoices_company ON invoices(company_id, issued_at DESC)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS invoice_payments (
+      id SERIAL PRIMARY KEY, invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE, amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+      paid_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(), method TEXT NOT NULL DEFAULT 'bank_transfer', notes TEXT NOT NULL DEFAULT '', created_by INTEGER NOT NULL
+    );
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_invoice_payments_invoice ON invoice_payments(invoice_id, paid_at DESC)`;
   await sql`
     CREATE TABLE IF NOT EXISTS whatsapp_expense_pending (
       id BIGSERIAL PRIMARY KEY, company_id BIGINT NOT NULL, user_id BIGINT NOT NULL,
@@ -1181,11 +1195,11 @@ function formatInvoice(r: any): Invoice {
   return {
     id: Number(r.id), company_id: Number(r.company_id), sale_id: r.sale_id == null ? null : Number(r.sale_id),
     series: r.series, number: r.number, kind: r.kind, status: r.status,
-    issued_at: toIso(r.issued_at), due_at: toIso(r.due_at) || null,
+    issued_at: toIso(r.issued_at), operation_date: toIso(r.operation_date).slice(0, 10), due_at: toIso(r.due_at) || null,
     seller_legal_name: r.seller_legal_name ?? "", seller_nif: r.seller_nif ?? "", seller_trade_name: r.seller_trade_name ?? "",
     customer_id: r.customer_id == null ? null : Number(r.customer_id), customer_name: r.customer_name ?? "", customer_nif: r.customer_nif ?? "", customer_email: r.customer_email ?? "",
     lines: Array.isArray(r.lines) ? r.lines : [], base_cents: Number(r.base_cents ?? 0), vat_cents: Number(r.vat_cents ?? 0),
-    irpf_rate: Number(r.irpf_rate ?? 0), irpf_cents: Number(r.irpf_cents ?? 0), total_cents: Number(r.total_cents ?? 0), notes: r.notes ?? "",
+    irpf_rate: Number(r.irpf_rate ?? 0), irpf_cents: Number(r.irpf_cents ?? 0), total_cents: Number(r.total_cents ?? 0), paid_cents: Number(r.paid_cents ?? 0), payment_status: r.payment_status ?? "pending", notes: r.notes ?? "",
     created_by: Number(r.created_by), created_at: toIso(r.created_at), updated_at: toIso(r.updated_at),
   };
 }
@@ -2549,6 +2563,22 @@ export const postgresApi = {
   async issueInvoice(input: InvoiceInput, token: string | null): Promise<Invoice> {
     const user = await requireSession(token);
     const companyId = await resolveActiveCompanyId(token, user.id);
+    if (input.rectifies_invoice_id) {
+      const baseRows = await sql`SELECT * FROM invoices WHERE id=${input.rectifies_invoice_id} AND company_id=${companyId}`;
+      if (!baseRows.length) throw new Error("Factura original no encontrada");
+      const base = formatInvoice(baseRows[0]);
+      if (base.status !== "issued") throw new Error("Solo se pueden rectificar facturas emitidas");
+      const issuedAt = new Date().toISOString();
+      const series = (input.series ?? base.series).trim().toUpperCase() || base.series;
+      const countRows = await sql`SELECT COUNT(*)::int AS count FROM invoices WHERE company_id=${companyId} AND series=${series} AND issued_at >= ${new Date(`${issuedAt.slice(0, 4)}-01-01T00:00:00Z`)}`;
+      const number = `${issuedAt.slice(0, 4)}-${String(Number(countRows[0]?.count ?? 0) + 1).padStart(5, "0")}`;
+      const invoice = buildRectifyingInvoice({ id: 0, base, number, created_by: user.id, issued_at: issuedAt, notes: input.notes });
+      invoice.series = series;
+      invoice.operation_date = input.operation_date || base.operation_date;
+      const rows = await sql`INSERT INTO invoices (company_id,sale_id,series,number,kind,status,issued_at,operation_date,due_at,seller_legal_name,seller_nif,seller_trade_name,customer_id,customer_name,customer_nif,customer_email,lines,base_cents,vat_cents,irpf_rate,irpf_cents,total_cents,paid_cents,payment_status,notes,created_by) VALUES (${companyId},${invoice.sale_id},${invoice.series},${invoice.number},${invoice.kind},${invoice.status},${invoice.issued_at},${invoice.operation_date},${invoice.due_at},${invoice.seller_legal_name},${invoice.seller_nif},${invoice.seller_trade_name},${invoice.customer_id},${invoice.customer_name},${invoice.customer_nif},${invoice.customer_email},${sql.json(invoice.lines as any)},${invoice.base_cents},${invoice.vat_cents},${invoice.irpf_rate},${invoice.irpf_cents},${invoice.total_cents},0,'pending',${invoice.notes},${user.id}) RETURNING *`;
+      return formatInvoice(rows[0]);
+    }
+    if (!input.sale_id) throw new Error("La venta es obligatoria");
     const saleRows = await sql`SELECT * FROM sales WHERE id = ${input.sale_id} AND company_id = ${companyId}`;
     if (!saleRows.length) throw new Error("Venta no encontrada");
     const existingRows = await sql`SELECT * FROM invoices WHERE sale_id = ${input.sale_id} AND company_id = ${companyId} AND status <> 'cancelled' LIMIT 1`;
@@ -2571,7 +2601,7 @@ export const postgresApi = {
       id: 0, company: { id: company.id, code: company.code, legal_name: company.legal_name, trade_name: company.trade_name, nif: company.nif, kind: company.kind, active: company.active, created_at: toIso(company.created_at) },
       customer, sale: sale as any, lines: linesRows as any, invoice: input, created_by: user.id, number, issued_at: issuedAt, profile: profileRows[0] ? formatFiscalProfile(profileRows[0]) : null,
     });
-    const rows = await sql`INSERT INTO invoices (company_id,sale_id,series,number,kind,status,issued_at,due_at,seller_legal_name,seller_nif,seller_trade_name,customer_id,customer_name,customer_nif,customer_email,lines,base_cents,vat_cents,irpf_rate,irpf_cents,total_cents,notes,created_by) VALUES (${companyId},${invoice.sale_id},${invoice.series},${invoice.number},${invoice.kind},${invoice.status},${invoice.issued_at},${invoice.due_at},${invoice.seller_legal_name},${invoice.seller_nif},${invoice.seller_trade_name},${invoice.customer_id},${invoice.customer_name},${invoice.customer_nif},${invoice.customer_email},${sql.json(invoice.lines as any)},${invoice.base_cents},${invoice.vat_cents},${invoice.irpf_rate},${invoice.irpf_cents},${invoice.total_cents},${invoice.notes},${user.id}) RETURNING *`;
+    const rows = await sql`INSERT INTO invoices (company_id,sale_id,series,number,kind,status,issued_at,operation_date,due_at,seller_legal_name,seller_nif,seller_trade_name,customer_id,customer_name,customer_nif,customer_email,lines,base_cents,vat_cents,irpf_rate,irpf_cents,total_cents,paid_cents,payment_status,notes,created_by) VALUES (${companyId},${invoice.sale_id},${invoice.series},${invoice.number},${invoice.kind},${invoice.status},${invoice.issued_at},${invoice.operation_date},${invoice.due_at},${invoice.seller_legal_name},${invoice.seller_nif},${invoice.seller_trade_name},${invoice.customer_id},${invoice.customer_name},${invoice.customer_nif},${invoice.customer_email},${sql.json(invoice.lines as any)},${invoice.base_cents},${invoice.vat_cents},${invoice.irpf_rate},${invoice.irpf_cents},${invoice.total_cents},0,'pending',${invoice.notes},${user.id}) RETURNING *`;
     return formatInvoice(rows[0]);
   },
 
@@ -2582,6 +2612,32 @@ export const postgresApi = {
     if (!rows.length) throw new Error("Factura no encontrada");
     void user;
     return formatInvoice(rows[0]);
+  },
+
+  async listInvoicePayments(invoiceId: number, token: string | null): Promise<InvoicePayment[]> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const rows = await sql`SELECT * FROM invoice_payments WHERE invoice_id=${invoiceId} AND company_id=${companyId} ORDER BY paid_at DESC, id DESC`;
+    return rows.map((row: any) => ({ id: Number(row.id), invoice_id: Number(row.invoice_id), company_id: Number(row.company_id), amount_cents: Number(row.amount_cents), paid_at: toIso(row.paid_at), method: row.method, notes: row.notes ?? "", created_by: Number(row.created_by) }));
+  },
+
+  async addInvoicePayment(input: InvoicePaymentInput, token: string | null): Promise<InvoicePayment> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const amount = Math.round(Number(input.amount_cents));
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error("El importe debe ser mayor que cero");
+    const invoiceRows = await sql`SELECT * FROM invoices WHERE id=${input.invoice_id} AND company_id=${companyId}`;
+    if (!invoiceRows.length) throw new Error("Factura no encontrada");
+    const invoice = formatInvoice(invoiceRows[0]);
+    if (invoice.status !== "issued") throw new Error("Solo se pueden cobrar facturas emitidas");
+    if (amount > invoice.total_cents - invoice.paid_cents) throw new Error("El cobro supera el importe pendiente");
+    const paidAt = input.paid_at || new Date().toISOString();
+    const rows = await sql`INSERT INTO invoice_payments (invoice_id,company_id,amount_cents,paid_at,method,notes,created_by) VALUES (${invoice.id},${companyId},${amount},${paidAt},${input.method ?? "bank_transfer"},${input.notes ?? ""},${user.id}) RETURNING *`;
+    const paidCents = invoice.paid_cents + amount;
+    await sql`UPDATE invoices SET paid_cents=${paidCents}, payment_status=${paidCents >= invoice.total_cents ? "paid" : "partial"}, updated_at=NOW() WHERE id=${invoice.id} AND company_id=${companyId}`;
+    await sql`INSERT INTO cash_movements (company_id,kind,amount_cents,category,description,sale_id,occurred_at) VALUES (${companyId},'income',${amount},'cobro_factura',${`Cobro ${invoice.series}-${invoice.number}`},${invoice.sale_id},${paidAt})`;
+    const row = rows[0];
+    return { id: Number(row.id), invoice_id: Number(row.invoice_id), company_id: Number(row.company_id), amount_cents: Number(row.amount_cents), paid_at: toIso(row.paid_at), method: row.method, notes: row.notes ?? "", created_by: Number(row.created_by) };
   },
 
   async listExpenseDocuments(token: string | null): Promise<ExpenseDocument[]> {
@@ -4008,6 +4064,8 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   list_invoices(token?: string | null) { return this.listInvoices(token ?? null); },
   issue_invoice(input: InvoiceInput, token?: string | null) { return this.issueInvoice(input, token ?? null); },
   cancel_invoice(id: number, token?: string | null) { return this.cancelInvoice(id, token ?? null); },
+  list_invoice_payments(invoiceId: number, token?: string | null) { return this.listInvoicePayments(invoiceId, token ?? null); },
+  add_invoice_payment(input: InvoicePaymentInput, token?: string | null) { return this.addInvoicePayment(input, token ?? null); },
   list_fiscal_profiles(token?: string | null) { return this.listFiscalProfiles(token ?? null); },
   upsert_fiscal_profile(input: any, token?: string | null) { return this.upsertFiscalProfile(input, token ?? null); },
   model303_draft(from: string, to: string, token?: string | null) { return this.model303Draft(from, to, token ?? null); },

@@ -279,6 +279,7 @@ export type Invoice = {
   kind: InvoiceKind;
   status: InvoiceStatus;
   issued_at: string;
+  operation_date: string;
   due_at: string | null;
   seller_legal_name: string;
   seller_nif: string;
@@ -293,17 +294,38 @@ export type Invoice = {
   irpf_rate: number;
   irpf_cents: number;
   total_cents: number;
+  paid_cents: number;
+  payment_status: "pending" | "partial" | "paid";
   notes: string;
   created_by: number;
   created_at: string;
   updated_at: string;
 };
 export type InvoiceInput = {
-  sale_id: number;
+  sale_id?: number;
   series?: string;
   kind?: InvoiceKind;
+  rectifies_invoice_id?: number | null;
+  operation_date?: string | null;
   due_at?: string | null;
   irpf_rate?: number;
+  notes?: string;
+};
+export type InvoicePayment = {
+  id: number;
+  invoice_id: number;
+  company_id: number;
+  amount_cents: number;
+  paid_at: string;
+  method: "cash" | "bank_transfer" | "card" | "other";
+  notes: string;
+  created_by: number;
+};
+export type InvoicePaymentInput = {
+  invoice_id: number;
+  amount_cents: number;
+  paid_at?: string | null;
+  method?: InvoicePayment["method"];
   notes?: string;
 };
 
