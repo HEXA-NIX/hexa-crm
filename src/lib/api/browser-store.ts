@@ -30,6 +30,8 @@ import type {
   Sale,
   SaleLineInput,
   Settings,
+  StorageUploadInput,
+  StorageUploadResult,
   StockBalance,
   StockLocation,
   TenantPlugin,
@@ -64,6 +66,10 @@ import {
   seedCompanyMembers,
 } from "../company/context";
 import { normalizeProjectDocuments, validateProjectDocuments } from "../projects/project-documents";
+import { normalizeProjectBrief, normalizeProjectPrd, normalizeTechStack } from "../projects/project-brief";
+import { validateProjectLogo } from "../projects/project-logo";
+import { validateUserAvatar } from "../users/user-avatar";
+import { decodeBase64File, testGoogleDrive, uploadToGoogleDrive } from "../storage/google-drive";
 import type { VatRate } from "../vat";
 import { isVatRate, splitInclusive } from "../vat";
 import { hashCredential, hashPin, validatePin, verifyCredential } from "../auth/pin";
@@ -207,6 +213,7 @@ async function defaultUsers(t: string): Promise<StoredUser[]> {
       id: 1,
       username: "admin",
       display_name: "Administrador",
+      phone: "",
       role: "admin",
       active: true,
       created_at: t,
@@ -218,6 +225,7 @@ async function defaultUsers(t: string): Promise<StoredUser[]> {
       id: 2,
       username: "cajero",
       display_name: "Cajero",
+      phone: "",
       role: "cajero",
       active: true,
       created_at: t,
@@ -373,6 +381,8 @@ function seed(): Store {
 function normalizeUser(u: StoredUser): StoredUser {
   return {
     ...u,
+    phone: u.phone ?? "",
+    avatar_data_url: u.avatar_data_url ?? "",
     must_change_password: !!u.must_change_password,
     temp_password_issued_at: u.temp_password_issued_at ?? null,
   };
@@ -393,6 +403,10 @@ function normalizeWorkProject(project: WorkProject): WorkProject {
     revenue_target_date: project.revenue_target_date ?? null,
     revenue_milestones: project.revenue_milestones ?? [],
     documents: Array.isArray(project.documents) ? project.documents : [],
+    prd: normalizeProjectPrd(project.prd),
+    tech_stack: normalizeTechStack(project.tech_stack),
+    brief: normalizeProjectBrief(project.brief, project.tech_stack),
+    logo_data_url: project.logo_data_url ?? "",
   };
 }
 
@@ -506,6 +520,22 @@ function save(s: Store) {
   if (typeof localStorage !== "undefined") {
     localStorage.setItem(KEY, JSON.stringify(s));
   }
+}
+
+function localPluginSecretKey(companyId: number, pluginKey: PluginKey): string {
+  return `hexa-crm-plugin-secret:${companyId}:${pluginKey}`;
+}
+
+function setLocalPluginSecret(companyId: number, pluginKey: PluginKey, secret: string | null) {
+  if (typeof sessionStorage === "undefined") return;
+  const key = localPluginSecretKey(companyId, pluginKey);
+  if (secret) sessionStorage.setItem(key, secret);
+  else sessionStorage.removeItem(key);
+}
+
+function getLocalPluginSecret(companyId: number, pluginKey: PluginKey): string {
+  if (typeof sessionStorage === "undefined") return "";
+  return sessionStorage.getItem(localPluginSecretKey(companyId, pluginKey)) ?? "";
 }
 
 /** Test helper: wipe store. */
@@ -712,6 +742,8 @@ function publicUser(u: StoredUser): AuthUser {
     id: u.id,
     username: u.username,
     display_name: u.display_name,
+    phone: u.phone ?? "",
+    avatar_data_url: u.avatar_data_url ?? "",
     role: u.role,
     active: u.active,
     created_at: u.created_at,
@@ -776,6 +808,7 @@ function populateWorkItem(item: WorkItem, s: Store): WorkItem {
     parent_id: item.parent_id ?? null,
     category: category ? { ...category } : null,
     assignee_name: assignee ? assignee.display_name : null,
+    assignee_avatar_data_url: assignee?.avatar_data_url ?? null,
     parent_title: parent?.title ?? null,
   };
 }
@@ -797,8 +830,10 @@ function syncWorkItemParent(s: Store, child: WorkItem, timestamp: string) {
     ? "done"
     : children.some((item) => item.status === "blocked")
       ? "blocked"
-      : children.some((item) => item.status === "in_progress")
-        ? "in_progress"
+      : children.some((item) => item.status === "validation")
+        ? "validation"
+        : children.some((item) => item.status === "in_progress")
+          ? "in_progress"
         : children.some((item) => item.status === "planned")
           ? "planned"
           : "inbox";
@@ -862,7 +897,11 @@ function tenantPluginLocal(s: Store, companyId: number, key: PluginKey): TenantP
   );
   const config = sanitizePluginConfig(key, stored?.config ?? definition.defaultConfig);
   const enabled = !!stored?.enabled;
-  const secretConfigured = key === "stripe_mcp" ? !!stored?.secret_configured : true;
+  const secretConfigured = key === "google_drive"
+    ? !!stored?.secret_configured && !!getLocalPluginSecret(companyId, key)
+    : key === "stripe_mcp"
+      ? !!stored?.secret_configured
+      : true;
   const logs = (s.pluginAuditLogs || []).filter(
     (l) => l.company_id === companyId && l.plugin_key === key,
   );
@@ -1003,6 +1042,8 @@ export const browserApi = {
     const role: UserRole = input.role === "cajero" ? "cajero" : "admin";
     const username = input.username.trim().toLowerCase();
     if (!username) throw new Error("Usuario obligatorio");
+    const avatarError = validateUserAvatar(input.avatar_data_url);
+    if (avatarError) throw new Error(avatarError);
 
     if (input.id) {
       const i = s.users.findIndex((u) => u.id === input.id);
@@ -1019,6 +1060,8 @@ export const browserApi = {
         ...s.users[i],
         username,
         display_name: input.display_name.trim() || username,
+        phone: input.phone?.trim() ?? s.users[i].phone ?? "",
+        avatar_data_url: input.avatar_data_url ?? s.users[i].avatar_data_url ?? "",
         role,
         active: input.active ?? s.users[i].active,
       };
@@ -1058,6 +1101,8 @@ export const browserApi = {
       id: s.seq.user,
       username,
       display_name: input.display_name.trim() || username,
+      phone: input.phone?.trim() ?? "",
+      avatar_data_url: input.avatar_data_url ?? "",
       role,
       active: input.active ?? true,
       created_at: now(),
@@ -2279,6 +2324,8 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       const documentError = validateProjectDocuments(input.documents);
       if (documentError) throw new Error(documentError);
     }
+    const logoError = validateProjectLogo(input.logo_data_url);
+    if (logoError) throw new Error(logoError);
     if (input.value_cents !== undefined && input.value_cents < 0) {
       throw new Error("El valor del proyecto no puede ser negativo.");
     }
@@ -2287,14 +2334,17 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     }
     if (input.revenue_milestones) {
       const minimumMonth = new Date().toISOString().slice(0, 7);
+      const milestoneMonths = new Set<string>();
       for (const milestone of input.revenue_milestones) {
         if (
           milestone.amount_cents <= 0 ||
           !/^\d{4}-\d{2}$/.test(milestone.target_month) ||
-          milestone.target_month < minimumMonth
+          milestone.target_month < minimumMonth ||
+          milestoneMonths.has(milestone.target_month)
         ) {
-          throw new Error("Cada hito mensual debe tener un importe y un mes válidos.");
+          throw new Error("Cada hito mensual debe tener un importe y un mes futuro no repetido.");
         }
+        milestoneMonths.add(milestone.target_month);
       }
     }
     const customerId = input.customer_id !== undefined
@@ -2352,6 +2402,11 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       if (input.documents !== undefined) {
         existing.documents = normalizeProjectDocuments(input.documents, nowTs);
       }
+      if (input.requests !== undefined) existing.requests = input.requests;
+      if (input.prd !== undefined) existing.prd = normalizeProjectPrd(input.prd);
+      if (input.tech_stack !== undefined) existing.tech_stack = normalizeTechStack(input.tech_stack);
+      if (input.brief !== undefined) existing.brief = normalizeProjectBrief(input.brief, existing.tech_stack);
+      if (input.logo_data_url !== undefined) existing.logo_data_url = input.logo_data_url;
       if (input.description !== undefined) existing.description = input.description;
       if (input.status !== undefined) existing.status = input.status;
       existing.start_date = startDate;
@@ -2376,6 +2431,11 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
           target_month: milestone.target_month,
         })),
         documents: normalizeProjectDocuments(input.documents ?? [], nowTs),
+        requests: input.requests ?? [],
+        prd: normalizeProjectPrd(input.prd),
+        tech_stack: normalizeTechStack(input.tech_stack),
+        brief: normalizeProjectBrief(input.brief, input.tech_stack),
+        logo_data_url: input.logo_data_url ?? "",
         name,
         description: input.description ?? "",
         status: input.status ?? "planned",
@@ -2551,6 +2611,9 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     }
 
     const targetStatus = input.status ?? existingItem?.status ?? "inbox";
+    if (targetStatus === "done" && existingItem?.status !== "validation" && existingItem?.status !== "done") {
+      throw new Error("La tarea debe pasar por Validación antes de marcarla como hecha.");
+    }
     const sourceType = input.source_type !== undefined ? input.source_type : (existingItem?.source_type ?? null);
     const sourceKey = input.source_key !== undefined ? input.source_key : (existingItem?.source_key ?? null);
     const isActive = targetStatus !== "done" && targetStatus !== "archived";
@@ -2594,6 +2657,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       existingItem.source_type = sourceType;
       existingItem.source_key = sourceKey;
       if (input.source_href !== undefined) existingItem.source_href = input.source_href;
+      if (input.review_messages !== undefined) existingItem.review_messages = input.review_messages;
       existingItem.completed_at = completed_at;
       existingItem.updated_at = nowTs;
       savedItem = existingItem;
@@ -2619,6 +2683,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
         source_key: sourceKey,
         source_href: input.source_href ?? null,
         completed_at,
+        review_messages: input.review_messages ?? [],
         created_at: nowTs,
         updated_at: nowTs,
       };
@@ -2862,14 +2927,16 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     const existing = index >= 0 ? s.tenantPlugins[index] : null;
 
     let secretConfigured = existing?.secret_configured ?? false;
-    if (pluginKey === "stripe_mcp" && action) {
+    if ((pluginKey === "stripe_mcp" || pluginKey === "google_drive") && action) {
       if (action === "save" || action === "replace") {
         if (!rawSecret || !rawSecret.trim()) {
-          throw new Error("Debes proporcionar una credencial válida de Stripe");
+          throw new Error(`Debes proporcionar una credencial válida de ${pluginKey === "google_drive" ? "Google Drive" : "Stripe"}`);
         }
         secretConfigured = true;
+        setLocalPluginSecret(companyId, pluginKey, rawSecret.trim());
       } else if (action === "remove") {
         secretConfigured = false;
+        setLocalPluginSecret(companyId, pluginKey, null);
       }
     }
 
@@ -2890,12 +2957,13 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     }
     save(s);
 
+    const secretLabel = pluginKey === "google_drive" ? "Google Drive" : "Stripe";
     const auditSummary = action === "remove"
-      ? "Credencial de Stripe eliminada"
+      ? `Credencial de ${secretLabel} eliminada`
       : action === "replace"
-        ? "Credencial de Stripe reemplazada"
+        ? `Credencial de ${secretLabel} reemplazada`
         : action === "save"
-          ? "Credencial de Stripe guardada"
+          ? `Credencial de ${secretLabel} guardada`
           : enabled
             ? "Configuración guardada y plugin activado"
             : "Plugin desactivado";
@@ -2936,8 +3004,8 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       throw new Error("Activa y guarda el plugin antes de probarlo");
     }
 
-    if (pluginKey === "stripe_mcp" && !plugin.secret_configured) {
-      const msg = "Ingresa y guarda la credencial de Stripe antes de probar la conexión";
+    if ((pluginKey === "stripe_mcp" || pluginKey === "google_drive") && !plugin.secret_configured) {
+      const msg = `Ingresa y guarda la credencial de ${pluginKey === "google_drive" ? "Google Drive" : "Stripe"} antes de probar la conexión`;
       pluginAuditLocal(
         s,
         companyId,
@@ -2959,6 +3027,12 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       stored.last_error = null;
       stored.updated_at = now();
       save(s);
+    }
+
+    if (pluginKey === "google_drive") {
+      const result = await testGoogleDrive(getLocalPluginSecret(companyId, pluginKey));
+      pluginAuditLocal(s, companyId, user.id, pluginKey, "connection_test_ok", null, "ok", result.message);
+      return result;
     }
 
     const testMsg =
@@ -2990,6 +3064,26 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       message: testMsg,
       details: { mode: "local", simulation: true, environment: plugin.config.environment ?? "sandbox" },
     };
+  },
+
+  async upload_project_file(input: StorageUploadInput, token?: string | null): Promise<StorageUploadResult> {
+    const s = load();
+    const user = requireAdmin(s, token);
+    const companyId = sessionCompanyId(s, token);
+    const project = s.workProjects.find((item) => item.id === input.project_id && item.company_id === companyId);
+    if (!project) throw new Error("Proyecto no encontrado");
+    if (input.provider !== "google_drive") throw new Error("Proveedor de almacenamiento no soportado");
+    const plugin = tenantPluginLocal(s, companyId, "google_drive");
+    if (!plugin.enabled || !plugin.secret_configured) {
+      throw new Error("Configura y activa Google Drive en Ajustes → Plugins");
+    }
+    const result = await uploadToGoogleDrive(plugin.config, getLocalPluginSecret(companyId, "google_drive"), {
+      name: input.name,
+      mime_type: input.mime_type,
+      bytes: decodeBase64File(input.content_base64),
+    });
+    pluginAuditLocal(s, companyId, user.id, "google_drive", "file_uploaded", null, "ok", `${result.name} (${result.size} bytes)`);
+    return result;
   },
 
   async list_plugin_tools(pluginKey: PluginKey, token?: string | null): Promise<any[]> {

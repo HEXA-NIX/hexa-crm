@@ -57,6 +57,18 @@ export const POST: RequestHandler = async ({ request }) => {
       case "session_me":
         result = await postgresApi.session_me(token);
         break;
+      case "whatsapp_status":
+        result = await postgresApi.whatsapp_status(token);
+        break;
+      case "whatsapp_login_qr":
+        result = await postgresApi.whatsapp_login_qr(token);
+        break;
+      case "whatsapp_logout":
+        result = await postgresApi.whatsapp_logout(token);
+        break;
+      case "whatsapp_send":
+        result = await postgresApi.whatsapp_send(String(args?.phone ?? ""), String(args?.message ?? ""), !!args?.confirmed, token);
+        break;
       case "list_companies":
         result = await postgresApi.list_companies(token, !!args?.include_all);
         break;
@@ -176,6 +188,9 @@ export const POST: RequestHandler = async ({ request }) => {
         break;
       case "update_settings":
         result = await postgresApi.update_settings(args?.partial, token);
+        break;
+      case "upload_project_file":
+        result = await postgresApi.upload_project_file(args?.input, token);
         break;
       case "ai_chat":
         result = await postgresApi.ai_chat(args?.messages, token);

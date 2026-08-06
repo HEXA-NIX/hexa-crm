@@ -10,6 +10,12 @@ describe("estructura UI de proyectos", () => {
     expect(PORTFOLIO).toMatch(/\{#if \$isAdmin\}[\s\S]*?\+ Nuevo proyecto/);
   });
 
+  it("muestra el logo compacto o la inicial en cada tarjeta del portafolio", () => {
+    expect(PORTFOLIO).toContain("data-project-card-logo");
+    expect(PORTFOLIO).toContain("project.logo_data_url");
+    expect(PORTFOLIO).toContain("project.name.trim().charAt(0)");
+  });
+
   it("ofrece limpieza de filtros y conserva las preferencias de vista", () => {
     expect(PORTFOLIO).toContain("clearFilters");
     expect(PORTFOLIO).toContain("hexa-projects-sort");
@@ -31,6 +37,31 @@ describe("estructura UI de proyectos", () => {
     expect(DETAIL).toContain("Documentación del proyecto");
     expect(DETAIL).toContain("saveProjectDocuments");
     expect(DETAIL).toContain("projectDocumentHref");
+    expect(DETAIL).toContain("data-project-document-dropzone");
+    expect(DETAIL).toContain("dropProjectDocument");
+    expect(DETAIL).toContain("data-project-logo-dropzone");
+  });
+
+  it("gestiona solicitudes y permite convertir las aceptadas en tareas", () => {
+    expect(DETAIL).toContain("data-project-requests");
+    expect(DETAIL).toContain("SOLICITUDES Y SUGERENCIAS");
+    expect(DETAIL).toContain("saveProjectRequest");
+    expect(DETAIL).toContain("convertRequestToTask");
+    expect(DETAIL).toContain("Convertir en tarea");
+  });
+
+  it("preselecciona al usuario de la sesión en el trabajo nuevo", () => {
+    expect(DETAIL).toContain('assignee_id: $currentUser?.id ? String($currentUser.id) : ""');
+    expect(DETAIL).toContain("assignee_id: $currentUser?.id ?? null");
+  });
+
+  it("incluye PRD y stack tecnológico en la ficha del proyecto", () => {
+    expect(DETAIL).toContain("data-project-technical-brief");
+    expect(DETAIL).toContain("Resumen y propósito");
+    expect(DETAIL).toContain("Stack tecnológico");
+    expect(DETAIL).toContain("Mapa tecnológico");
+    expect(DETAIL).toContain('size="fluid"');
+    expect(DETAIL).toContain('size="xl"');
   });
 
   it("dispone de una vista explícita para archivadas y Kanban móvil", () => {

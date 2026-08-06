@@ -7,6 +7,7 @@
 
 export type AjustesSectionId =
   | "cuenta"
+  | "whatsapp"
   | "tienda"
   | "equipo"
   | "ia"
@@ -38,6 +39,13 @@ export const AJUSTES_SECTIONS: readonly AjustesSectionDef[] = [
     label: "Cuenta",
     title: "Tu cuenta",
     hint: "Contraseña o PIN de la sesión actual. Solo te afecta a ti.",
+    adminOnly: false,
+  },
+  {
+    id: "whatsapp",
+    label: "WhatsApp",
+    title: "Mi WhatsApp",
+    hint: "Vincula tu teléfono mediante QR y envía avisos individuales con confirmación.",
     adminOnly: false,
   },
   {

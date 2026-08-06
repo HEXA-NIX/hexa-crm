@@ -96,6 +96,17 @@ export function setActiveCompanyLocal(company: Company) {
   }));
 }
 
+/** Refreshes profile fields after the signed-in user edits their own account. */
+export function updateCurrentUser(user: AuthUser) {
+  session.update((state) => state.user?.id === user.id ? { ...state, user } : state);
+  if (typeof sessionStorage !== "undefined") {
+    const state = get(session);
+    if (state.user && state.token) {
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify({ user: state.user, token: state.token, remote: state.remote }));
+    }
+  }
+}
+
 export function setCompaniesLocal(companies: Company[]) {
   session.update((state) => ({ ...state, companies }));
 }

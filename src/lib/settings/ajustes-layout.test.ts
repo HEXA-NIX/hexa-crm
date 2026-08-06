@@ -24,6 +24,12 @@ describe("ajustes layout — category navigation", () => {
     expect(src).toContain("data-ajustes-shell");
   });
 
+  it("permite arrastrar una foto al editor de usuario", () => {
+    expect(src).toContain("data-user-avatar-dropzone");
+    expect(src).toContain("dropUserAvatar");
+    expect(src).toContain("userAvatarDragActive");
+  });
+
   it("exposes one active panel at a time (not all sections stacked)", () => {
     // Conditional branches per section — not a flat monoblock of every Card at once
     expect(src).toMatch(/activeSection === ["']cuenta["']/);

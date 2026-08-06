@@ -9,9 +9,35 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+### Fixed
+
+- La página Trabajo selecciona inicialmente al usuario conectado en el filtro de responsable, sin impedir cambiar después a otro usuario o a todos.
+- Los hitos económicos no permiten repetir mes y, después de elegir uno, los siguientes selectores solo ofrecen meses posteriores disponibles.
+- Las tareas entregadas en Validación dejan de contarse como pendientes o vencidas del responsable y no aparecen en sus avisos operativos; permanecen separadas como trabajo pendiente de revisión.
+
+- El Kanban de proyectos distribuye correctamente sus seis columnas; «Hecho» permanece visible en escritorio y accesible mediante desplazamiento horizontal en pantallas más estrechas.
+
+- El resumen de tareas por WhatsApp excluye estrictamente registros sin fecha o con fechas no válidas.
+- Al editar el teléfono del usuario que tiene la sesión iniciada, la sección WhatsApp actualiza inmediatamente el perfil y habilita la conexión QR sin exigir volver a iniciar sesión.
+- La subida de documentación de proyectos a Google Drive muestra ahora la ficha recién creada al principio, permite editar inmediatamente su título, limpia el selector al finalizar y presenta los errores dentro del formulario.
+
 ### Added
 
+- Las zonas de subida de documentos, logos de proyecto y fotos de usuario aceptan ahora arrastrar y soltar, con realce visual y las mismas validaciones de formato y tamaño.
+- Cada proyecto incorpora un registro de solicitudes y sugerencias con tipo, solicitante, impacto, prioridad, responsable, estados de revisión, conversación y conversión trazable a tarea.
+- Al crear tareas, subtareas, capturas rápidas o importaciones, se preselecciona como responsable al usuario que mantiene la sesión iniciada.
+- El stack de cada proyecto usa un catálogo visual con logos, selección rápida y valores personalizados; añade categorías específicas para App móvil/escritorio y Plugins/streaming, incluyendo Twitch, YouTube y OBS.
+- El flujo de tareas incorpora una columna de Validación entre En progreso y Hecho, con historial de comentarios, solicitud de cambios y aprobación; no se permite completar una tarea sin pasar antes por revisión.
+- Los usuarios del equipo pueden tener una foto de perfil propia, editable desde Ajustes → Equipo y visible en el listado de miembros.
+- Cada proyecto admite una imagen/logo propia (PNG, JPG o WebP) y el resumen semanal por WhatsApp agrupa el avance por proyecto, muestra actividad de los últimos siete días y enlaza directamente a sus tareas pendientes.
+
+- El panel de proyectos permite enviar al WhatsApp del admin un resumen confirmado de tareas vencidas y de los próximos siete días, dividido en mensajes legibles con fecha, prioridad, proyecto y enlace a Hexa CRM.
+- Integración inicial de WhatsApp mediante GOWA: teléfono internacional por usuario, sesión QR aislada por empresa/usuario, estado, desconexión y envío individual con confirmación y auditoría; el modo local incorpora un puente de pruebas sin PostgreSQL.
 - Cada proyecto puede reunir documentación mediante enlaces, rutas de archivos y notas internas, con gestión administrativa y persistencia local/PostgreSQL.
+- La ficha de proyecto incorpora un PRD con formato y un stack tecnológico estructurado para centralizar la definición funcional y técnica.
+- La definición de proyecto se amplía con resumen, problema, objetivos, usuarios, alcance, requisitos, aceptación, riesgos, dependencias y métricas; la vista rápida agrupa frontend, backend, datos, infraestructura, despliegue, integraciones, IA y herramientas, con accesos a repositorio y entornos.
+- Los modales de edición de proyectos, tareas, definición, documentación e importación usan anchos amplios adaptados a formularios complejos.
+- Capa extensible de almacenamiento documental con Google Drive como primer proveedor: conexión OAuth de un solo clic, renovación automática, credencial cifrada, carpeta configurable y subida de ficheros de hasta 20 MB desde la ficha del proyecto.
 
 - Integración inicial de tareas con Orca: despacho desde la ficha, cola RPC autenticada, worker local con worktree Codex y cierre automático condicionado a tests, build y commit.
 - Ajustes incorpora una sección administrativa de Orca para guardar la configuración local no sensible y copiar el comando de arranque sin persistir el token de sesión.
@@ -32,6 +58,14 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 - Los márgenes negativos se muestran con signo y color rojo; el gráfico mensual representa los gastos como barras rojas bajo una línea de cero proporcional al rango real.
 
 ### Changed
+
+- Las tarjetas del listado de proyectos muestran un logo compacto y usan la inicial del proyecto cuando todavía no se ha cargado una imagen.
+- Las tareas que vencen en siete días o menos se destacan en amarillo; las vencidas permanecen en rojo y la tarea principal hereda la alerta más grave de cualquiera de sus subtareas.
+- Una tarea principal se marca visualmente en peligro cuando cualquiera de sus subtareas está bloqueada o vencida, mostrando el origen del riesgo en la propia tarjeta.
+- El estado técnico `inbox` se presenta como «Backlog», siguiendo la nomenclatura habitual de Kanban, y Validación adopta una identidad visual azul en columna, etiquetas, chat y avatares.
+- Las subtareas aparecen plegadas por defecto al entrar en un proyecto y se despliegan bajo demanda mediante la flecha de su tarea principal.
+- Las tareas se ordenan consistentemente desde la fecha de vencimiento más próxima hasta la más lejana, dejando las que no tienen fecha al final; las tareas y subtareas abiertas que ya han vencido se resaltan en rojo.
+- Las tareas y subtareas muestran el avatar del responsable en lugar de su nombre; cuando no existe una foto se utiliza su inicial y el nombre permanece disponible como ayuda accesible.
 
 - El progreso de proyectos y del portafolio excluye las tareas archivadas del total para no penalizar artificialmente los porcentajes.
 - El portafolio excluye proyectos archivados de sus indicadores operativos; los formularios validan fechas e importes, y la planificación económica ofrece siempre 36 meses.

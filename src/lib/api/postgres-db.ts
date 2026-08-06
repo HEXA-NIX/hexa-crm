@@ -47,6 +47,8 @@ import type {
   Sale,
   SaleLineInput,
   Settings,
+  StorageUploadInput,
+  StorageUploadResult,
   StockBalance,
   StockLocation,
   TenantPlugin,
@@ -79,6 +81,11 @@ import {
   stripeToolAccess,
 } from "../plugins/catalog";
 import { normalizeProjectDocuments, validateProjectDocuments } from "../projects/project-documents";
+import { normalizeProjectBrief, normalizeProjectPrd, normalizeTechStack } from "../projects/project-brief";
+import { validateProjectLogo } from "../projects/project-logo";
+import { validateUserAvatar } from "../users/user-avatar";
+import { decodeBase64File, testGoogleDrive, uploadToGoogleDrive } from "../storage/google-drive";
+import { gowaDeviceId, gowaLoginQr, gowaLogout, gowaSendText, gowaStatus, normalizeWhatsAppPhone } from "../whatsapp/gowa.server";
 import {
   callStripeTool,
   listStripeTools,
@@ -165,6 +172,7 @@ export async function initDb() {
       company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
       username TEXT NOT NULL,
       display_name TEXT NOT NULL,
+      phone TEXT NOT NULL DEFAULT '',
       role TEXT NOT NULL CHECK (role IN ('admin', 'cajero')),
       credential_hash TEXT NOT NULL,
       active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -392,6 +400,7 @@ export async function initDb() {
       id SERIAL PRIMARY KEY,
       username TEXT NOT NULL UNIQUE,
       display_name TEXT NOT NULL,
+      avatar_data_url TEXT NOT NULL DEFAULT '',
       role TEXT NOT NULL DEFAULT 'cajero',
       pin_hash TEXT NOT NULL,
       active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -442,6 +451,8 @@ export async function initDb() {
   // Multi-empresa columns (idempotent)
   await sql`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS active_company_id INTEGER`;
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_master BOOLEAN NOT NULL DEFAULT FALSE`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_data_url TEXT NOT NULL DEFAULT ''`;
   await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS company_id INTEGER NOT NULL DEFAULT 1`;
   await sql`ALTER TABLE customers ADD COLUMN IF NOT EXISTS company_id INTEGER NOT NULL DEFAULT 1`;
   await sql`ALTER TABLE sales ADD COLUMN IF NOT EXISTS company_id INTEGER NOT NULL DEFAULT 1`;
@@ -542,6 +553,10 @@ export async function initDb() {
       monthly_estimate_cents INTEGER NOT NULL DEFAULT 0 CHECK (monthly_estimate_cents >= 0),
       revenue_target_date DATE,
       documents JSONB NOT NULL DEFAULT '[]'::jsonb,
+      prd TEXT NOT NULL DEFAULT '',
+      tech_stack JSONB NOT NULL DEFAULT '[]'::jsonb,
+      brief JSONB NOT NULL DEFAULT '{}'::jsonb,
+      logo_data_url TEXT NOT NULL DEFAULT '',
       name TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'planned' CHECK (status IN ('planned', 'active', 'paused', 'done', 'archived')),
@@ -563,6 +578,11 @@ export async function initDb() {
   await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS monthly_estimate_cents INTEGER NOT NULL DEFAULT 0`;
   await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS revenue_target_date DATE`;
   await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS documents JSONB NOT NULL DEFAULT '[]'::jsonb`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS requests JSONB NOT NULL DEFAULT '[]'::jsonb`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS prd TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS tech_stack JSONB NOT NULL DEFAULT '[]'::jsonb`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS brief JSONB NOT NULL DEFAULT '{}'::jsonb`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS logo_data_url TEXT NOT NULL DEFAULT ''`;
   await sql`CREATE INDEX IF NOT EXISTS idx_cash_movements_project ON cash_movements(company_id, project_id)`;
   await sql`
     CREATE TABLE IF NOT EXISTS work_project_revenue_milestones (
@@ -587,7 +607,7 @@ export async function initDb() {
       title TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
       type TEXT NOT NULL DEFAULT 'task' CHECK (type IN ('idea', 'task', 'issue', 'milestone')),
-      status TEXT NOT NULL DEFAULT 'inbox' CHECK (status IN ('inbox', 'planned', 'in_progress', 'blocked', 'done', 'archived')),
+      status TEXT NOT NULL DEFAULT 'inbox' CHECK (status IN ('inbox', 'planned', 'in_progress', 'validation', 'blocked', 'done', 'archived')),
       priority TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
       start_date TIMESTAMP WITH TIME ZONE,
       due_date TIMESTAMP WITH TIME ZONE,
@@ -596,11 +616,15 @@ export async function initDb() {
       source_key TEXT,
       source_href TEXT,
       completed_at TIMESTAMP WITH TIME ZONE,
+      review_messages JSONB NOT NULL DEFAULT '[]'::jsonb,
       created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     );
   `;
   await sql`ALTER TABLE work_items ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES work_items(id) ON DELETE CASCADE`;
+  await sql`ALTER TABLE work_items ADD COLUMN IF NOT EXISTS review_messages JSONB NOT NULL DEFAULT '[]'::jsonb`;
+  await sql`ALTER TABLE work_items DROP CONSTRAINT IF EXISTS work_items_status_check`;
+  await sql`ALTER TABLE work_items ADD CONSTRAINT work_items_status_check CHECK (status IN ('inbox', 'planned', 'in_progress', 'validation', 'blocked', 'done', 'archived'))`;
   await sql`CREATE INDEX IF NOT EXISTS idx_work_categories_company ON work_categories(company_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_work_projects_company ON work_projects(company_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_work_items_company ON work_items(company_id)`;
@@ -928,7 +952,7 @@ async function seedProductsAndCustomers() {
 async function requireSession(token: string | null): Promise<AuthUser> {
   if (!token) throw new Error("Sesión no iniciada");
   const sessRes = await sql`
-    SELECT s.token, u.id, u.username, u.display_name, u.role, u.active, u.created_at, u.must_change_password, u.temp_password_issued_at, u.is_master
+    SELECT s.token, u.id, u.username, u.display_name, u.phone, u.avatar_data_url, u.role, u.active, u.created_at, u.must_change_password, u.temp_password_issued_at, u.is_master
     FROM sessions s
     JOIN users u ON s.user_id = u.id
     WHERE s.token = ${token} AND u.active = TRUE
@@ -939,6 +963,8 @@ async function requireSession(token: string | null): Promise<AuthUser> {
     id: u.id,
     username: u.username,
     display_name: u.display_name,
+    phone: u.phone ?? "",
+    avatar_data_url: u.avatar_data_url ?? "",
     role: u.role,
     active: u.active,
     created_at: toIso(u.created_at),
@@ -981,6 +1007,11 @@ function formatWorkProject(r: any): WorkProject {
     revenue_target_date: toIso(r.revenue_target_date) || null,
     revenue_milestones: [],
     documents: Array.isArray(r.documents) ? r.documents : [],
+    requests: Array.isArray(r.requests) ? r.requests : [],
+    prd: normalizeProjectPrd(r.prd),
+    tech_stack: normalizeTechStack(r.tech_stack),
+    brief: normalizeProjectBrief(r.brief, r.tech_stack),
+    logo_data_url: r.logo_data_url ?? "",
     name: r.name,
     description: r.description ?? "",
     status: r.status,
@@ -1040,6 +1071,7 @@ function formatWorkItem(r: any): WorkItem {
     source_key: r.source_key ?? null,
     source_href: r.source_href ?? null,
     completed_at: toIso(r.completed_at) || null,
+    review_messages: Array.isArray(r.review_messages) ? r.review_messages : [],
     created_at: toIso(r.created_at),
     updated_at: toIso(r.updated_at),
     parent_title: r.parent_title ?? null,
@@ -1056,6 +1088,7 @@ function formatWorkItem(r: any): WorkItem {
         }
       : null,
     assignee_name: r.assignee_name ?? null,
+    assignee_avatar_data_url: r.assignee_avatar_data_url ?? null,
   };
 }
 
@@ -1073,7 +1106,7 @@ async function tenantPlugin(companyId: number, key: PluginKey): Promise<TenantPl
   const row = await tenantPluginRow(companyId, key);
   const config = sanitizePluginConfig(key, row?.config ?? definition.defaultConfig);
   const enabled = !!row?.enabled;
-  const secretConfigured = key === "stripe_mcp"
+  const secretConfigured = key === "stripe_mcp" || key === "google_drive"
     ? !!row?.encrypted_secret
     : pluginSecretConfigured(config, "database");
   const lastLogRows = await sql`
@@ -1106,7 +1139,7 @@ async function tenantPlugin(companyId: number, key: PluginKey): Promise<TenantPl
 async function pluginAudit(
   companyId: number,
   userId: number | null,
-  key: PluginKey,
+  key: PluginKey | "whatsapp_gowa",
   action: string,
   toolName?: string | null,
   result: PluginLogResult = "ok",
@@ -1130,7 +1163,7 @@ export const postgresApi = {
 
   async login(username: string, password: string): Promise<LoginResult> {
     const userRes = await sql`
-      SELECT id, username, display_name, role, active, pin_hash, must_change_password, temp_password_issued_at, created_at, is_master
+      SELECT id, username, display_name, phone, avatar_data_url, role, active, pin_hash, must_change_password, temp_password_issued_at, created_at, is_master
       FROM users
       WHERE LOWER(username) = ${username.trim().toLowerCase()} AND active = TRUE
     `;
@@ -1182,6 +1215,8 @@ export const postgresApi = {
         id: user.id,
         username: user.username,
         display_name: user.display_name,
+        phone: user.phone ?? "",
+        avatar_data_url: user.avatar_data_url ?? "",
         role: user.role,
         active: user.active,
         created_at: toIso(user.created_at),
@@ -1206,6 +1241,43 @@ export const postgresApi = {
       return await requireSession(token);
     } catch {
       return null;
+    }
+  },
+
+  async whatsapp_status(token: string | null) {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    return { ...(await gowaStatus(gowaDeviceId(companyId, user.id))), user_phone: user.phone };
+  },
+
+  async whatsapp_login_qr(token: string | null) {
+    const user = await requireSession(token);
+    if (!user.phone) throw new Error("Añade primero tu teléfono de WhatsApp en el perfil de usuario");
+    normalizeWhatsAppPhone(user.phone);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    return gowaLoginQr(gowaDeviceId(companyId, user.id));
+  },
+
+  async whatsapp_logout(token: string | null) {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    await gowaLogout(gowaDeviceId(companyId, user.id));
+  },
+
+  async whatsapp_send(phone: string, message: string, confirmed: boolean, token: string | null) {
+    const user = await requireSession(token);
+    if (!confirmed) throw new Error("Confirma el envío de WhatsApp antes de continuar");
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const deviceId = gowaDeviceId(companyId, user.id);
+    const status = await gowaStatus(deviceId);
+    if (!status.connected && !status.logged_in) throw new Error("Conecta tu WhatsApp antes de enviar mensajes");
+    try {
+      const result = await gowaSendText(deviceId, phone, message);
+      await pluginAudit(companyId, user.id, "whatsapp_gowa", "whatsapp_sent", "send_text", "ok", `WhatsApp enviado a ${normalizeWhatsAppPhone(phone)}`);
+      return { ok: true, ...result };
+    } catch (error) {
+      await pluginAudit(companyId, user.id, "whatsapp_gowa", "whatsapp_failed", "send_text", "error", error instanceof Error ? error.message : "Error de WhatsApp");
+      throw error;
     }
   },
 
@@ -1294,10 +1366,10 @@ export const postgresApi = {
 
     let encryptedSecret: string | null | undefined = undefined;
 
-    if (pluginKey === "stripe_mcp" && action) {
+    if ((pluginKey === "stripe_mcp" || pluginKey === "google_drive") && action) {
       if (action === "save" || action === "replace") {
         if (!rawSecret || !rawSecret.trim()) {
-          throw new Error("Debes proporcionar una credencial válida de Stripe");
+          throw new Error(`Debes proporcionar una credencial válida de ${pluginKey === "google_drive" ? "Google Drive" : "Stripe"}`);
         }
         encryptedSecret = encryptSecret(rawSecret.trim());
       } else if (action === "remove") {
@@ -1328,12 +1400,13 @@ export const postgresApi = {
       `;
     }
 
+    const secretLabel = pluginKey === "google_drive" ? "Google Drive" : "Stripe";
     const auditSummary = action === "remove"
-      ? "Credencial de Stripe eliminada"
+      ? `Credencial de ${secretLabel} eliminada`
       : action === "replace"
-        ? "Credencial de Stripe reemplazada"
+        ? `Credencial de ${secretLabel} reemplazada`
         : action === "save"
-          ? "Credencial de Stripe guardada"
+          ? `Credencial de ${secretLabel} guardada`
           : enabled
             ? "Configuración guardada y plugin activado"
             : "Plugin desactivado";
@@ -1371,10 +1444,10 @@ export const postgresApi = {
 
     let decryptedToken: string | undefined = undefined;
 
-    if (pluginKey === "stripe_mcp") {
+    if (pluginKey === "stripe_mcp" || pluginKey === "google_drive") {
       const row = await tenantPluginRow(companyId, pluginKey);
       if (!row?.encrypted_secret) {
-        const msg = "Ingresa y guarda la credencial de Stripe antes de probar la conexión";
+        const msg = `Ingresa y guarda la credencial de ${pluginKey === "google_drive" ? "Google Drive" : "Stripe"} antes de probar la conexión`;
         await pluginAudit(companyId, user.id, pluginKey, "connection_test_failed", null, "error", msg);
         throw new Error(msg);
       }
@@ -1384,7 +1457,9 @@ export const postgresApi = {
     try {
       const result = pluginKey === "database_bridge"
         ? await testDatabasePlugin(plugin.config)
-        : await testStripePlugin(plugin.config, decryptedToken);
+        : pluginKey === "google_drive"
+          ? await testGoogleDrive(decryptedToken ?? "")
+          : await testStripePlugin(plugin.config, decryptedToken);
 
       await sql`UPDATE tenant_plugins SET last_error = NULL, updated_at = NOW() WHERE company_id = ${companyId} AND plugin_key = ${pluginKey}`;
       await pluginAudit(companyId, user.id, pluginKey, "connection_test_ok", null, "ok", result.message);
@@ -1395,6 +1470,27 @@ export const postgresApi = {
       await pluginAudit(companyId, user.id, pluginKey, "connection_test_failed", null, "error", message);
       throw new Error(message);
     }
+  },
+
+  async upload_project_file(input: StorageUploadInput, token: string | null): Promise<StorageUploadResult> {
+    const user = await requireAdmin(token);
+    if (!token) throw new Error("Sesión no iniciada");
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    if (input.provider !== "google_drive") throw new Error("Proveedor de almacenamiento no soportado");
+    const projects = await sql`SELECT id FROM work_projects WHERE id = ${input.project_id} AND company_id = ${companyId}`;
+    if (!projects[0]) throw new Error("Proyecto no encontrado");
+    const plugin = await tenantPlugin(companyId, "google_drive");
+    const row = await tenantPluginRow(companyId, "google_drive");
+    if (!plugin.enabled || !row?.encrypted_secret) {
+      throw new Error("Configura y activa Google Drive en Ajustes → Plugins");
+    }
+    const result = await uploadToGoogleDrive(plugin.config, decryptSecret(row.encrypted_secret), {
+      name: input.name,
+      mime_type: input.mime_type,
+      bytes: decodeBase64File(input.content_base64),
+    });
+    await pluginAudit(companyId, user.id, "google_drive", "file_uploaded", null, "ok", `${result.name} (${result.size} bytes)`);
+    return result;
   },
 
   async list_plugin_tools(pluginKey: PluginKey, token: string | null): Promise<any[]> {
@@ -1535,7 +1631,7 @@ export const postgresApi = {
   async list_users(token: string | null): Promise<AuthUser[]> {
     await requireAdmin(token);
     const users = await sql`
-      SELECT id, username, display_name, role, active, created_at, must_change_password, temp_password_issued_at, is_master
+      SELECT id, username, display_name, phone, avatar_data_url, role, active, created_at, must_change_password, temp_password_issued_at, is_master
       FROM users
       ORDER BY id ASC
     `;
@@ -1543,6 +1639,8 @@ export const postgresApi = {
       id: u.id,
       username: u.username,
       display_name: u.display_name,
+      phone: u.phone ?? "",
+      avatar_data_url: u.avatar_data_url ?? "",
       role: u.role,
       active: u.active,
       created_at: toIso(u.created_at),
@@ -1558,6 +1656,8 @@ export const postgresApi = {
     const role = input.role === "cajero" ? "cajero" : "admin";
     const username = input.username.trim().toLowerCase();
     if (!username) throw new Error("Usuario obligatorio");
+    const avatarError = validateUserAvatar(input.avatar_data_url);
+    if (avatarError) throw new Error(avatarError);
 
     if (input.id) {
       const updateData: Record<string, unknown> = {
@@ -1566,6 +1666,8 @@ export const postgresApi = {
         role,
         active: input.active ?? true,
       };
+      if (input.phone !== undefined) updateData.phone = input.phone.trim();
+      if (input.avatar_data_url !== undefined) updateData.avatar_data_url = input.avatar_data_url;
 
       let temporary_password: string | undefined;
       if (input.pin === "__regen_temp__") {
@@ -1592,7 +1694,7 @@ export const postgresApi = {
         UPDATE users
         SET ${sql(updateData)}
         WHERE id = ${input.id}
-        RETURNING id, username, display_name, role, active, created_at, must_change_password, temp_password_issued_at, is_master
+        RETURNING id, username, display_name, phone, avatar_data_url, role, active, created_at, must_change_password, temp_password_issued_at, is_master
       `;
       if (res.length === 0) throw new Error("Usuario no encontrado");
       const u = res[0];
@@ -1601,6 +1703,8 @@ export const postgresApi = {
           id: u.id,
           username: u.username,
           display_name: u.display_name,
+          phone: u.phone ?? "",
+          avatar_data_url: u.avatar_data_url ?? "",
           role: u.role,
           active: u.active,
           created_at: toIso(u.created_at),
@@ -1617,17 +1721,19 @@ export const postgresApi = {
     const hash = await hashPin(temporary_password);
 
     const res = await sql`
-      INSERT INTO users (username, display_name, role, pin_hash, active, must_change_password, temp_password_issued_at)
+      INSERT INTO users (username, display_name, phone, avatar_data_url, role, pin_hash, active, must_change_password, temp_password_issued_at)
       VALUES (
         ${username},
         ${input.display_name.trim() || username},
+        ${input.phone?.trim() ?? ""},
+        ${input.avatar_data_url ?? ""},
         ${role},
         ${hash},
         ${input.active ?? true},
         ${fields.must_change_password},
         ${fields.temp_password_issued_at ? new Date(fields.temp_password_issued_at) : now}
       )
-      RETURNING id, username, display_name, role, active, created_at, must_change_password, temp_password_issued_at, is_master
+      RETURNING id, username, display_name, phone, avatar_data_url, role, active, created_at, must_change_password, temp_password_issued_at, is_master
     `;
     const u = res[0];
     return {
@@ -1635,6 +1741,8 @@ export const postgresApi = {
         id: u.id,
         username: u.username,
         display_name: u.display_name,
+        phone: u.phone ?? "",
+        avatar_data_url: u.avatar_data_url ?? "",
         role: u.role,
         active: u.active,
         created_at: toIso(u.created_at),
@@ -1673,13 +1781,15 @@ export const postgresApi = {
       UPDATE users
       SET pin_hash = ${newHash}, must_change_password = FALSE, temp_password_issued_at = NULL
       WHERE id = ${me.id}
-      RETURNING id, username, display_name, role, active, created_at, must_change_password, temp_password_issued_at, is_master
+      RETURNING id, username, display_name, phone, avatar_data_url, role, active, created_at, must_change_password, temp_password_issued_at, is_master
     `;
     const u = res[0];
     return {
       id: u.id,
       username: u.username,
       display_name: u.display_name,
+      phone: u.phone ?? "",
+      avatar_data_url: u.avatar_data_url ?? "",
       role: u.role,
       active: u.active,
       created_at: toIso(u.created_at),
@@ -2802,6 +2912,8 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
       const documentError = validateProjectDocuments(input.documents);
       if (documentError) throw new Error(documentError);
     }
+    const logoError = validateProjectLogo(input.logo_data_url);
+    if (logoError) throw new Error(logoError);
 
     let existing: any = null;
     if (input.id != null) {
@@ -2840,6 +2952,13 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     const documents = input.documents !== undefined
       ? normalizeProjectDocuments(input.documents)
       : (Array.isArray(existing?.documents) ? existing.documents : []);
+    const requests = input.requests !== undefined
+      ? input.requests
+      : (Array.isArray(existing?.requests) ? existing.requests : []);
+    const prd = input.prd !== undefined ? normalizeProjectPrd(input.prd) : normalizeProjectPrd(existing?.prd);
+    const techStack = input.tech_stack !== undefined ? normalizeTechStack(input.tech_stack) : normalizeTechStack(existing?.tech_stack);
+    const brief = input.brief !== undefined ? normalizeProjectBrief(input.brief, techStack) : normalizeProjectBrief(existing?.brief, techStack);
+    const logoDataUrl = input.logo_data_url !== undefined ? input.logo_data_url : (existing?.logo_data_url ?? "");
     const customerId = input.customer_id !== undefined
       ? input.customer_id
       : (existing?.customer_id ?? null);
@@ -2865,6 +2984,11 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
           monthly_estimate_cents = ${monthlyEstimateCents},
           revenue_target_date = ${revenueTargetDate},
           documents = ${sql.json(documents as any)},
+          requests = ${sql.json(requests as any)},
+          prd = ${prd},
+          tech_stack = ${sql.json(techStack as any)},
+          brief = ${sql.json(brief as any)},
+          logo_data_url = ${logoDataUrl},
           start_date = ${startDate},
           target_date = ${targetDate},
           updated_at = NOW()
@@ -2875,10 +2999,10 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     } else {
       const inserted = await sql`
         INSERT INTO work_projects (
-          company_id, customer_id, value_cents, monthly_estimate_cents, revenue_target_date, documents,
+          company_id, customer_id, value_cents, monthly_estimate_cents, revenue_target_date, documents, requests, prd, tech_stack, brief, logo_data_url,
           name, description, status, start_date, target_date, created_by
         ) VALUES (
-          ${companyId}, ${customerId}, ${valueCents}, ${monthlyEstimateCents}, ${revenueTargetDate}, ${sql.json(documents as any)},
+          ${companyId}, ${customerId}, ${valueCents}, ${monthlyEstimateCents}, ${revenueTargetDate}, ${sql.json(documents as any)}, ${sql.json(requests as any)}, ${prd}, ${sql.json(techStack as any)}, ${sql.json(brief as any)}, ${logoDataUrl},
           ${name}, ${description}, ${status}, ${startDate}, ${targetDate}, ${user.id}
         )
         RETURNING id
@@ -2888,14 +3012,17 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
 
     if (input.revenue_milestones !== undefined) {
       const minimumMonth = new Date().toISOString().slice(0, 7);
+      const milestoneMonths = new Set<string>();
       for (const milestone of input.revenue_milestones) {
         if (
           milestone.amount_cents <= 0 ||
           !/^\d{4}-\d{2}$/.test(milestone.target_month) ||
-          milestone.target_month < minimumMonth
+          milestone.target_month < minimumMonth ||
+          milestoneMonths.has(milestone.target_month)
         ) {
-          throw new Error("Cada hito mensual debe tener un importe y un mes válidos.");
+          throw new Error("Cada hito mensual debe tener un importe y un mes futuro no repetido.");
         }
+        milestoneMonths.add(milestone.target_month);
       }
       await sql`
         DELETE FROM work_project_revenue_milestones
@@ -2975,6 +3102,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
         wc.created_at AS category_created_at,
         wc.updated_at AS category_updated_at,
         u.display_name AS assignee_name,
+        u.avatar_data_url AS assignee_avatar_data_url,
         parent.title AS parent_title
       FROM work_items wi
       LEFT JOIN work_categories wc ON wi.category_id = wc.id
@@ -3101,6 +3229,9 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     }
 
     const targetStatus = input.status ?? existing?.status ?? "inbox";
+    if (targetStatus === "done" && existing?.status !== "validation" && existing?.status !== "done") {
+      throw new Error("La tarea debe pasar por Validación antes de marcarla como hecha.");
+    }
     const sourceType = input.source_type !== undefined ? input.source_type : (existing?.source_type ?? null);
     const sourceKey = input.source_key !== undefined ? input.source_key : (existing?.source_key ?? null);
     const isActive = targetStatus !== "done" && targetStatus !== "archived";
@@ -3142,6 +3273,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
           source_key = ${sourceKey ?? null},
           source_href = ${input.source_href !== undefined ? (input.source_href ?? null) : (existing.source_href ?? null)},
           completed_at = ${completedAt ?? null},
+          review_messages = ${sql.json((input.review_messages ?? existing.review_messages ?? []) as any)},
           updated_at = NOW()
         WHERE id = ${input.id ?? null} AND company_id = ${companyId}
         RETURNING id
@@ -3152,12 +3284,12 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
         INSERT INTO work_items (
           company_id, parent_id, category_id, project_id, assignee_id, created_by, title, description,
           type, status, priority, start_date, due_date, sort_order, source_type, source_key,
-          source_href, completed_at
+          source_href, completed_at, review_messages
         ) VALUES (
           ${companyId}, ${parentId}, ${categoryId}, ${input.project_id ?? null}, ${input.assignee_id ?? null},
           ${user.id}, ${truncatedTitle}, ${input.description ?? ""}, ${input.type ?? "task"},
           ${targetStatus}, ${input.priority ?? "normal"}, ${input.start_date ?? null}, ${input.due_date ?? null},
-          ${input.sort_order ?? 0}, ${sourceType}, ${sourceKey}, ${input.source_href ?? null}, ${completedAt}
+          ${input.sort_order ?? 0}, ${sourceType}, ${sourceKey}, ${input.source_href ?? null}, ${completedAt}, ${sql.json((input.review_messages ?? []) as any)}
         )
         RETURNING id
       `;
@@ -3181,6 +3313,10 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
               SELECT 1 FROM work_items child
               WHERE child.parent_id = parent.id AND child.status = 'blocked'
             ) THEN 'blocked'
+            WHEN EXISTS (
+              SELECT 1 FROM work_items child
+              WHERE child.parent_id = parent.id AND child.status = 'validation'
+            ) THEN 'validation'
             WHEN EXISTS (
               SELECT 1 FROM work_items child
               WHERE child.parent_id = parent.id AND child.status = 'in_progress'
@@ -3213,6 +3349,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
         wc.created_at AS category_created_at,
         wc.updated_at AS category_updated_at,
         u.display_name AS assignee_name,
+        u.avatar_data_url AS assignee_avatar_data_url,
         parent.title AS parent_title
       FROM work_items wi
       LEFT JOIN work_categories wc ON wi.category_id = wc.id
@@ -3248,6 +3385,10 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
             ) THEN 'blocked'
             WHEN EXISTS (
               SELECT 1 FROM work_items child
+              WHERE child.parent_id = parent.id AND child.status = 'validation'
+            ) THEN 'validation'
+            WHEN EXISTS (
+              SELECT 1 FROM work_items child
               WHERE child.parent_id = parent.id AND child.status = 'in_progress'
             ) THEN 'in_progress'
             WHEN EXISTS (
@@ -3278,6 +3419,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
         wc.created_at AS category_created_at,
         wc.updated_at AS category_updated_at,
         u.display_name AS assignee_name,
+        u.avatar_data_url AS assignee_avatar_data_url,
         parent.title AS parent_title
       FROM work_items wi
       LEFT JOIN work_categories wc ON wi.category_id = wc.id
@@ -3453,7 +3595,8 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
           wc.archived_at AS category_archived_at,
           wc.created_at AS category_created_at,
           wc.updated_at AS category_updated_at,
-          u.display_name AS assignee_name
+          u.display_name AS assignee_name,
+          u.avatar_data_url AS assignee_avatar_data_url
         FROM work_items wi
         LEFT JOIN work_categories wc ON wi.category_id = wc.id
         LEFT JOIN users u ON wi.assignee_id = u.id

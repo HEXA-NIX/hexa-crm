@@ -91,6 +91,15 @@ describe("Trabajo Backend & API Tests", () => {
       );
       expect(item.completed_at).toBeNull();
 
+      await expect(browserApi.upsertWorkItem(
+        { id: item.id, title: "Revisar stock", status: "done" },
+        adminToken,
+      )).rejects.toThrow(/Validación/);
+      await browserApi.upsertWorkItem(
+        { id: item.id, title: "Revisar stock", status: "validation" },
+        adminToken,
+      );
+
       const doneItem = await browserApi.upsertWorkItem(
         { id: item.id, title: "Revisar stock", status: "done" },
         adminToken
@@ -125,12 +134,20 @@ describe("Trabajo Backend & API Tests", () => {
       expect(items.find((item) => item.id === parent.id)?.status).toBe("blocked");
 
       await browserApi.upsertWorkItem(
+        { id: second.id, title: second.title, status: "validation" },
+        adminToken,
+      );
+      await browserApi.upsertWorkItem(
         { id: second.id, title: second.title, status: "done" },
         adminToken,
       );
       items = await browserApi.listWorkItems({}, adminToken);
       expect(items.find((item) => item.id === parent.id)?.status).toBe("in_progress");
 
+      await browserApi.upsertWorkItem(
+        { id: first.id, title: first.title, status: "validation" },
+        adminToken,
+      );
       await browserApi.upsertWorkItem(
         { id: first.id, title: first.title, status: "done" },
         adminToken,

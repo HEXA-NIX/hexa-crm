@@ -23,6 +23,8 @@ import type {
   Sale,
   SaleLineInput,
   Settings,
+  StorageUploadInput,
+  StorageUploadResult,
   StockBalance,
   StockLocation,
   TenantPlugin,
@@ -43,6 +45,7 @@ import { browserApi } from "./browser-store";
 import { getToken, clearSession } from "../stores/session";
 import { assertTokenForCommand, PUBLIC_COMMANDS } from "./guard";
 import { remoteOperatorApi, remoteOperatorLogin, type RemoteOperatorConfig } from "./remote-operator";
+import { uploadGoogleDriveFile } from "../storage/google-drive-client";
 
 let remoteOperatorConfig: RemoteOperatorConfig | null = null;
 
@@ -86,6 +89,19 @@ function withToken(args?: Record<string, unknown>): Record<string, unknown> {
   return { ...(args ?? {}), token: token ?? null };
 }
 
+async function localWhatsApp<T>(action: "status" | "login" | "logout" | "send", input: Record<string, unknown> = {}): Promise<T> {
+  const token = getToken();
+  if (!token) throw new Error("Sesión no iniciada");
+  const response = await fetch("/api/whatsapp/local", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ action, ...input }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || "WhatsApp no está disponible");
+  return data as T;
+}
+
 async function callLocal<T>(cmd: string, args: Record<string, any>, token: string | null): Promise<T> {
   switch (cmd) {
     case "public_meta": return browserApi.public_meta() as T;
@@ -127,6 +143,7 @@ async function callLocal<T>(cmd: string, args: Record<string, any>, token: strin
     case "dashboard_stats": return browserApi.dashboard_stats(token) as T;
     case "get_settings": return browserApi.get_settings(token) as T;
     case "update_settings": return browserApi.update_settings(args.partial, token) as T;
+    case "upload_project_file": return browserApi.upload_project_file(args.input, token) as Promise<T>;
     case "list_plugins": return browserApi.list_plugins(token) as Promise<T>;
     case "update_plugin": return browserApi.update_plugin(args.plugin_key, args.enabled, args.config, token, args.secret_action, args.secret) as Promise<T>;
     case "test_plugin": return browserApi.test_plugin(args.plugin_key, token) as Promise<T>;
@@ -248,6 +265,18 @@ export const api = {
   },
   logout: () => remoteOperatorConfig ? Promise.resolve() : call<void>("logout"),
   sessionMe: () => remoteOperatorConfig ? remoteOperatorApi.me(requireRemoteConfig(), getToken() ?? "") : call<AuthUser | null>("session_me"),
+  whatsappStatus: () => WEB_DATA_MODE === "local" && !isTauri()
+    ? localWhatsApp<{ connected: boolean; logged_in: boolean; device_id: string; phone?: string; user_phone: string }>("status")
+    : call<{ connected: boolean; logged_in: boolean; device_id: string; phone?: string; user_phone: string }>("whatsapp_status"),
+  whatsappLoginQr: () => WEB_DATA_MODE === "local" && !isTauri()
+    ? localWhatsApp<{ qr_url: string; qr_data?: string }>("login")
+    : call<{ qr_url: string; qr_data?: string }>("whatsapp_login_qr"),
+  whatsappLogout: () => WEB_DATA_MODE === "local" && !isTauri()
+    ? localWhatsApp<void>("logout")
+    : call<void>("whatsapp_logout"),
+  whatsappSend: (phone: string, message: string, confirmed = false) => WEB_DATA_MODE === "local" && !isTauri()
+    ? localWhatsApp<{ ok: true; message_id?: string }>("send", { phone, message, confirmed })
+    : call<{ ok: true; message_id?: string }>("whatsapp_send", { phone, message, confirmed }),
   listUsers: () => call<AuthUser[]>("list_users"),
   upsertUser: (input: UserInput) => call<CreateUserResult>("upsert_user", { input }),
   changeOwnPin: (currentPin: string, newPin: string) =>
@@ -284,6 +313,8 @@ export const api = {
   getSettings: () => call<Settings>("get_settings"),
   updateSettings: (partial: Partial<Settings>) =>
     call<Settings>("update_settings", { partial }),
+  uploadProjectFile: (input: StorageUploadInput, folderId = "") =>
+    uploadGoogleDriveFile(input, folderId),
   aiChat: (messages: AiMessage[]) => call<AiChatResult>("ai_chat", { messages }),
   ollamaHealth: () => call<{ ok: boolean; models: string[] }>("ollama_health"),
   resetDemo: () => remoteOperatorConfig ? remoteWriteUnavailable() : call<void>("reset_demo"),

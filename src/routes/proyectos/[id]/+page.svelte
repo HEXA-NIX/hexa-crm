@@ -2,7 +2,7 @@
   import { page } from "$app/stores";
   import { goto } from "$app/navigation";
   import { api, supportsOrcaWorker, usesLocalOrcaBridge } from "$lib/api/client";
-  import { session, isAdmin } from "$lib/stores/session";
+  import { session, isAdmin, currentUser } from "$lib/stores/session";
   import { showToast } from "$lib/stores/ui";
   import type {
     WorkProject,
@@ -18,6 +18,9 @@
     CashKind,
     CashMovement,
     WorkProjectDocumentInput,
+    WorkProjectRequest,
+    WorkProjectRequestStatus,
+    WorkProjectRequestType,
   } from "$lib/types";
   import { formatEUR, parseEurosInput } from "$lib/money";
   import Button from "$lib/components/Button.svelte";
@@ -25,6 +28,7 @@
   import Badge from "$lib/components/Badge.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import Select from "$lib/components/Select.svelte";
+  import Input from "$lib/components/Input.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import RichDescription from "$lib/components/RichDescription.svelte";
   import RichDescriptionEditor from "$lib/components/RichDescriptionEditor.svelte";
@@ -36,8 +40,15 @@
   import { projectStatusLabel, projectStatusTone } from "$lib/projects/presentation";
   import { buildProjectEconomicSeries } from "$lib/projects/project-economics";
   import { normalizeProjectDocuments, projectDocumentHref, validateProjectDocuments } from "$lib/projects/project-documents";
+  import { normalizeProjectBrief, normalizeProjectPrd, parseTechStack, projectTechnologyCount } from "$lib/projects/project-brief";
   import { hasInvalidDateRange, hasInvalidMoneyInput } from "$lib/projects/form-validation";
+  import { availableMilestoneMonths, hasDuplicateMilestoneMonths, nextMilestoneMonth } from "$lib/projects/milestone-months";
+  import { projectLogoDataUrl } from "$lib/projects/project-logo";
   import ProjectProgress from "$lib/components/projects/ProjectProgress.svelte";
+  import TechnologyPicker from "$lib/components/projects/TechnologyPicker.svelte";
+  import TechnologyBadge from "$lib/components/projects/TechnologyBadge.svelte";
+  import AssigneeAvatar from "$lib/components/users/AssigneeAvatar.svelte";
+  import { isTaskDueSoon, isTaskOverdue, isTaskPendingWork, sortTasksByDueDate } from "$lib/work/task-dates";
   import { browser } from "$app/environment";
 
   const projectReference = $derived($page.params.id);
@@ -61,6 +72,7 @@
   let suppressTaskClick = $state(false);
   let statusUpdatingTaskId = $state<number | null>(null);
   let collapsedParentIds = $state<Set<number>>(new Set());
+  let collapsedInitializedProject = $state("");
 
   // Quick Capture State
   let quickTitle = $state("");
@@ -96,6 +108,7 @@
     milestones: [] as { id?: number; amount: string; target_month: string }[],
     start_date: "",
     target_date: "",
+    logo_data_url: "",
   });
   let cashModalOpen = $state(false);
   let cashSaving = $state(false);
@@ -106,13 +119,51 @@
   });
   let documentsModalOpen = $state(false);
   let documentsSaving = $state(false);
+  let documentUploading = $state(false);
+  let uploadFile = $state<File | null>(null);
+  let uploadFileInput = $state<HTMLInputElement | null>(null);
+  let uploadError = $state("");
+  let documentDragActive = $state(false);
+  let projectLogoDragActive = $state(false);
   let documentsForm = $state<WorkProjectDocumentInput[]>([]);
+  let requestsModalOpen = $state(false);
+  let requestSaving = $state(false);
+  let editingRequestId = $state<string | null>(null);
+  let requestComment = $state("");
+  let requestForm = $state({
+    type: "suggestion" as WorkProjectRequestType,
+    title: "",
+    description: "",
+    requester: "",
+    priority: "normal" as WorkPriority,
+    impact: "",
+    status: "new" as WorkProjectRequestStatus,
+    reviewer_id: "",
+  });
+  let briefModalOpen = $state(false);
+  let briefSaving = $state(false);
+  let briefForm = $state({
+    summary: "", problem: "", objectives: "", users: "", scope: "", out_of_scope: "",
+    functional_requirements: "", non_functional_requirements: "", acceptance_criteria: "",
+    risks: "", dependencies: "", success_metrics: "", notes: "",
+    frontend: "", backend: "", app: "", database: "", infrastructure: "", deployment: "",
+    integrations: "", plugins: "", ai: "", tools: "", repository_url: "", documentation_url: "",
+    staging_url: "", production_url: "",
+  });
+  const briefTechFields = [
+    { label: "Frontend", key: "frontend" }, { label: "Backend", key: "backend" }, { label: "App móvil / escritorio", key: "app" },
+    { label: "Base de datos", key: "database" }, { label: "Infraestructura", key: "infrastructure" },
+    { label: "Despliegue", key: "deployment" }, { label: "Integraciones", key: "integrations" }, { label: "Plugins y streaming", key: "plugins" },
+    { label: "IA", key: "ai" }, { label: "Herramientas", key: "tools" },
+  ] as const;
 
   // Task Detail Modal State
   let detailModalOpen = $state(false);
   let editingTask = $state<WorkItem | null>(null);
   let newTaskParent = $state<WorkItem | null>(null);
   let taskSaving = $state(false);
+  let reviewDraft = $state("");
+  let reviewSaving = $state(false);
   let orcaDispatchingTaskId = $state<number | null>(null);
   let syncingLocalOrcaRuns = $state(false);
   let detailForm = $state({
@@ -131,9 +182,11 @@
 
   const statusOptions = [
     { value: "", label: "Todos los estados" },
-    { value: "inbox", label: "Inbox" },
+    { value: "pending", label: "Pendientes" },
+    { value: "inbox", label: "Backlog" },
     { value: "planned", label: "Planificado" },
     { value: "in_progress", label: "En progreso" },
+    { value: "validation", label: "Validación" },
     { value: "blocked", label: "Bloqueado" },
     { value: "done", label: "Hecho" },
     { value: "archived", label: "Archivado" },
@@ -163,9 +216,10 @@
   ];
 
   const detailStatusOptions = [
-    { value: "inbox", label: "Inbox" },
+    { value: "inbox", label: "Backlog" },
     { value: "planned", label: "Planificado" },
     { value: "in_progress", label: "En progreso" },
+    { value: "validation", label: "Validación" },
     { value: "blocked", label: "Bloqueado" },
     { value: "done", label: "Hecho" },
     { value: "archived", label: "Archivado" },
@@ -212,11 +266,12 @@
       : null;
   });
 
-  const kanbanColumns: { status: WorkStatus; label: string; tone: "neutral" | "ok" | "warn" | "danger" | "ai" }[] = [
-    { status: "inbox", label: "Inbox", tone: "neutral" },
+  const kanbanColumns: { status: WorkStatus; label: string; tone: "neutral" | "ok" | "warn" | "danger" | "info" | "ai" }[] = [
+    { status: "inbox", label: "Backlog", tone: "neutral" },
     { status: "planned", label: "Planificado", tone: "warn" },
     { status: "in_progress", label: "En progreso", tone: "ai" },
     { status: "blocked", label: "Bloqueado", tone: "danger" },
+    { status: "validation", label: "Validación", tone: "info" },
     { status: "done", label: "Hecho", tone: "ok" },
   ];
   const visibleKanbanColumns = $derived(
@@ -272,14 +327,23 @@
       ]);
       project = p;
       tasks = itemsList;
+      if (collapsedInitializedProject !== p.uid) {
+        collapsedParentIds = new Set(
+          itemsList
+            .filter((task) => task.parent_id != null)
+            .map((task) => task.parent_id as number),
+        );
+        collapsedInitializedProject = p.uid;
+      }
       categories = catList;
       members = memList;
       projectsList = pList;
       customers = customerList;
       cashMovements = movementList;
       if (projectReference !== p.uid) {
-        await goto(`/proyectos/${p.uid}`, { replaceState: true, noScroll: true });
+        await goto(`/proyectos/${p.uid}${$page.url.search}`, { replaceState: true, noScroll: true });
       }
+      if ($page.url.searchParams.get("estado") === "pendientes") filterStatus = "pending";
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Error al cargar el proyecto", "err");
     } finally {
@@ -325,7 +389,7 @@
     today.setHours(0, 0, 0, 0);
     const inSevenDays = new Date(today);
     inSevenDays.setDate(inSevenDays.getDate() + 7);
-    const openTasks = tasks.filter((task) => task.status !== "done" && task.status !== "archived");
+    const openTasks = tasks.filter(isTaskPendingWork);
     const overdue = openTasks.filter((task) => task.due_date && new Date(`${task.due_date}T00:00:00`) < today).length;
     const dueSoon = openTasks.filter((task) => {
       if (!task.due_date) return false;
@@ -367,7 +431,7 @@
 
   // Filter tasks
   const filteredTasks = $derived(
-    tasks.filter((task) => {
+    sortTasksByDueDate(tasks.filter((task) => {
       if (filterText.trim()) {
         const q = filterText.trim().toLowerCase();
         const titleMatch = task.title.toLowerCase().includes(q);
@@ -375,15 +439,16 @@
         const catMatch = (task.category?.name || "").toLowerCase().includes(q);
         if (!titleMatch && !descMatch && !catMatch) return false;
       }
-      if (filterStatus && task.status !== filterStatus) return false;
+      if (filterStatus === "pending" && !isTaskPendingWork(task)) return false;
+      if (filterStatus && filterStatus !== "pending" && task.status !== filterStatus) return false;
       if (filterType && task.type !== filterType) return false;
       if (filterPriority && task.priority !== filterPriority) return false;
       if (filterAssignee && String(task.assignee_id || "") !== filterAssignee) return false;
       return true;
-    })
+    }))
   );
   function taskSubtasks(taskId: number) {
-    return tasks.filter((task) => task.parent_id === taskId && task.status !== "archived");
+    return sortTasksByDueDate(tasks.filter((task) => task.parent_id === taskId && task.status !== "archived"));
   }
 
   function visibleSubtasks(taskId: number) {
@@ -391,11 +456,11 @@
   }
 
   const parentTasksForView = $derived(
-    tasks.filter((task) => {
+    sortTasksByDueDate(tasks.filter((task) => {
       if (task.parent_id != null) return false;
       if (task.status === "archived" && filterStatus !== "archived") return false;
       return filteredTasks.some((visible) => visible.id === task.id || visible.parent_id === task.id);
-    }),
+    })),
   );
   const parentIdsWithSubtasks = $derived(
     tasks
@@ -428,6 +493,22 @@
     return taskSubtasks(taskId).length > 0;
   }
 
+  function hasSubtaskAtRisk(taskId: number) {
+    return taskSubtasks(taskId).some((task) => task.status === "blocked" || isTaskOverdue(task));
+  }
+
+  function hasSubtaskDueSoon(taskId: number) {
+    return taskSubtasks(taskId).some((task) => isTaskDueSoon(task));
+  }
+
+  function taskIsDanger(task: WorkItem) {
+    return isTaskOverdue(task) || hasSubtaskAtRisk(task.id);
+  }
+
+  function taskIsDueSoon(task: WorkItem) {
+    return !taskIsDanger(task) && (isTaskDueSoon(task) || hasSubtaskDueSoon(task.id));
+  }
+
   function columnTasks(status: WorkStatus) {
     if (status === "archived") {
       return parentTasksForView.filter(
@@ -439,9 +520,10 @@
 
   function taskStatusLabel(s: string) {
     switch (s) {
-      case "inbox": return "Inbox";
+      case "inbox": return "Backlog";
       case "planned": return "Planificado";
       case "in_progress": return "En progreso";
+      case "validation": return "Validación";
       case "blocked": return "Bloqueado";
       case "done": return "Hecho";
       case "archived": return "Archivado";
@@ -479,10 +561,26 @@
     }
   }
 
-  function statusBadgeTone(s: string): "neutral" | "ok" | "warn" | "danger" | "ai" {
+  function requestTypeLabel(type: WorkProjectRequestType) {
+    return ({ suggestion: "Sugerencia", improvement: "Mejora", issue: "Incidencia", feature: "Nueva funcionalidad", question: "Consulta" })[type];
+  }
+
+  function requestStatusLabel(status: WorkProjectRequestStatus) {
+    return ({ new: "Nueva", reviewing: "En revisión", accepted: "Aceptada", rejected: "Rechazada", converted: "Convertida en tarea" })[status];
+  }
+
+  function requestStatusTone(status: WorkProjectRequestStatus): "neutral" | "ok" | "warn" | "danger" | "info" {
+    if (status === "accepted" || status === "converted") return "ok";
+    if (status === "rejected") return "danger";
+    if (status === "reviewing") return "info";
+    return "warn";
+  }
+
+  function statusBadgeTone(s: string): "neutral" | "ok" | "warn" | "danger" | "info" | "ai" {
     switch (s) {
       case "done": return "ok";
       case "in_progress": return "ai";
+      case "validation": return "info";
       case "blocked": return "danger";
       case "planned": return "warn";
       default: return "neutral";
@@ -493,9 +591,21 @@
     switch (status) {
       case "planned": return "bg-amber-400 shadow-[0_0_0_3px_rgba(251,191,36,0.12)]";
       case "in_progress": return "bg-purple-400 shadow-[0_0_0_3px_rgba(192,132,252,0.12)]";
+      case "validation": return "bg-sky-400 shadow-[0_0_0_3px_rgba(56,189,248,0.14)]";
       case "blocked": return "bg-rose-400 shadow-[0_0_0_3px_rgba(251,113,133,0.12)]";
       case "done": return "bg-emerald-400 shadow-[0_0_0_3px_rgba(52,211,153,0.12)]";
       default: return "bg-slate-400 shadow-[0_0_0_3px_rgba(148,163,184,0.1)]";
+    }
+  }
+
+  function statusBorderClass(status: WorkStatus) {
+    switch (status) {
+      case "planned": return "border-amber-400/55 bg-amber-500/[0.06]";
+      case "in_progress": return "border-cyan-400/55 bg-cyan-500/[0.06]";
+      case "validation": return "border-sky-400/65 bg-sky-500/[0.08]";
+      case "blocked": return "border-rose-400/60 bg-rose-500/[0.07]";
+      case "done": return "border-emerald-400/50 bg-emerald-500/[0.05]";
+      default: return "border-slate-400/40 bg-slate-500/[0.04]";
     }
   }
 
@@ -523,6 +633,7 @@
         type: "task",
         status: "inbox",
         priority: "normal",
+        assignee_id: $currentUser?.id ?? null,
       });
       quickTitle = "";
       showToast("Tarea añadida al proyecto");
@@ -550,8 +661,24 @@
       })),
       start_date: project.start_date ? project.start_date.slice(0, 10) : "",
       target_date: project.target_date ? project.target_date.slice(0, 10) : "",
+      logo_data_url: project.logo_data_url ?? "",
     };
     editProjectModalOpen = true;
+  }
+
+  async function handleProjectLogo(file: File | undefined) {
+    if (!file) return;
+    try {
+      editProjectForm.logo_data_url = await projectLogoDataUrl(file);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo cargar el logo", "err");
+    }
+  }
+
+  function dropProjectLogo(event: DragEvent) {
+    event.preventDefault();
+    projectLogoDragActive = false;
+    void handleProjectLogo(event.dataTransfer?.files?.[0]);
   }
 
   async function handleSaveProject() {
@@ -577,6 +704,10 @@
     });
     if (!editProjectForm.customer_id && invalidMilestone) {
       showToast("Revisa los importes de los hitos mensuales", "err");
+      return;
+    }
+    if (!editProjectForm.customer_id && hasDuplicateMilestoneMonths(editProjectForm.milestones)) {
+      showToast("No puedes repetir el mismo mes en dos hitos", "err");
       return;
     }
     editProjectSaving = true;
@@ -608,6 +739,7 @@
               .filter((milestone) => milestone.amount_cents > 0 && milestone.target_month),
         start_date: editProjectForm.start_date || null,
         target_date: editProjectForm.target_date || null,
+        logo_data_url: editProjectForm.logo_data_url,
       });
       showToast("Proyecto actualizado");
       editProjectModalOpen = false;
@@ -620,9 +752,14 @@
   }
 
   function addEditMilestone() {
+    const targetMonth = nextMilestoneMonth(milestoneMonthOptions, editProjectForm.milestones);
+    if (!targetMonth) {
+      showToast("No quedan más meses disponibles para añadir otro hito", "err");
+      return;
+    }
     editProjectForm.milestones = [
       ...editProjectForm.milestones,
-      { amount: "", target_month: currentMonth },
+      { amount: "", target_month: targetMonth },
     ];
   }
 
@@ -634,6 +771,8 @@
 
   function openDocumentsModal() {
     if (!project) return;
+    uploadFile = null;
+    uploadError = "";
     documentsForm = project.documents.map((document) => ({
       id: document.id,
       title: document.title,
@@ -644,12 +783,125 @@
     documentsModalOpen = true;
   }
 
+  function openBriefModal() {
+    if (!project) return;
+    const brief = normalizeProjectBrief(project.brief, project.tech_stack);
+    briefForm = {
+      summary: brief.summary || project.prd || "", problem: brief.problem, objectives: brief.objectives,
+      users: brief.users, scope: brief.scope, out_of_scope: brief.out_of_scope,
+      functional_requirements: brief.functional_requirements,
+      non_functional_requirements: brief.non_functional_requirements,
+      acceptance_criteria: brief.acceptance_criteria, risks: brief.risks,
+      dependencies: brief.dependencies, success_metrics: brief.success_metrics, notes: brief.notes,
+      frontend: brief.technology.frontend.join(", "), backend: brief.technology.backend.join(", "), app: brief.technology.app.join(", "),
+      database: brief.technology.database.join(", "), infrastructure: brief.technology.infrastructure.join(", "),
+      deployment: brief.technology.deployment.join(", "), integrations: brief.technology.integrations.join(", "), plugins: brief.technology.plugins.join(", "),
+      ai: brief.technology.ai.join(", "), tools: brief.technology.tools.join(", "),
+      repository_url: brief.technology.repository_url, documentation_url: brief.technology.documentation_url,
+      staging_url: brief.technology.staging_url, production_url: brief.technology.production_url,
+    };
+    briefModalOpen = true;
+  }
+
+  async function saveProjectBrief() {
+    if (!project || briefSaving) return;
+    briefSaving = true;
+    try {
+      const brief = normalizeProjectBrief({
+        ...briefForm,
+        technology: {
+          frontend: parseTechStack(briefForm.frontend), backend: parseTechStack(briefForm.backend), app: parseTechStack(briefForm.app),
+          database: parseTechStack(briefForm.database), infrastructure: parseTechStack(briefForm.infrastructure),
+          deployment: parseTechStack(briefForm.deployment), integrations: parseTechStack(briefForm.integrations), plugins: parseTechStack(briefForm.plugins),
+          ai: parseTechStack(briefForm.ai), tools: parseTechStack(briefForm.tools),
+          repository_url: briefForm.repository_url, documentation_url: briefForm.documentation_url,
+          staging_url: briefForm.staging_url, production_url: briefForm.production_url,
+        },
+      });
+      await api.upsertWorkProject({
+        id: project.id,
+        name: project.name,
+        prd: normalizeProjectPrd(brief.summary),
+        tech_stack: Object.values(brief.technology).filter(Array.isArray).flat() as string[],
+        brief,
+      });
+      briefModalOpen = false;
+      showToast("Ficha técnica actualizada");
+      await loadData();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo guardar la ficha técnica", "err");
+    } finally {
+      briefSaving = false;
+    }
+  }
+
   function addProjectDocument() {
     documentsForm = [...documentsForm, { title: "", kind: "link", location: "", notes: "" }];
   }
 
   function removeProjectDocument(index: number) {
     documentsForm = documentsForm.filter((_, itemIndex) => itemIndex !== index);
+  }
+
+  function bytesToBase64(bytes: Uint8Array): string {
+    let binary = "";
+    const chunk = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + chunk));
+    }
+    return btoa(binary);
+  }
+
+  function selectProjectDocumentFile(file: File | null) {
+    uploadFile = file;
+    uploadError = "";
+    if (file && file.size > 20 * 1024 * 1024) {
+      uploadError = `El fichero pesa ${(file.size / 1024 / 1024).toFixed(1)} MB y supera el límite de 20 MB.`;
+    }
+  }
+
+  async function uploadProjectDocument(fileOverride?: File) {
+    const file = fileOverride ?? uploadFile;
+    if (!project || !file || documentUploading) return;
+    uploadError = "";
+    if (file.size > 20 * 1024 * 1024) {
+      uploadError = `El fichero pesa ${(file.size / 1024 / 1024).toFixed(1)} MB y supera el límite de 20 MB.`;
+      return;
+    }
+    documentUploading = true;
+    try {
+      const drivePlugin = (await api.listPlugins()).find((plugin) => plugin.plugin_key === "google_drive");
+      if (!drivePlugin?.enabled) throw new Error("Activa Google Drive en Ajustes → Plugins");
+      const result = await api.uploadProjectFile({
+        provider: "google_drive",
+        project_id: project.id,
+        name: file.name,
+        mime_type: file.type || "application/octet-stream",
+        content_base64: bytesToBase64(new Uint8Array(await file.arrayBuffer())),
+      }, drivePlugin.config.folder_id ?? "");
+      documentsForm = [{
+        title: result.name,
+        kind: "link",
+        location: result.web_url,
+        notes: `Google Drive · ${result.mime_type} · ${result.size} bytes`,
+      }, ...documentsForm];
+      uploadFile = null;
+      if (uploadFileInput) uploadFileInput.value = "";
+      showToast("Fichero subido. Revisa el título y guarda la documentación");
+    } catch (error) {
+      uploadError = error instanceof Error ? error.message : "No se pudo subir el fichero";
+      showToast(uploadError, "err");
+    } finally {
+      documentUploading = false;
+    }
+  }
+
+  function dropProjectDocument(event: DragEvent) {
+    event.preventDefault();
+    documentDragActive = false;
+    const file = event.dataTransfer?.files?.[0] ?? null;
+    selectProjectDocumentFile(file);
+    if (file && file.size <= 20 * 1024 * 1024) void uploadProjectDocument(file);
   }
 
   async function saveProjectDocuments() {
@@ -674,6 +926,85 @@
     } finally {
       documentsSaving = false;
     }
+  }
+
+  function resetRequestForm() {
+    editingRequestId = null;
+    requestComment = "";
+    requestForm = { type: "suggestion", title: "", description: "", requester: "", priority: "normal", impact: "", status: "new", reviewer_id: "" };
+  }
+
+  function openRequestsModal(request?: WorkProjectRequest) {
+    if (request) {
+      editingRequestId = request.id;
+      requestForm = {
+        type: request.type, title: request.title, description: request.description,
+        requester: request.requester, priority: request.priority, impact: request.impact,
+        status: request.status, reviewer_id: request.reviewer_id ? String(request.reviewer_id) : "",
+      };
+      requestComment = "";
+    } else resetRequestForm();
+    requestsModalOpen = true;
+  }
+
+  async function persistProjectRequests(requests: WorkProjectRequest[]) {
+    if (!project) return;
+    await api.upsertWorkProject({ id: project.id, name: project.name, requests });
+  }
+
+  async function saveProjectRequest() {
+    if (!project || requestSaving) return;
+    if (!requestForm.title.trim() || !requestForm.description.trim()) {
+      showToast("Indica el título y la descripción de la solicitud", "err");
+      return;
+    }
+    requestSaving = true;
+    try {
+      const now = new Date().toISOString();
+      const existing = (project.requests ?? []).find((item) => item.id === editingRequestId);
+      const request: WorkProjectRequest = {
+        id: existing?.id ?? crypto.randomUUID(),
+        ...requestForm,
+        title: requestForm.title.trim(), description: requestForm.description.trim(),
+        requester: requestForm.requester.trim(), impact: requestForm.impact.trim(),
+        reviewer_id: requestForm.reviewer_id ? Number(requestForm.reviewer_id) : null,
+        task_id: existing?.task_id ?? null,
+        messages: existing?.messages ?? [], created_at: existing?.created_at ?? now, updated_at: now,
+      };
+      if (requestComment.trim()) request.messages = [...request.messages, { id: crypto.randomUUID(), author: $currentUser?.username ?? "Equipo", text: requestComment.trim(), created_at: now }];
+      const requests = existing
+        ? (project.requests ?? []).map((item) => item.id === request.id ? request : item)
+        : [request, ...(project.requests ?? [])];
+      await persistProjectRequests(requests);
+      showToast(existing ? "Solicitud actualizada" : "Solicitud registrada");
+      await loadData();
+      editingRequestId = request.id;
+      requestComment = "";
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo guardar la solicitud", "err");
+    } finally { requestSaving = false; }
+  }
+
+  async function convertRequestToTask(request: WorkProjectRequest) {
+    if (!project || requestSaving || request.task_id) return;
+    requestSaving = true;
+    try {
+      const task = await api.upsertWorkItem({
+        title: request.title, description: `${request.description}${request.impact ? `\n\nImpacto: ${request.impact}` : ""}${request.requester ? `\n\nSolicitado por: ${request.requester}` : ""}`,
+        project_id: project.id, type: request.type === "issue" ? "issue" : request.type === "suggestion" ? "idea" : "task",
+        priority: request.priority, status: "inbox", assignee_id: request.reviewer_id,
+        source_type: "project_request", source_key: request.id,
+      });
+      const now = new Date().toISOString();
+      const updated = { ...request, status: "converted" as const, task_id: task.id, updated_at: now };
+      await persistProjectRequests((project.requests ?? []).map((item) => item.id === request.id ? updated : item));
+      requestsModalOpen = false;
+      showToast("Solicitud convertida en tarea");
+      await loadData();
+      openEditTaskModal(task);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo convertir la solicitud", "err");
+    } finally { requestSaving = false; }
   }
 
   function openCashModal(kind: CashKind) {
@@ -728,7 +1059,7 @@
       category_id: "",
       project_id: String(projectId),
       parent_id: "",
-      assignee_id: "",
+      assignee_id: $currentUser?.id ? String($currentUser.id) : "",
       start_date: "",
       due_date: "",
     };
@@ -756,6 +1087,7 @@
           status: "inbox",
           priority: "normal",
           due_date: parentDueDate,
+          assignee_id: $currentUser?.id ?? null,
         });
         created += 1;
 
@@ -769,6 +1101,7 @@
             status: "inbox",
             priority: "normal",
             due_date: subtask.due_date || parentDueDate,
+            assignee_id: $currentUser?.id ?? null,
           });
           created += 1;
         }
@@ -836,7 +1169,7 @@
       category_id: parent.category_id ? String(parent.category_id) : "",
       project_id: String(parent.project_id ?? projectId),
       parent_id: String(parent.id),
-      assignee_id: parent.assignee_id ? String(parent.assignee_id) : "",
+      assignee_id: parent.assignee_id ? String(parent.assignee_id) : ($currentUser?.id ? String($currentUser.id) : ""),
       start_date: "",
       due_date: "",
     };
@@ -971,7 +1304,46 @@
       start_date: task.start_date ? task.start_date.slice(0, 10) : "",
       due_date: task.due_date ? task.due_date.slice(0, 10) : "",
     };
+    reviewDraft = "";
     detailModalOpen = true;
+  }
+
+  async function addReviewMessage(kind: "comment" | "changes_requested" | "approved") {
+    if (!editingTask || reviewSaving) return;
+    const text = reviewDraft.trim();
+    if (kind !== "approved" && !text) {
+      showToast("Escribe el comentario de validación", "err");
+      return;
+    }
+    reviewSaving = true;
+    try {
+      const status: WorkStatus = kind === "approved" ? "done" : kind === "changes_requested" ? "in_progress" : "validation";
+      const saved = await api.upsertWorkItem({
+        id: editingTask.id,
+        title: editingTask.title,
+        status,
+        review_messages: [
+          ...(editingTask.review_messages ?? []),
+          {
+            id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}`,
+            author_id: $currentUser?.id ?? 0,
+            author_name: $currentUser?.display_name ?? "Usuario",
+            message: text || "Tarea validada y aprobada.",
+            created_at: new Date().toISOString(),
+            kind,
+          },
+        ],
+      });
+      editingTask = saved;
+      detailForm.status = saved.status;
+      tasks = tasks.map((task) => task.id === saved.id ? saved : task);
+      reviewDraft = "";
+      showToast(kind === "approved" ? "Tarea aprobada" : kind === "changes_requested" ? "Cambios solicitados" : "Comentario añadido");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo guardar la validación", "err");
+    } finally {
+      reviewSaving = false;
+    }
   }
 
   async function handleSaveTask() {
@@ -1188,7 +1560,11 @@
     <!-- Project Header Banner -->
     <Card lift={false} class="mb-6 border border-[var(--color-border-strong)] bg-purple-950/20 p-6">
       <div class="flex flex-wrap items-start justify-between gap-4">
-        <div class="min-w-0 max-w-3xl">
+        <div class="flex min-w-0 max-w-3xl items-start gap-4">
+          {#if project.logo_data_url}
+            <img src={project.logo_data_url} alt="Logo de {project.name}" class="h-20 w-20 shrink-0 rounded-2xl border border-white/10 object-cover shadow-lg" />
+          {/if}
+          <div class="min-w-0">
           <div class="flex flex-wrap items-center gap-3 mb-2">
             <h1 class="text-2xl font-bold text-[var(--color-text)]">
               {project.name}
@@ -1214,9 +1590,65 @@
             {/if}
             <span>Objetivo: <strong class="text-[var(--color-text)]">{formatDate(project.target_date)}</strong></span>
           </div>
+          </div>
         </div>
 
         <ProjectProgress total={totalTasks} completed={completedTasks} blocked={blockedTasks} progress={progressPercent} />
+      </div>
+    </Card>
+
+    <Card lift={false} class="mb-6 border border-[var(--color-border)] bg-black/10 p-4" data-project-technical-brief>
+      {@const projectBrief = normalizeProjectBrief(project.brief, project.tech_stack)}
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <span class="section-label">DEFINICIÓN DEL PROYECTO</span>
+          <p class="mt-1 text-xs text-[var(--color-muted-dim)]">PRD y tecnologías principales para orientar al equipo.</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <Badge tone={projectTechnologyCount(projectBrief) ? "ok" : "warn"}>{projectTechnologyCount(projectBrief)} tecnologías</Badge>
+          {#if $isAdmin}<Button variant="secondary" onclick={openBriefModal}>{projectBrief.summary || projectTechnologyCount(projectBrief) ? "Editar ficha" : "+ Completar ficha"}</Button>{/if}
+        </div>
+      </div>
+      <div class="mt-4 grid gap-4 xl:grid-cols-[minmax(18rem,1fr)_minmax(0,2fr)]">
+        <div class="rounded-xl border border-white/[0.07] bg-white/[0.025] p-4">
+          <p class="mb-2 text-xs font-semibold uppercase tracking-wide text-purple-300/80">Resumen del producto</p>
+          {#if projectBrief.summary}
+            <RichDescription value={projectBrief.summary} />
+          {:else}
+            <p class="text-xs text-[var(--color-muted-dim)]">Todavía no se ha definido el resumen.</p>
+          {/if}
+          <div class="mt-4 grid grid-cols-2 gap-2 text-[11px]">
+            <span class="rounded-lg bg-black/20 px-2 py-1.5 text-[var(--color-muted)]">Alcance {projectBrief.scope ? "✓" : "—"}</span>
+            <span class="rounded-lg bg-black/20 px-2 py-1.5 text-[var(--color-muted)]">Requisitos {projectBrief.functional_requirements ? "✓" : "—"}</span>
+            <span class="rounded-lg bg-black/20 px-2 py-1.5 text-[var(--color-muted)]">Aceptación {projectBrief.acceptance_criteria ? "✓" : "—"}</span>
+            <span class="rounded-lg bg-black/20 px-2 py-1.5 text-[var(--color-muted)]">Riesgos {projectBrief.risks ? "✓" : "—"}</span>
+          </div>
+        </div>
+        <div class="rounded-xl border border-white/[0.07] bg-white/[0.025] p-4">
+          <p class="mb-3 text-xs font-semibold uppercase tracking-wide text-purple-300/80">Mapa tecnológico</p>
+          {#if projectTechnologyCount(projectBrief)}
+            <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              {#each [
+                ["Frontend", projectBrief.technology.frontend], ["Backend", projectBrief.technology.backend], ["App", projectBrief.technology.app],
+                ["Datos", projectBrief.technology.database], ["Infra", projectBrief.technology.infrastructure],
+                ["Deploy", projectBrief.technology.deployment], ["Integraciones", projectBrief.technology.integrations], ["Plugins", projectBrief.technology.plugins],
+                ["IA", projectBrief.technology.ai], ["Herramientas", projectBrief.technology.tools]
+              ] as group}
+                {#if group[1].length}
+                  <div><p class="mb-1 text-[10px] font-bold uppercase tracking-wide text-[var(--color-muted-dim)]">{group[0]}</p><div class="flex flex-wrap gap-1">{#each group[1] as technology}<TechnologyBadge name={technology} />{/each}</div></div>
+                {/if}
+              {/each}
+            </div>
+          {:else}
+            <p class="text-xs text-[var(--color-muted-dim)]">Todavía no se ha indicado el stack.</p>
+          {/if}
+          <div class="mt-4 flex flex-wrap gap-2 text-xs">
+            {#if projectBrief.technology.repository_url}<a class="text-[var(--color-purple-bright)] hover:underline" href={projectBrief.technology.repository_url} target="_blank" rel="noreferrer">Repositorio ↗</a>{/if}
+            {#if projectBrief.technology.documentation_url}<a class="text-[var(--color-purple-bright)] hover:underline" href={projectBrief.technology.documentation_url} target="_blank" rel="noreferrer">Docs ↗</a>{/if}
+            {#if projectBrief.technology.staging_url}<a class="text-[var(--color-purple-bright)] hover:underline" href={projectBrief.technology.staging_url} target="_blank" rel="noreferrer">Staging ↗</a>{/if}
+            {#if projectBrief.technology.production_url}<a class="text-[var(--color-purple-bright)] hover:underline" href={projectBrief.technology.production_url} target="_blank" rel="noreferrer">Producción ↗</a>{/if}
+          </div>
+        </div>
       </div>
     </Card>
 
@@ -1257,6 +1689,37 @@
         </div>
       {:else}
         <p class="mt-3 rounded-xl border border-dashed border-[var(--color-border)] px-4 py-3 text-xs text-[var(--color-muted-dim)]">Todavía no hay documentación vinculada.</p>
+      {/if}
+    </Card>
+
+    <Card lift={false} class="mb-6 border border-[var(--color-border)] bg-black/10 p-4" data-project-requests>
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <span class="section-label">SOLICITUDES Y SUGERENCIAS</span>
+          <p class="mt-1 text-xs text-[var(--color-muted-dim)]">Ideas, incidencias y peticiones pendientes de decisión antes de convertirse en trabajo.</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <Badge tone={(project.requests ?? []).some((item) => item.status === "new") ? "warn" : "neutral"}>
+            {(project.requests ?? []).filter((item) => !["rejected", "converted"].includes(item.status)).length} abiertas
+          </Badge>
+          <Button variant="secondary" onclick={() => openRequestsModal()}>+ Nueva solicitud</Button>
+        </div>
+      </div>
+      {#if (project.requests ?? []).length}
+        <div class="mt-3 grid gap-2 lg:grid-cols-2 xl:grid-cols-3">
+          {#each (project.requests ?? []) as request (request.id)}
+            <button type="button" onclick={() => openRequestsModal(request)} class="rounded-xl border border-white/[0.07] bg-white/[0.025] p-3 text-left transition hover:border-purple-400/35 hover:bg-purple-500/[0.05]">
+              <div class="flex items-start justify-between gap-2">
+                <div class="min-w-0"><p class="truncate text-sm font-semibold text-[var(--color-text)]">{request.title}</p><p class="mt-1 text-[10px] font-bold uppercase tracking-wide text-purple-300/80">{requestTypeLabel(request.type)}{request.requester ? ` · ${request.requester}` : ""}</p></div>
+                <Badge tone={requestStatusTone(request.status)}>{requestStatusLabel(request.status)}</Badge>
+              </div>
+              <p class="mt-2 line-clamp-2 text-xs leading-relaxed text-[var(--color-muted)]">{request.description}</p>
+              <div class="mt-3 flex items-center justify-between text-[10px] text-[var(--color-muted-dim)]"><span>Prioridad {priorityLabel(request.priority).toLowerCase()}</span><span>{formatDate(request.updated_at)}</span></div>
+            </button>
+          {/each}
+        </div>
+      {:else}
+        <p class="mt-3 rounded-xl border border-dashed border-[var(--color-border)] px-4 py-3 text-xs text-[var(--color-muted-dim)]">No hay solicitudes. Registra aquí una idea o petición antes de comprometerla como tarea.</p>
       {/if}
     </Card>
 
@@ -1534,7 +1997,7 @@
           {@const visibleChildren = visibleSubtasks(task.id)}
           {@const completedChildren = subtasks.filter((item) => item.status === "done").length}
           {@const childProgress = subtasks.length ? Math.round((completedChildren / subtasks.length) * 100) : 0}
-          <Card lift={false} class="relative overflow-visible border border-[var(--color-border)] p-0 hover:z-50 hover:border-[var(--color-border-strong)]">
+          <Card lift={false} class="relative overflow-visible border p-0 hover:z-50 {taskIsDanger(task) ? 'border-rose-500/60 bg-rose-500/[0.06]' : taskIsDueSoon(task) ? 'border-amber-400/55 bg-amber-500/[0.06]' : 'border-[var(--color-border)] hover:border-[var(--color-border-strong)]'}">
             <div
               role="button"
               tabindex="0"
@@ -1557,6 +2020,7 @@
                   <h3 class="text-sm font-semibold text-[var(--color-text)] group-hover:text-[var(--color-purple-bright)]">{task.title}</h3>
                   <Badge tone={statusBadgeTone(task.status)}>{taskStatusLabel(task.status)}</Badge>
                   <Badge tone={priorityBadgeTone(task.priority)}>{priorityLabel(task.priority)}</Badge>
+                  {#if hasSubtaskAtRisk(task.id)}<Badge tone="danger">Subtarea en peligro</Badge>{/if}
                   {#if orcaExecutionLabel(task)}
                     <Badge tone={orcaExecutionState(task) === "failed" ? "danger" : orcaExecutionState(task) === "completed" ? "ok" : "ai"}>{orcaExecutionLabel(task)}</Badge>
                   {/if}
@@ -1575,8 +2039,8 @@
               </div>
 
               <div class="flex shrink-0 flex-wrap items-center gap-2">
-                {#if task.assignee_name}<span class="text-xs text-[var(--color-muted)]">👤 {task.assignee_name}</span>{/if}
-                {#if task.due_date}<span class="text-xs tabular text-[var(--color-muted-dim)]">📅 {formatDate(task.due_date)}</span>{/if}
+                {#if task.assignee_name}<AssigneeAvatar name={task.assignee_name} avatar={task.assignee_avatar_data_url} status={task.status} />{/if}
+                {#if task.due_date}<span class="text-xs tabular {isTaskOverdue(task) ? 'font-semibold text-rose-300' : isTaskDueSoon(task) ? 'font-semibold text-amber-300' : 'text-[var(--color-muted-dim)]'}">📅 {formatDate(task.due_date)}</span>{/if}
                 <button
                   type="button"
                   class="rounded-lg border border-cyan-400/25 px-2.5 py-1.5 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/10"
@@ -1596,7 +2060,7 @@
                   {#each visibleChildren as child (child.id)}
                     <button
                       type="button"
-                      class="group/child relative flex w-full flex-wrap items-center gap-3 px-3 py-3 text-left transition hover:bg-purple-500/[0.06]"
+                      class="group/child relative flex w-full flex-wrap items-center gap-3 border-l-2 px-3 py-3 text-left transition hover:bg-purple-500/[0.06] {isTaskOverdue(child) ? 'border-l-rose-500 bg-rose-500/[0.07]' : isTaskDueSoon(child) ? 'border-l-amber-400 bg-amber-500/[0.06]' : 'border-l-transparent'}"
                       onclick={() => openEditTaskModal(child)}
                     >
                       <span class="h-2 w-2 shrink-0 rounded-full {statusDotClass(child.status)}"></span>
@@ -1605,8 +2069,8 @@
                         {#if child.description}<RichDescription value={child.description} class="mt-0.5 line-clamp-1 text-[11px] text-[var(--color-muted-dim)]" />{/if}
                       </div>
                       <Badge tone={statusBadgeTone(child.status)}>{taskStatusLabel(child.status)}</Badge>
-                      {#if child.assignee_name}<span class="text-[11px] text-[var(--color-muted)]">👤 {child.assignee_name}</span>{/if}
-                      {#if child.due_date}<span class="text-[11px] tabular text-[var(--color-muted-dim)]">{formatDate(child.due_date)}</span>{/if}
+                      {#if child.assignee_name}<AssigneeAvatar name={child.assignee_name} avatar={child.assignee_avatar_data_url} size="xs" status={child.status} />{/if}
+                      {#if child.due_date}<span class="text-[11px] tabular {isTaskOverdue(child) ? 'font-semibold text-rose-300' : isTaskDueSoon(child) ? 'font-semibold text-amber-300' : 'text-[var(--color-muted-dim)]'}">{formatDate(child.due_date)}</span>{/if}
                       <div class="pointer-events-none absolute bottom-[calc(100%+0.5rem)] left-3 z-[100] hidden w-[30rem] max-w-[calc(100vw-3rem)] overflow-hidden rounded-2xl border border-[var(--color-border-strong)] bg-[var(--color-obsidian-elevated)] shadow-[0_24px_70px_rgba(0,0,0,0.65)] group-hover/child:block">
                         <div class="border-b border-[var(--color-border)] bg-[var(--color-obsidian-panel)] px-5 py-4">
                           <div class="mb-1.5 flex items-center gap-2">
@@ -1636,15 +2100,15 @@
       <!-- Kanban Board View -->
       <div>
         <p class="mb-3 text-xs text-[var(--color-muted-dim)]">
-          Las cabeceras permanecen visibles al desplazarte. Arrastra una tarea para cambiar su estado o ábrela y usa el selector «Estado» con teclado o pantalla táctil.
+          Las cabeceras permanecen visibles al desplazarte. En pantalla táctil o pantallas estrechas, desliza horizontalmente para ver todas las columnas, incluida «Hecho».
         </p>
-        <div class="flex snap-x items-stretch gap-4 overflow-x-auto pb-3 lg:grid lg:grid-cols-5 lg:overflow-visible">
+        <div class="flex snap-x items-stretch gap-4 overflow-x-auto pb-3 xl:grid xl:grid-cols-6 xl:overflow-visible">
         {#each visibleKanbanColumns as col, colIndex}
           {@const colTasks = columnTasks(col.status)}
           <div
             role="group"
             aria-label={`Columna ${col.label}`}
-            class="relative flex h-full min-h-[300px] min-w-[18rem] snap-start flex-col rounded-2xl border p-3 transition-all hover:z-50 lg:min-w-0 {dragOverStatus === col.status
+            class="relative flex h-full min-h-[300px] min-w-[18rem] snap-start flex-col rounded-2xl border p-3 transition-all hover:z-50 xl:min-w-0 {dragOverStatus === col.status
               ? 'border-[var(--color-purple-bright)] bg-purple-500/10 ring-2 ring-purple-400/20'
               : 'border-[var(--color-border)] bg-black/20'}"
             ondragover={(event) => handleColumnDragOver(event, col.status)}
@@ -1671,7 +2135,7 @@
                   aria-label={hasSubtasks(task.id) ? `Tarea ${task.title} con estado automático` : `Arrastrar ${task.parent_id ? "subtarea" : "tarea"} ${task.title}`}
                   class="relative overflow-visible border p-0 transition-all hover:z-[60] select-none {hasSubtasks(task.id)
                       ? 'cursor-default border-[var(--color-border-strong)] bg-black/30'
-                      : 'cursor-grab active:cursor-grabbing border-[var(--color-border-soft)] hover:border-[var(--color-border-strong)]'} {draggedTaskId === task.id
+                      : 'cursor-grab active:cursor-grabbing border-[var(--color-border-soft)] hover:border-[var(--color-border-strong)]'} {taskIsDanger(task) ? '!border-rose-500/65 bg-rose-500/[0.07]' : taskIsDueSoon(task) ? '!border-amber-400/60 bg-amber-500/[0.06]' : ''} {draggedTaskId === task.id
                     ? 'opacity-40 scale-[0.98]'
                     : ''} {statusUpdatingTaskId === task.id ? 'opacity-60 cursor-wait' : ''} {dragOverParentId === task.id
                       ? 'ring-2 ring-[var(--color-purple-bright)] border-[var(--color-purple-bright)] bg-purple-500/20'
@@ -1744,6 +2208,7 @@
 
                     <div class="flex flex-wrap items-center gap-1.5 pt-1">
                       <Badge tone={priorityBadgeTone(task.priority)}>{priorityLabel(task.priority)}</Badge>
+                      {#if hasSubtaskAtRisk(task.id)}<Badge tone="danger">Subtarea en peligro</Badge>{/if}
                       {#if orcaExecutionLabel(task)}
                         <Badge tone={orcaExecutionState(task) === "failed" ? "danger" : orcaExecutionState(task) === "completed" ? "ok" : "ai"}>{orcaExecutionLabel(task)}</Badge>
                       {/if}
@@ -1759,8 +2224,8 @@
 
                     {#if task.assignee_name || task.due_date}
                       <div class="flex items-center justify-between text-[10px] text-[var(--color-muted-dim)] pt-1 border-t border-white/5">
-                        <span>{task.assignee_name ? `👤 ${task.assignee_name}` : ""}</span>
-                        <span>{task.due_date ? `📅 ${formatDate(task.due_date)}` : ""}</span>
+                        {#if task.assignee_name}<AssigneeAvatar name={task.assignee_name} avatar={task.assignee_avatar_data_url} size="xs" status={col.status} />{:else}<span></span>{/if}
+                        <span class={isTaskOverdue(task) ? "font-semibold text-rose-300" : isTaskDueSoon(task) ? "font-semibold text-amber-300" : ""}>{task.due_date ? `📅 ${formatDate(task.due_date)}` : ""}</span>
                       </div>
                     {/if}
                   </div>
@@ -1774,7 +2239,7 @@
                             tabindex="0"
                             draggable={statusUpdatingTaskId !== child.id}
                             aria-label={`Arrastrar subtarea ${child.title}`}
-                            class="group/subtask relative flex w-full cursor-grab items-center gap-2 rounded-md px-2 py-1.5 text-left transition hover:z-[70] hover:bg-purple-500/10 active:cursor-grabbing {draggedTaskId === child.id ? 'scale-[0.98] opacity-40' : ''} {statusUpdatingTaskId === child.id ? 'cursor-wait opacity-60' : ''}"
+                            class="group/subtask relative flex w-full cursor-grab items-center gap-2 rounded-md border-l-2 px-2 py-1.5 text-left transition hover:z-[70] active:cursor-grabbing {statusBorderClass(col.status)} {isTaskOverdue(child) ? '!border-l-rose-500 ring-1 ring-rose-500/20' : isTaskDueSoon(child) ? '!border-l-amber-400 ring-1 ring-amber-400/20' : ''} {draggedTaskId === child.id ? 'scale-[0.98] opacity-40' : ''} {statusUpdatingTaskId === child.id ? 'cursor-wait opacity-60' : ''}"
                             onclick={(event) => {
                               event.stopPropagation();
                               openEditTaskModal(child);
@@ -1792,7 +2257,7 @@
                             <span class="text-[9px] text-[var(--color-muted-dim)]" aria-hidden="true">⠇⠇</span>
                             <span class="h-1.5 w-1.5 shrink-0 rounded-full {statusDotClass(child.status)}"></span>
                             <span class="min-w-0 flex-1 truncate text-[10px] text-[var(--color-muted)] {child.status === 'done' ? 'line-through opacity-60' : ''}">{child.title}</span>
-                            {#if child.assignee_name}<span class="max-w-14 truncate text-[9px] text-[var(--color-muted-dim)]">{child.assignee_name}</span>{/if}
+                            {#if child.assignee_name}<AssigneeAvatar name={child.assignee_name} avatar={child.assignee_avatar_data_url} size="xs" status={col.status} />{/if}
                             <div class="pointer-events-none absolute bottom-[calc(100%+0.5rem)] z-[100] hidden w-[30rem] max-w-[calc(100vw-3rem)] overflow-hidden rounded-2xl border border-[var(--color-border-strong)] bg-[var(--color-obsidian-elevated)] shadow-[0_24px_70px_rgba(0,0,0,0.65)] group-hover/subtask:block {colIndex >= 3 ? 'right-0' : 'left-0'}">
                               <div class="border-b border-[var(--color-border)] bg-[var(--color-obsidian-panel)] px-5 py-4">
                                 <div class="mb-1.5 flex items-center gap-2">
@@ -1836,6 +2301,7 @@
 <Modal
   open={editProjectModalOpen}
   title="Editar Proyecto"
+  size="xl"
   onclose={() => (editProjectModalOpen = false)}
 >
   <form
@@ -1857,6 +2323,40 @@
     </div>
 
     <RichDescriptionEditor id="edit-project-desc" bind:value={editProjectForm.description} />
+
+    <div
+      class="space-y-2 rounded-xl border border-dashed p-3 transition {projectLogoDragActive ? 'border-purple-400 bg-purple-500/10' : 'border-[var(--color-border)]'}"
+      role="group"
+      aria-label="Subir imagen del proyecto"
+      ondragenter={(event) => { event.preventDefault(); projectLogoDragActive = true; }}
+      ondragover={(event) => { event.preventDefault(); projectLogoDragActive = true; }}
+      ondragleave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) projectLogoDragActive = false; }}
+      ondrop={dropProjectLogo}
+      data-project-logo-dropzone
+    >
+      <div class="flex flex-wrap items-center gap-4">
+        {#if editProjectForm.logo_data_url}
+          <img src={editProjectForm.logo_data_url} alt="Vista previa del proyecto" class="h-20 w-20 rounded-xl border border-[var(--color-border)] object-cover" />
+        {:else}
+          <div class="grid h-20 w-20 place-items-center rounded-xl border border-dashed border-[var(--color-border)] text-2xl text-[var(--color-muted)]">◫</div>
+        {/if}
+        <div class="min-w-0 flex-1 space-y-2">
+          <div>
+            <p class="text-xs font-medium text-[var(--color-text)]">Imagen del proyecto</p>
+            <p class="text-[11px] text-[var(--color-muted-dim)]">Arrastra aquí una imagen o selecciónala. PNG, JPG o WebP, máximo 1 MB.</p>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <label class="cursor-pointer rounded-lg border border-[var(--color-border)] px-3 py-2 text-xs hover:bg-white/5">
+              Subir imagen
+              <input class="sr-only" type="file" accept="image/png,image/jpeg,image/webp" onchange={(event) => handleProjectLogo(event.currentTarget.files?.[0])} />
+            </label>
+            {#if editProjectForm.logo_data_url}
+              <Button type="button" variant="ghost" onclick={() => (editProjectForm.logo_data_url = "")}>Quitar</Button>
+            {/if}
+          </div>
+        </div>
+      </div>
+    </div>
 
     <Select
       label="Estado"
@@ -1883,13 +2383,13 @@
             <p class="text-xs font-medium text-[var(--color-text)]">Hitos mensuales</p>
             <p class="text-[11px] text-[var(--color-muted-dim)]">Importe estimado y mes/año objetivo.</p>
           </div>
-          <Button type="button" variant="secondary" onclick={addEditMilestone}>+ Añadir hito</Button>
+          <Button type="button" variant="secondary" disabled={!nextMilestoneMonth(milestoneMonthOptions, editProjectForm.milestones)} onclick={addEditMilestone}>+ Añadir hito</Button>
         </div>
         {#each editProjectForm.milestones as milestone, index}
           <div class="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
             <input class="field w-full text-sm" inputmode="decimal" bind:value={milestone.amount} placeholder="Importe (€)" />
             <Select
-              options={milestoneMonthOptions}
+              options={availableMilestoneMonths(milestoneMonthOptions, editProjectForm.milestones, index)}
               bind:value={milestone.target_month}
               placeholder="Mes y año"
             />
@@ -1934,12 +2434,119 @@
   </form>
 </Modal>
 
+<Modal open={briefModalOpen} title="Definición del proyecto" size="fluid" onclose={() => !briefSaving && (briefModalOpen = false)}>
+  <form class="space-y-4" onsubmit={(event) => { event.preventDefault(); saveProjectBrief(); }}>
+    <details open class="rounded-xl border border-[var(--color-border)] bg-black/15 p-4"><summary class="cursor-pointer font-semibold text-[var(--color-text)]">1. Resumen y propósito</summary><div class="mt-4 grid gap-3 md:grid-cols-2">
+      <label class="md:col-span-2 text-sm"><span class="mb-1 block text-[var(--color-muted)]">Resumen ejecutivo</span><textarea class="field min-h-28 w-full" bind:value={briefForm.summary} placeholder="Qué es el producto y qué valor aporta"></textarea></label>
+      <label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">Problema y contexto</span><textarea class="field min-h-28 w-full" bind:value={briefForm.problem}></textarea></label>
+      <label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">Objetivos</span><textarea class="field min-h-28 w-full" bind:value={briefForm.objectives}></textarea></label>
+      <label class="md:col-span-2 text-sm"><span class="mb-1 block text-[var(--color-muted)]">Usuarios y perfiles</span><textarea class="field min-h-20 w-full" bind:value={briefForm.users}></textarea></label>
+    </div></details>
+    <details open class="rounded-xl border border-[var(--color-border)] bg-black/15 p-4"><summary class="cursor-pointer font-semibold text-[var(--color-text)]">2. Alcance y requisitos</summary><div class="mt-4 grid gap-3 md:grid-cols-2">
+      <label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">Dentro del alcance</span><textarea class="field min-h-28 w-full" bind:value={briefForm.scope}></textarea></label>
+      <label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">Fuera del alcance</span><textarea class="field min-h-28 w-full" bind:value={briefForm.out_of_scope}></textarea></label>
+      <label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">Requisitos funcionales</span><textarea class="field min-h-36 w-full" bind:value={briefForm.functional_requirements}></textarea></label>
+      <label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">Requisitos no funcionales</span><textarea class="field min-h-36 w-full" bind:value={briefForm.non_functional_requirements} placeholder="Seguridad, rendimiento, disponibilidad…"></textarea></label>
+      <label class="md:col-span-2 text-sm"><span class="mb-1 block text-[var(--color-muted)]">Criterios de aceptación</span><textarea class="field min-h-28 w-full" bind:value={briefForm.acceptance_criteria}></textarea></label>
+    </div></details>
+    <details open class="rounded-xl border border-purple-400/20 bg-purple-500/[0.04] p-4"><summary class="cursor-pointer font-semibold text-[var(--color-text)]">3. Stack tecnológico</summary><p class="mt-1 text-xs text-[var(--color-muted-dim)]">Selecciona tecnologías conocidas o añade una personalizada.</p><div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      {#each briefTechFields as field}
+        <TechnologyPicker label={field.label} category={field.key} bind:value={briefForm[field.key]} />
+      {/each}
+    </div><div class="mt-4 grid gap-3 sm:grid-cols-2">
+      <Input label="Repositorio" bind:value={briefForm.repository_url} placeholder="https://github.com/…" /><Input label="Documentación" bind:value={briefForm.documentation_url} placeholder="https://…" />
+      <Input label="Staging" bind:value={briefForm.staging_url} placeholder="https://staging…" /><Input label="Producción" bind:value={briefForm.production_url} placeholder="https://…" />
+    </div></details>
+    <details class="rounded-xl border border-[var(--color-border)] bg-black/15 p-4"><summary class="cursor-pointer font-semibold text-[var(--color-text)]">4. Riesgos, dependencias y éxito</summary><div class="mt-4 grid gap-3 md:grid-cols-2">
+      <label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">Riesgos</span><textarea class="field min-h-24 w-full" bind:value={briefForm.risks}></textarea></label><label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">Dependencias</span><textarea class="field min-h-24 w-full" bind:value={briefForm.dependencies}></textarea></label>
+      <label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">Métricas de éxito</span><textarea class="field min-h-24 w-full" bind:value={briefForm.success_metrics}></textarea></label><label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">Notas adicionales</span><textarea class="field min-h-24 w-full" bind:value={briefForm.notes}></textarea></label>
+    </div></details>
+    <div class="flex justify-end gap-2 border-t border-[var(--color-border)] pt-4">
+      <Button type="button" variant="ghost" disabled={briefSaving} onclick={() => (briefModalOpen = false)}>Cancelar</Button>
+      <Button type="submit" disabled={briefSaving}>{briefSaving ? "Guardando…" : "Guardar ficha"}</Button>
+    </div>
+  </form>
+</Modal>
+
+<Modal open={requestsModalOpen} title={editingRequestId ? "Detalle de la solicitud" : "Nueva solicitud o sugerencia"} size="xl" onclose={() => !requestSaving && (requestsModalOpen = false)}>
+  <form class="grid gap-5 xl:grid-cols-[minmax(0,1fr)_22rem]" onsubmit={(event) => { event.preventDefault(); saveProjectRequest(); }}>
+    <div class="space-y-4">
+      <div class="grid gap-3 sm:grid-cols-2">
+        <Select label="Tipo" options={[{ value: "suggestion", label: "Sugerencia" }, { value: "improvement", label: "Mejora" }, { value: "issue", label: "Incidencia" }, { value: "feature", label: "Nueva funcionalidad" }, { value: "question", label: "Consulta" }]} bind:value={requestForm.type} />
+        <Select label="Estado" options={[{ value: "new", label: "Nueva" }, { value: "reviewing", label: "En revisión" }, { value: "accepted", label: "Aceptada" }, { value: "rejected", label: "Rechazada" }, { value: "converted", label: "Convertida en tarea" }]} bind:value={requestForm.status} />
+      </div>
+      <Input label="Título" bind:value={requestForm.title} placeholder="¿Qué se solicita o propone?" required />
+      <label class="block text-sm"><span class="mb-1 block text-[var(--color-muted)]">Descripción</span><textarea class="field min-h-32 w-full" bind:value={requestForm.description} placeholder="Necesidad, comportamiento esperado y contexto…" required></textarea></label>
+      <div class="grid gap-3 sm:grid-cols-2">
+        <Input label="Solicitante" bind:value={requestForm.requester} placeholder="Cliente, contacto o equipo" />
+        <Select label="Prioridad" options={[{ value: "low", label: "Baja" }, { value: "normal", label: "Normal" }, { value: "high", label: "Alta" }, { value: "urgent", label: "Urgente" }]} bind:value={requestForm.priority} />
+      </div>
+      <label class="block text-sm"><span class="mb-1 block text-[var(--color-muted)]">Impacto esperado</span><textarea class="field min-h-20 w-full" bind:value={requestForm.impact} placeholder="A quién afecta, beneficio, urgencia o alcance…"></textarea></label>
+      <Select label="Responsable de revisión" options={[{ value: "", label: "Sin asignar" }, ...members.map((member) => ({ value: String(member.id), label: member.display_name }))]} bind:value={requestForm.reviewer_id} />
+      <div class="flex flex-wrap justify-end gap-2 border-t border-[var(--color-border)] pt-4">
+        <Button type="button" variant="ghost" disabled={requestSaving} onclick={() => (requestsModalOpen = false)}>Cancelar</Button>
+        {#if editingRequestId}
+          {@const requestToConvert = (project?.requests ?? []).find((item) => item.id === editingRequestId)}
+          {#if requestToConvert && !requestToConvert.task_id && ["accepted", "reviewing"].includes(requestForm.status)}<Button type="button" variant="secondary" disabled={requestSaving} onclick={() => convertRequestToTask(requestToConvert)}>Convertir en tarea</Button>{/if}
+          {#if requestToConvert?.task_id}<Button type="button" variant="secondary" onclick={() => { const linkedTask = tasks.find((item) => item.id === requestToConvert.task_id); requestsModalOpen = false; if (linkedTask) openEditTaskModal(linkedTask); }}>Abrir tarea vinculada</Button>{/if}
+        {/if}
+        <Button type="submit" disabled={requestSaving}>{requestSaving ? "Guardando…" : editingRequestId ? "Guardar cambios" : "Registrar solicitud"}</Button>
+      </div>
+    </div>
+    <aside class="rounded-xl border border-sky-400/20 bg-sky-500/[0.04] p-4">
+      <p class="font-semibold text-[var(--color-text)]">Seguimiento</p>
+      <p class="mt-1 text-xs text-[var(--color-muted-dim)]">Anota decisiones, aclaraciones y respuestas del solicitante.</p>
+      {#if editingRequestId}
+        {@const currentRequest = (project?.requests ?? []).find((item) => item.id === editingRequestId)}
+        <div class="mt-4 max-h-64 space-y-2 overflow-y-auto">
+          {#each currentRequest?.messages ?? [] as message (message.id)}
+            <div class="rounded-lg border border-white/[0.07] bg-black/20 p-2.5"><div class="flex justify-between gap-2 text-[10px] text-[var(--color-muted-dim)]"><strong class="text-sky-200">{message.author}</strong><span>{formatDate(message.created_at)}</span></div><p class="mt-1 whitespace-pre-line text-xs text-[var(--color-muted)]">{message.text}</p></div>
+          {:else}<p class="rounded-lg border border-dashed border-white/10 p-3 text-xs text-[var(--color-muted-dim)]">Sin comentarios todavía.</p>{/each}
+        </div>
+        <label class="mt-4 block text-xs"><span class="mb-1 block text-[var(--color-muted)]">Añadir comentario al guardar</span><textarea class="field min-h-24 w-full" bind:value={requestComment} placeholder="Decisión, duda o respuesta…"></textarea></label>
+      {:else}
+        <div class="mt-4 rounded-lg border border-dashed border-white/10 p-3 text-xs leading-relaxed text-[var(--color-muted-dim)]">Guarda primero la solicitud para iniciar su historial de conversación.</div>
+      {/if}
+    </aside>
+  </form>
+</Modal>
+
 <Modal
   open={documentsModalOpen}
   title="Documentación del proyecto"
+  size="xl"
   onclose={() => !documentsSaving && (documentsModalOpen = false)}
 >
   <form class="space-y-4" onsubmit={(event) => { event.preventDefault(); saveProjectDocuments(); }}>
+    <div
+      class="rounded-xl border border-dashed p-3 transition {documentDragActive ? 'border-purple-300 bg-purple-500/15' : 'border-purple-400/25 bg-purple-500/[0.06]'}"
+      ondragenter={(event) => { event.preventDefault(); documentDragActive = true; }}
+      ondragover={(event) => { event.preventDefault(); documentDragActive = true; }}
+      ondragleave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) documentDragActive = false; }}
+      ondrop={dropProjectDocument}
+      role="group"
+      aria-label="Subir documentación del proyecto"
+      data-project-document-upload
+      data-project-document-dropzone
+    >
+      <p class="text-sm font-medium text-[var(--color-text)]">Subir un fichero</p>
+      <p class="mt-1 text-xs text-[var(--color-muted)]">Arrástralo aquí para subirlo directamente o selecciónalo. Proveedor actual: Google Drive.</p>
+      <div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
+        <label class="flex min-w-0 flex-1 flex-col gap-1 text-xs text-[var(--color-muted)]">
+          Fichero (máximo 20 MB)
+          <input bind:this={uploadFileInput} type="file" class="field text-xs" onchange={(event) => selectProjectDocumentFile(event.currentTarget.files?.[0] ?? null)} />
+        </label>
+        <Button type="button" variant="secondary" disabled={!uploadFile || documentUploading || Boolean(uploadError)} onclick={() => uploadProjectDocument()}>
+          {documentUploading ? "Subiendo…" : "Subir a Google Drive"}
+        </Button>
+      </div>
+      {#if uploadFile && !uploadError}
+        <p class="mt-2 text-xs text-emerald-300">Seleccionado: {(uploadFile.size / 1024 / 1024).toFixed(1)} MB · listo para subir.</p>
+      {/if}
+      {#if uploadError}
+        <p class="mt-2 rounded-lg border border-rose-500/25 bg-rose-500/10 px-3 py-2 text-xs font-medium text-rose-200" role="alert">{uploadError}</p>
+      {/if}
+    </div>
     <div class="flex items-center justify-between gap-3">
       <p class="text-xs text-[var(--color-muted)]">Añade enlaces web, rutas de archivos compartidos o notas internas.</p>
       <Button type="button" variant="secondary" onclick={addProjectDocument}>+ Documento</Button>
@@ -2011,6 +2618,7 @@
 <Modal
   open={importModalOpen}
   title="Importar tareas desde texto"
+  size="xl"
   onclose={() => !importSaving && (importModalOpen = false)}
 >
   <form
@@ -2122,7 +2730,7 @@
     </label>
 
     <div class="max-h-96 space-y-2 overflow-y-auto rounded-xl border border-[var(--color-border)] bg-black/20 p-3">
-      {#each tasks.filter((task) => task.parent_id == null) as parent (parent.id)}
+      {#each sortTasksByDueDate(tasks.filter((task) => task.parent_id == null)) as parent (parent.id)}
         <label class="flex cursor-pointer items-start gap-3 rounded-lg px-3 py-2 hover:bg-white/[0.04]">
           <input
             type="checkbox"
@@ -2132,7 +2740,7 @@
           />
           <span class="min-w-0 text-sm font-semibold text-[var(--color-text)]">{parent.title}</span>
         </label>
-        {#each tasks.filter((task) => task.parent_id === parent.id) as child (child.id)}
+        {#each sortTasksByDueDate(tasks.filter((task) => task.parent_id === parent.id)) as child (child.id)}
           <label class="ml-7 flex cursor-pointer items-start gap-3 rounded-lg px-3 py-2 hover:bg-white/[0.04]">
             <input
               type="checkbox"
@@ -2164,6 +2772,7 @@
 <Modal
   open={detailModalOpen}
   title={editingTask ? (editingTask.parent_id ? "Detalle de Subtarea" : "Detalle de Tarea") : newTaskParent ? "Nueva Subtarea" : "Nueva Tarea"}
+  size="xl"
   onclose={() => (detailModalOpen = false)}
 >
   <form
@@ -2294,6 +2903,37 @@
         />
       </div>
     </div>
+
+    {#if editingTask && (editingTask.status === "validation" || (editingTask.review_messages?.length ?? 0) > 0)}
+      <section class="space-y-3 rounded-xl border border-sky-400/25 bg-sky-500/[0.05] p-4">
+        <div>
+          <p class="text-sm font-semibold text-sky-100">Validación de la tarea</p>
+          <p class="text-xs text-[var(--color-muted)]">Comentarios entre el responsable, el revisor o la IA antes de aprobar el trabajo.</p>
+        </div>
+        <div class="max-h-52 space-y-2 overflow-y-auto">
+          {#if !(editingTask.review_messages?.length)}
+            <p class="rounded-lg bg-black/20 px-3 py-3 text-xs text-[var(--color-muted-dim)]">Todavía no hay comentarios de revisión.</p>
+          {/if}
+          {#each editingTask.review_messages ?? [] as message (message.id)}
+            <div class="rounded-lg border px-3 py-2 {message.kind === 'changes_requested' ? 'border-rose-400/30 bg-rose-500/[0.08]' : message.kind === 'approved' ? 'border-emerald-400/30 bg-emerald-500/[0.08]' : 'border-white/10 bg-black/20'}">
+              <div class="flex items-center justify-between gap-3 text-[10px] text-[var(--color-muted-dim)]">
+                <strong class="text-[var(--color-text)]">{message.author_name}</strong>
+                <span>{new Date(message.created_at).toLocaleString("es-ES")}</span>
+              </div>
+              <p class="mt-1 whitespace-pre-wrap text-xs text-[var(--color-muted)]">{message.message}</p>
+            </div>
+          {/each}
+        </div>
+        {#if editingTask.status === "validation"}
+          <textarea class="field min-h-20 w-full text-sm" bind:value={reviewDraft} placeholder="Indica qué está bien o qué debe corregirse…"></textarea>
+          <div class="flex flex-wrap justify-end gap-2">
+            <Button type="button" variant="ghost" disabled={reviewSaving} onclick={() => addReviewMessage("comment")}>Añadir comentario</Button>
+            <Button type="button" variant="danger" disabled={reviewSaving} onclick={() => addReviewMessage("changes_requested")}>Solicitar cambios</Button>
+            <Button type="button" variant="primary" disabled={reviewSaving} onclick={() => addReviewMessage("approved")}>Aprobar y marcar hecha</Button>
+          </div>
+        {/if}
+      </section>
+    {/if}
 
     <div class="flex items-center justify-between border-t border-[var(--color-border)] pt-4">
       {#if editingTask}

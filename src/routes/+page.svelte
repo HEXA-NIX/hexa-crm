@@ -14,16 +14,19 @@
   import KpiCard from "$lib/components/KpiCard.svelte";
   import Card from "$lib/components/Card.svelte";
   import Badge from "$lib/components/Badge.svelte";
+  import Button from "$lib/components/Button.svelte";
   import { showToast } from "$lib/stores/ui";
   import { estimateDaysOfCover, qtySoldForProduct } from "$lib/inventory/stock-cover";
   import { countsInBusinessTotals } from "$lib/sales/cancel-sale";
   import { isOnboardingDone } from "$lib/onboarding/state";
   import { backupAgeDays, needsBackupReminder } from "$lib/backup/backup-status";
   import { dashboardHealth } from "$lib/dashboard/health";
-  import { activeCompany, session } from "$lib/stores/session";
+  import { activeCompany, currentUser, session } from "$lib/stores/session";
   import { PROJECT_COMPANY_CODE } from "$lib/company/context";
   import { buildProjectRevenueProjection } from "$lib/projects/revenue-projection";
   import { economicGoalProgress, monthlyEconomicGoal } from "$lib/projects/economic-goal";
+  import { buildTaskDigestMessages, upcomingTasksForDigest } from "$lib/whatsapp/task-digest";
+  import { isTaskPendingWork } from "$lib/work/task-dates";
 
   let stats = $state<DashboardStats | null>(null);
   let sales = $state<Sale[]>([]);
@@ -37,6 +40,7 @@
   let devCustomers = $state<Customer[]>([]);
   let devCashMovements = $state<CashMovement[]>([]);
   let devLoading = $state(false);
+  let whatsappDigestSending = $state(false);
 
   let alertTasks = $state<Record<string, number>>({});
   const isDevCompany = $derived($activeCompany?.code === PROJECT_COMPANY_CODE);
@@ -153,7 +157,7 @@
     devProjects.filter((project) => project.status === "active" || project.status === "planned"),
   );
   const openDevTasks = $derived(
-    devTasks.filter((task) => !["done", "archived"].includes(task.status)),
+    devTasks.filter(isTaskPendingWork),
   );
   const blockedDevTasks = $derived(devTasks.filter((task) => task.status === "blocked"));
   const wonProjectValueCents = $derived(
@@ -216,6 +220,7 @@
       .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)))
       .slice(0, 6),
   );
+  const whatsappDigestTasks = $derived(upcomingTasksForDigest(openDevTasks));
   const recentDevProjects = $derived(
     [...devProjects]
       .filter((project) => project.status !== "archived")
@@ -233,6 +238,31 @@
     customerId
       ? devCustomers.find((customer) => customer.id === customerId)?.name ?? "Cliente"
       : "Proyecto propio";
+
+  async function sendUpcomingTasksByWhatsApp() {
+    const phone = $currentUser?.phone || "";
+    if (!phone) {
+      showToast("Añade el teléfono del admin en Ajustes → Equipo", "err");
+      return;
+    }
+    const messages = buildTaskDigestMessages(
+      devTasks,
+      devProjects,
+      new Date(),
+      import.meta.env.VITE_PUBLIC_APP_URL || window.location.origin,
+    );
+    const projectCount = new Set(whatsappDigestTasks.map((task) => task.project_id).filter(Boolean)).size;
+    if (!confirm(`Se enviará un resumen de ${projectCount} proyecto${projectCount === 1 ? "" : "s"} al WhatsApp del admin. ¿Continuar?`)) return;
+    whatsappDigestSending = true;
+    try {
+      for (const message of messages) await api.whatsappSend(phone, message, true);
+      showToast(`Resumen enviado por WhatsApp (${messages.length} mensaje${messages.length === 1 ? "" : "s"})`);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo enviar el resumen", "err");
+    } finally {
+      whatsappDigestSending = false;
+    }
+  }
 </script>
 
 {#if loading}
@@ -440,9 +470,14 @@
                 {@const progress = projectProgress(project.id)}
                 <a href="/proyectos/{project.uid}" class="block rounded-xl border border-[var(--color-border)] bg-black/20 p-3 transition hover:border-purple-400/35 hover:bg-purple-500/10">
                   <div class="flex items-start justify-between gap-3">
-                    <div class="min-w-0">
-                      <p class="truncate text-sm font-medium text-[var(--color-text)]">{project.name}</p>
-                      <p class="mt-0.5 text-[11px] text-[var(--color-muted-dim)]">{projectCustomerName(project.customer_id)}</p>
+                    <div class="flex min-w-0 items-center gap-2.5">
+                      {#if project.logo_data_url}
+                        <img src={project.logo_data_url} alt="" class="h-9 w-9 shrink-0 rounded-lg border border-white/10 object-cover" />
+                      {/if}
+                      <div class="min-w-0">
+                        <p class="truncate text-sm font-medium text-[var(--color-text)]">{project.name}</p>
+                        <p class="mt-0.5 text-[11px] text-[var(--color-muted-dim)]">{projectCustomerName(project.customer_id)}</p>
+                      </div>
                     </div>
                     <span class="text-xs font-semibold text-[var(--color-purple-bright)]">{progress}%</span>
                   </div>
@@ -456,9 +491,14 @@
         </Card>
 
         <Card lift={false}>
-          <div class="mb-4 flex items-center justify-between">
+          <div class="mb-4 flex flex-wrap items-center justify-between gap-2">
             <h2 class="section-label !normal-case !tracking-wide !text-sm">Próximos vencimientos</h2>
-            <a href="/trabajo" class="text-xs text-radiant hover:underline">Ver trabajo</a>
+            <div class="flex items-center gap-2">
+              <Button variant="secondary" class="!px-3 !py-1.5 text-xs" disabled={whatsappDigestSending || whatsappDigestTasks.length === 0} onclick={sendUpcomingTasksByWhatsApp}>
+                {whatsappDigestSending ? "Enviando…" : "Enviar resumen por WhatsApp"}
+              </Button>
+              <a href="/trabajo" class="text-xs text-radiant hover:underline">Ver trabajo</a>
+            </div>
           </div>
           {#if upcomingDevTasks.length === 0}
             <p class="text-sm text-[var(--color-muted-dim)]">No hay tareas abiertas con fecha.</p>

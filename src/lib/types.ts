@@ -224,7 +224,7 @@ export type Settings = {
   monthly_economic_goals: Record<string, number>;
 };
 
-export type PluginKey = "database_bridge" | "stripe_mcp";
+export type PluginKey = "database_bridge" | "stripe_mcp" | "google_drive";
 
 export type PluginConfig = {
   display_name?: string;
@@ -235,13 +235,15 @@ export type PluginConfig = {
   environment?: "sandbox" | "live";
   allow_write_tools?: boolean;
   require_approval?: boolean;
+  folder_id?: string;
+  folder_name?: string;
 };
 
 export type TenantPlugin = {
   plugin_key: PluginKey;
   name: string;
   description: string;
-  category: "datos" | "pagos";
+  category: "datos" | "pagos" | "almacenamiento";
   capabilities: string[];
   enabled: boolean;
   config: PluginConfig;
@@ -273,6 +275,23 @@ export type PluginTestResult = {
   details?: Record<string, unknown>;
 };
 
+export type StorageUploadInput = {
+  provider: "google_drive";
+  project_id: number;
+  name: string;
+  mime_type: string;
+  content_base64: string;
+};
+
+export type StorageUploadResult = {
+  provider: "google_drive";
+  remote_id: string;
+  name: string;
+  mime_type: string;
+  size: number;
+  web_url: string;
+};
+
 export type PluginToolResult = {
   ok: boolean;
   plugin_key: PluginKey;
@@ -295,6 +314,9 @@ export type AuthUser = {
   id: number;
   username: string;
   display_name: string;
+  /** Teléfono internacional (E.164) usado para WhatsApp, p. ej. +34600111222. */
+  phone: string;
+  avatar_data_url?: string;
   role: UserRole;
   active: boolean;
   created_at: string;
@@ -308,6 +330,8 @@ export type UserInput = {
   id?: number | null;
   username: string;
   display_name: string;
+  phone?: string;
+  avatar_data_url?: string;
   role: UserRole;
   /** Optional permanent credential on edit only; create always issues a 14-char temp password. */
   pin?: string | null;
@@ -338,11 +362,21 @@ export type WorkStatus =
   | "inbox"
   | "planned"
   | "in_progress"
+  | "validation"
   | "blocked"
   | "done"
   | "archived";
 
 export type WorkPriority = "low" | "normal" | "high" | "urgent";
+
+export type WorkReviewMessage = {
+  id: string;
+  author_id: number;
+  author_name: string;
+  message: string;
+  created_at: string;
+  kind: "comment" | "changes_requested" | "approved";
+};
 
 export type WorkProjectDocumentKind = "link" | "file" | "note";
 
@@ -357,6 +391,44 @@ export type WorkProjectDocument = {
 
 export type WorkProjectDocumentInput = Omit<WorkProjectDocument, "id" | "updated_at"> & {
   id?: string;
+};
+
+export type ProjectTechnicalProfile = {
+  frontend: string[];
+  backend: string[];
+  app: string[];
+  database: string[];
+  infrastructure: string[];
+  deployment: string[];
+  integrations: string[];
+  plugins: string[];
+  ai: string[];
+  tools: string[];
+  repository_url: string;
+  documentation_url: string;
+  staging_url: string;
+  production_url: string;
+};
+
+export type ProjectBrief = {
+  summary: string;
+  problem: string;
+  objectives: string;
+  users: string;
+  scope: string;
+  out_of_scope: string;
+  functional_requirements: string;
+  non_functional_requirements: string;
+  acceptance_criteria: string;
+  risks: string;
+  dependencies: string;
+  success_metrics: string;
+  notes: string;
+  technology: ProjectTechnicalProfile;
+};
+
+export type ProjectBriefInput = Partial<Omit<ProjectBrief, "technology">> & {
+  technology?: Partial<ProjectTechnicalProfile>;
 };
 
 export type WorkCategory = {
@@ -380,6 +452,11 @@ export type WorkProject = {
   revenue_target_date: string | null;
   revenue_milestones: WorkProjectRevenueMilestone[];
   documents: WorkProjectDocument[];
+  requests?: WorkProjectRequest[];
+  prd?: string;
+  tech_stack?: string[];
+  brief?: ProjectBrief;
+  logo_data_url?: string;
   name: string;
   description: string;
   status: "planned" | "active" | "paused" | "done" | "archived";
@@ -398,11 +475,42 @@ export type WorkProjectInput = {
   revenue_target_date?: string | null;
   revenue_milestones?: WorkProjectRevenueMilestoneInput[];
   documents?: WorkProjectDocumentInput[];
+  requests?: WorkProjectRequest[];
+  prd?: string;
+  tech_stack?: string[];
+  brief?: ProjectBriefInput;
+  logo_data_url?: string;
   name: string;
   description?: string;
   status?: "planned" | "active" | "paused" | "done" | "archived";
   start_date?: string | null;
   target_date?: string | null;
+};
+
+export type WorkProjectRequestType = "suggestion" | "improvement" | "issue" | "feature" | "question";
+export type WorkProjectRequestStatus = "new" | "reviewing" | "accepted" | "rejected" | "converted";
+
+export type WorkProjectRequestMessage = {
+  id: string;
+  author: string;
+  text: string;
+  created_at: string;
+};
+
+export type WorkProjectRequest = {
+  id: string;
+  type: WorkProjectRequestType;
+  title: string;
+  description: string;
+  requester: string;
+  priority: WorkPriority;
+  impact: string;
+  status: WorkProjectRequestStatus;
+  reviewer_id: number | null;
+  task_id: number | null;
+  messages: WorkProjectRequestMessage[];
+  created_at: string;
+  updated_at: string;
 };
 
 export type WorkProjectRevenueMilestone = {
@@ -437,10 +545,12 @@ export type WorkItem = {
   source_key: string | null;
   source_href: string | null;
   completed_at: string | null;
+  review_messages?: WorkReviewMessage[];
   created_at: string;
   updated_at: string;
   category?: WorkCategory | null;
   assignee_name?: string | null;
+  assignee_avatar_data_url?: string | null;
   parent_title?: string | null;
 };
 
@@ -486,6 +596,7 @@ export type WorkItemInput = {
   source_type?: string | null;
   source_key?: string | null;
   source_href?: string | null;
+  review_messages?: WorkReviewMessage[];
 };
 
 /* -------------------------------------------------------------

@@ -8,6 +8,7 @@
   import { calculateTaskProgress } from "$lib/projects/task-progress";
   import { projectStatusLabel, projectStatusTone } from "$lib/projects/presentation";
   import { hasInvalidDateRange, hasInvalidMoneyInput } from "$lib/projects/form-validation";
+  import { availableMilestoneMonths, hasDuplicateMilestoneMonths, nextMilestoneMonth } from "$lib/projects/milestone-months";
   import Button from "$lib/components/Button.svelte";
   import Card from "$lib/components/Card.svelte";
   import Badge from "$lib/components/Badge.svelte";
@@ -280,9 +281,14 @@
   }
 
   function addMilestone() {
+    const targetMonth = nextMilestoneMonth(milestoneMonthOptions, form.milestones);
+    if (!targetMonth) {
+      showToast("No quedan más meses disponibles para añadir otro hito", "err");
+      return;
+    }
     form.milestones = [
       ...form.milestones,
-      { amount: "", target_month: currentMonth },
+      { amount: "", target_month: targetMonth },
     ];
   }
 
@@ -309,6 +315,10 @@
     });
     if (!form.customer_id && invalidMilestone) {
       showToast("Revisa los importes de los hitos mensuales", "err");
+      return;
+    }
+    if (!form.customer_id && hasDuplicateMilestoneMonths(form.milestones)) {
+      showToast("No puedes repetir el mismo mes en dos hitos", "err");
       return;
     }
     saving = true;
@@ -493,9 +503,18 @@
             <div>
               <!-- Top info: Title & Status -->
               <div class="flex items-start justify-between gap-2 mb-2">
-                <h3 class="font-semibold text-base text-[var(--color-text)] group-hover:text-[var(--color-purple-bright)] transition-colors">
-                  {project.name}
-                </h3>
+                <div class="flex min-w-0 items-center gap-2.5">
+                  {#if project.logo_data_url}
+                    <img src={project.logo_data_url} alt="" class="h-9 w-9 shrink-0 rounded-lg border border-white/10 object-cover shadow-sm" data-project-card-logo />
+                  {:else}
+                    <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-purple-400/20 bg-purple-500/10 text-sm font-bold uppercase text-purple-200" aria-hidden="true" data-project-card-logo>
+                      {project.name.trim().charAt(0) || "P"}
+                    </span>
+                  {/if}
+                  <h3 class="min-w-0 font-semibold text-base text-[var(--color-text)] group-hover:text-[var(--color-purple-bright)] transition-colors">
+                    {project.name}
+                  </h3>
+                </div>
                 <span class="shrink-0 rounded-full border px-2 py-1 text-[10px] font-bold uppercase tracking-wide {healthClass(metrics.health)}">
                   {healthLabel(metrics.health)}
                 </span>
@@ -631,13 +650,13 @@
             <p class="text-xs font-medium text-[var(--color-text)]">Hitos mensuales</p>
             <p class="text-[11px] text-[var(--color-muted-dim)]">Importe estimado y mes/año objetivo.</p>
           </div>
-          <Button type="button" variant="secondary" onclick={addMilestone}>+ Añadir hito</Button>
+          <Button type="button" variant="secondary" disabled={!nextMilestoneMonth(milestoneMonthOptions, form.milestones)} onclick={addMilestone}>+ Añadir hito</Button>
         </div>
         {#each form.milestones as milestone, index}
           <div class="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
             <input class="field w-full text-sm" inputmode="decimal" bind:value={milestone.amount} placeholder="Importe (€)" />
             <Select
-              options={milestoneMonthOptions}
+              options={availableMilestoneMonths(milestoneMonthOptions, form.milestones, index)}
               bind:value={milestone.target_month}
               placeholder="Mes y año"
             />

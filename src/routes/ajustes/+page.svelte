@@ -16,12 +16,14 @@
     isAdmin,
     session,
     clearSession,
+    updateCurrentUser,
     setIdleTimeoutMinutes,
   } from "$lib/stores/session";
   import { normalizeIdleTimeoutMinutes } from "$lib/auth/idle-timeout";
   import { parseBackupJson, type BackupEnvelope } from "$lib/backup/backup";
   import { theme, toggleTheme } from "$lib/stores/theme";
   import { TEMP_PASSWORD_LENGTH } from "$lib/auth/password-policy";
+  import { userAvatarDataUrl } from "$lib/users/user-avatar";
   import {
     applyGitHubUpdate,
     checkGitHubUpdate,
@@ -52,6 +54,11 @@
   let loading = $state(true);
   let defaultVatStr = $state("21");
   let roleStr = $state<string>("cajero");
+  let whatsappStatus = $state<{ connected: boolean; logged_in: boolean; user_phone: string } | null>(null);
+  let whatsappQr = $state("");
+  let whatsappBusy = $state(false);
+  let whatsappForm = $state({ phone: "", message: "", confirmed: false });
+  let whatsappError = $state("");
 
   let appVersion = $state(getAppVersion());
   let updateStatus = $state<UpdateStatus | null>(null);
@@ -60,10 +67,13 @@
   let activeSection = $state<AjustesSectionId>("tienda");
 
   let userModal = $state(false);
+  let userAvatarDragActive = $state(false);
   let editingUser = $state<AuthUser | null>(null);
   let userForm = $state({
     username: "",
     display_name: "",
+    phone: "",
+    avatar_data_url: "",
     role: "cajero" as UserRole,
     active: true,
   });
@@ -86,12 +96,65 @@
 
   function setSection(id: AjustesSectionId) {
     activeSection = resolveActiveSection(id, $isAdmin);
+    if (activeSection === "whatsapp") loadWhatsAppStatus();
     if (typeof sessionStorage !== "undefined") {
       try {
         sessionStorage.setItem(AJUSTES_SECTION_STORAGE_KEY, activeSection);
       } catch {
         /* ignore */
       }
+    }
+  }
+
+  async function loadWhatsAppStatus() {
+    whatsappError = "";
+    try {
+      whatsappStatus = await api.whatsappStatus();
+    } catch (error) {
+      whatsappStatus = null;
+      whatsappError = error instanceof Error ? error.message : "No se pudo consultar WhatsApp";
+    }
+  }
+
+  async function connectWhatsApp() {
+    whatsappBusy = true;
+    whatsappError = "";
+    try {
+      const result = await api.whatsappLoginQr();
+      whatsappQr = result.qr_data || result.qr_url;
+      showToast("Escanea el QR desde Dispositivos vinculados de WhatsApp");
+    } catch (error) {
+      whatsappError = error instanceof Error ? error.message : "No se pudo generar el QR";
+    } finally {
+      whatsappBusy = false;
+    }
+  }
+
+  async function disconnectWhatsApp() {
+    whatsappBusy = true;
+    try {
+      await api.whatsappLogout();
+      whatsappQr = "";
+      await loadWhatsAppStatus();
+      showToast("WhatsApp desconectado");
+    } catch (error) {
+      whatsappError = error instanceof Error ? error.message : "No se pudo desconectar";
+    } finally {
+      whatsappBusy = false;
+    }
+  }
+
+  async function sendWhatsApp() {
+    whatsappBusy = true;
+    whatsappError = "";
+    try {
+      await api.whatsappSend(whatsappForm.phone, whatsappForm.message, whatsappForm.confirmed);
+      whatsappForm = { phone: "", message: "", confirmed: false };
+      showToast("WhatsApp enviado");
+    } catch (error) {
+      whatsappError = error instanceof Error ? error.message : "No se pudo enviar el WhatsApp";
+    } finally {
+      whatsappBusy = false;
     }
   }
 
@@ -217,7 +280,7 @@
 
   function openCreateUser() {
     editingUser = null;
-    userForm = { username: "", display_name: "", role: "cajero", active: true };
+    userForm = { username: "", display_name: "", phone: "", avatar_data_url: "", role: "cajero", active: true };
     roleStr = "cajero";
     userModal = true;
   }
@@ -227,6 +290,8 @@
     userForm = {
       username: u.username,
       display_name: u.display_name,
+      phone: u.phone,
+      avatar_data_url: u.avatar_data_url ?? "",
       role: u.role,
       active: u.active,
     };
@@ -239,11 +304,14 @@
       id: editingUser?.id,
       username: userForm.username,
       display_name: userForm.display_name,
+      phone: userForm.phone,
+      avatar_data_url: userForm.avatar_data_url,
       role: (roleStr === "admin" ? "admin" : "cajero") as UserRole,
       active: userForm.active,
     };
     try {
       const result = await api.upsertUser(input);
+      if ($currentUser?.id === result.user.id) updateCurrentUser(result.user);
       userModal = false;
       if (result.temporary_password) {
         createdTempPassword = result.temporary_password;
@@ -256,6 +324,21 @@
     } catch (e) {
       showToast(e instanceof Error ? e.message : "Error", "err");
     }
+  }
+
+  async function handleUserAvatar(file: File | undefined) {
+    if (!file) return;
+    try {
+      userForm.avatar_data_url = await userAvatarDataUrl(file);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo cargar la foto", "err");
+    }
+  }
+
+  function dropUserAvatar(event: DragEvent) {
+    event.preventDefault();
+    userAvatarDragActive = false;
+    void handleUserAvatar(event.dataTransfer?.files?.[0]);
   }
 
   async function regenTemp(u: AuthUser) {
@@ -588,6 +671,56 @@
             {/if}
           </div>
         </Card>
+      {:else if activeSection === "whatsapp"}
+        <Card lift={false} class="border border-emerald-400/20 !p-5">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p class="section-label mb-1 !text-emerald-300/80">Mensajería personal</p>
+              <h2 class="text-lg font-semibold text-[var(--color-text)]">{activeMeta.title}</h2>
+              <p class="mt-1 text-sm text-[var(--color-muted)]">{activeMeta.hint}</p>
+            </div>
+            <Badge tone={whatsappStatus?.connected || whatsappStatus?.logged_in ? "ok" : "warn"}>
+              {whatsappStatus?.connected || whatsappStatus?.logged_in ? "Conectado" : "Sin conectar"}
+            </Badge>
+          </div>
+
+          <div class="mt-4 rounded-xl border border-[var(--color-border)] bg-black/20 p-4">
+            <p class="text-sm font-medium text-[var(--color-text)]">Tu número: {whatsappStatus?.user_phone || $currentUser?.phone || "Sin configurar"}</p>
+            <p class="mt-1 text-xs text-[var(--color-muted)]">Cada usuario vincula su propio WhatsApp o WhatsApp Business. El administrador puede editar el teléfono en Equipo.</p>
+            <div class="mt-3 flex flex-wrap gap-2">
+              {#if whatsappStatus?.connected || whatsappStatus?.logged_in}
+                <Button variant="danger" disabled={whatsappBusy} onclick={disconnectWhatsApp}>Desconectar</Button>
+              {:else}
+                <Button disabled={whatsappBusy || !($currentUser?.phone)} onclick={connectWhatsApp}>{whatsappBusy ? "Preparando…" : "Conectar con QR"}</Button>
+              {/if}
+              <Button variant="secondary" disabled={whatsappBusy} onclick={loadWhatsAppStatus}>Actualizar estado</Button>
+            </div>
+          </div>
+
+          {#if whatsappQr}
+            <div class="mt-4 rounded-xl border border-emerald-400/25 bg-white p-4 text-center">
+              <img src={whatsappQr} alt="Código QR para vincular WhatsApp" class="mx-auto h-64 w-64 object-contain" />
+              <p class="mt-2 text-xs text-slate-700">WhatsApp → Dispositivos vinculados → Vincular dispositivo</p>
+            </div>
+          {/if}
+
+          {#if whatsappStatus?.connected || whatsappStatus?.logged_in}
+            <form class="mt-5 grid gap-3" onsubmit={(event) => { event.preventDefault(); sendWhatsApp(); }}>
+              <Input label="Destinatario" bind:value={whatsappForm.phone} placeholder="+34 600 111 222" required />
+              <label class="text-sm"><span class="mb-1 block font-medium text-[var(--color-muted)]">Mensaje</span><textarea class="field min-h-28 w-full" maxlength="4000" bind:value={whatsappForm.message} required></textarea></label>
+              <label class="flex items-start gap-2 rounded-xl border border-amber-400/20 bg-amber-500/[0.06] p-3 text-sm text-amber-100">
+                <input class="mt-1" type="checkbox" bind:checked={whatsappForm.confirmed} />
+                <span>Confirmo el envío de este mensaje desde mi número de WhatsApp.</span>
+              </label>
+              <div><Button type="submit" disabled={whatsappBusy || !whatsappForm.confirmed}>{whatsappBusy ? "Enviando…" : "Enviar WhatsApp"}</Button></div>
+            </form>
+          {/if}
+
+          {#if whatsappError}
+            <p class="mt-4 rounded-xl border border-rose-500/25 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert">{whatsappError}</p>
+          {/if}
+          <p class="mt-4 text-[11px] text-[var(--color-muted-dim)]">Integración autohospedada mediante GOWA/WhatsApp Web. No usar para campañas masivas; WhatsApp puede cerrar sesiones o limitar números.</p>
+        </Card>
       {:else if activeSection === "tienda"}
         <Card
           lift={false}
@@ -644,11 +777,13 @@
                   class="flex flex-col gap-3 px-5 py-3.5 transition hover:bg-purple-500/[0.04] sm:flex-row sm:items-center sm:justify-between"
                 >
                   <div class="flex min-w-0 items-center gap-3">
-                    <div
+                    {#if u.avatar_data_url}
+                      <img src={u.avatar_data_url} alt="Foto de {u.display_name}" class="h-9 w-9 shrink-0 rounded-full border border-purple-400/30 object-cover" />
+                    {:else}<div
                       class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-purple-400/30 bg-purple-500/15 text-sm font-semibold text-[var(--color-purple-bright)]"
                     >
                       {(u.display_name || u.username || "?").slice(0, 1).toUpperCase()}
-                    </div>
+                    </div>{/if}
                     <div class="min-w-0">
                       <p class="font-medium text-[var(--color-text)]">
                         {u.display_name}
@@ -660,7 +795,7 @@
                         {/if}
                       </p>
                       <p class="text-xs text-[var(--color-muted-dim)]">
-                        @{u.username} · <span class="capitalize">{u.role}</span>
+                        @{u.username} · <span class="capitalize">{u.role}</span>{u.phone ? ` · ${u.phone}` : " · Sin teléfono"}
                       </p>
                     </div>
                   </div>
@@ -994,6 +1129,35 @@ npm run orca:worker</pre>
   >
     <Input label="Usuario (login)" bind:value={userForm.username} required />
     <Input label="Nombre visible" bind:value={userForm.display_name} required />
+    <div
+      class="rounded-xl border border-dashed p-3 transition {userAvatarDragActive ? 'border-purple-400 bg-purple-500/10' : 'border-[var(--color-border)]'}"
+      role="group"
+      aria-label="Subir foto de perfil"
+      ondragenter={(event) => { event.preventDefault(); userAvatarDragActive = true; }}
+      ondragover={(event) => { event.preventDefault(); userAvatarDragActive = true; }}
+      ondragleave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) userAvatarDragActive = false; }}
+      ondrop={dropUserAvatar}
+      data-user-avatar-dropzone
+    >
+      <div class="flex items-center gap-3">
+        {#if userForm.avatar_data_url}
+          <img src={userForm.avatar_data_url} alt="Vista previa" class="h-16 w-16 shrink-0 rounded-full border border-white/10 object-cover" />
+        {:else}
+          <div class="grid h-16 w-16 shrink-0 place-items-center rounded-full border border-dashed border-[var(--color-border)] text-lg text-[var(--color-muted)]">{(userForm.display_name || userForm.username || "?").slice(0, 1).toUpperCase()}</div>
+        {/if}
+        <div class="space-y-2">
+          <div>
+            <p class="text-xs font-medium text-[var(--color-text)]">Foto de perfil</p>
+            <p class="text-[11px] text-[var(--color-muted-dim)]">Arrastra aquí una foto o selecciónala. PNG, JPG o WebP, máximo 1 MB.</p>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <label class="cursor-pointer rounded-lg border border-[var(--color-border)] px-3 py-2 text-xs hover:bg-white/5">Subir foto<input class="sr-only" type="file" accept="image/png,image/jpeg,image/webp" onchange={(event) => handleUserAvatar(event.currentTarget.files?.[0])} /></label>
+            {#if userForm.avatar_data_url}<Button type="button" variant="ghost" onclick={() => (userForm.avatar_data_url = "")}>Quitar</Button>{/if}
+          </div>
+        </div>
+      </div>
+    </div>
+    <Input label="Teléfono de WhatsApp" bind:value={userForm.phone} placeholder="+34 600 111 222" />
     <Select
       label="Rol"
       bind:value={roleStr}

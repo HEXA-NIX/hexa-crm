@@ -8,9 +8,19 @@ describe("project documents persistence", () => {
     const { token } = await browserApi.login("admin", "1234");
     const project = await browserApi.upsertWorkProject({
       name: "Portal",
+      prd: "Objetivo y alcance del producto",
+      tech_stack: ["Svelte 5", "PostgreSQL"],
+      brief: {
+        summary: "Portal comercial",
+        scope: "Gestión documental",
+        technology: { frontend: ["Svelte 5"], database: ["PostgreSQL"] },
+      },
       documents: [{ title: "Diseño", kind: "link", location: "https://figma.com/example", notes: "Versión aprobada" }],
     }, token);
     expect(project.documents).toHaveLength(1);
+    expect(project.prd).toBe("Objetivo y alcance del producto");
+    expect(project.tech_stack).toEqual(["Svelte 5", "PostgreSQL"]);
+    expect(project.brief).toMatchObject({ summary: "Portal comercial", scope: "Gestión documental" });
 
     const updated = await browserApi.upsertWorkProject({
       id: project.id,

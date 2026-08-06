@@ -7,34 +7,48 @@
   import Select from "./Select.svelte";
   import { showToast } from "$lib/stores/ui";
   import { isAdmin } from "$lib/stores/session";
+  import { connectGoogleDrive, disconnectGoogleDrive, googleDriveStatus, testGoogleDriveConnection } from "$lib/storage/google-drive-client";
 
   let plugins = $state<TenantPlugin[]>([]);
   let busy = $state<PluginKey | null>(null);
   let testing = $state<PluginKey | null>(null);
   let loading = $state(true);
-  let stripeSecretInput = $state("");
+  let googleConnected = $state(false);
+  let googleConnecting = $state(false);
+  let credentialInputs = $state<Record<PluginKey, string>>({
+    database_bridge: "",
+    stripe_mcp: "",
+    google_drive: "",
+  });
 
   let logsMap = $state<Record<PluginKey, PluginAuditLogEntry[]>>({
     database_bridge: [],
     stripe_mcp: [],
+    google_drive: [],
   });
   let logsOpen = $state<Record<PluginKey, boolean>>({
     database_bridge: false,
     stripe_mcp: false,
+    google_drive: false,
   });
   let loadingLogs = $state<Record<PluginKey, boolean>>({
     database_bridge: false,
     stripe_mcp: false,
+    google_drive: false,
   });
 
-  const statusLabel = (plugin: TenantPlugin) => ({
+  const statusLabel = (plugin: TenantPlugin) => plugin.plugin_key === "google_drive" && plugin.enabled
+    ? (googleConnected ? "Preparado" : "Sin conectar")
+    : ({
     inactive: "Inactivo",
     needs_secret: "Falta secreto",
     ready: "Preparado",
     error: "Con error",
   })[plugin.status];
 
-  const statusTone = (plugin: TenantPlugin): "ok" | "warn" | "danger" | "neutral" => ({
+  const statusTone = (plugin: TenantPlugin): "ok" | "warn" | "danger" | "neutral" => plugin.plugin_key === "google_drive" && plugin.enabled
+    ? (googleConnected ? "ok" : "warn")
+    : ({
     inactive: "neutral",
     needs_secret: "warn",
     ready: "ok",
@@ -139,6 +153,11 @@
     loading = true;
     try {
       plugins = await api.listPlugins();
+      try {
+        googleConnected = (await googleDriveStatus()).connected;
+      } catch {
+        googleConnected = false;
+      }
       for (const p of plugins) {
         if (logsOpen[p.plugin_key]) {
           await loadLogs(p.plugin_key);
@@ -148,6 +167,30 @@
       showToast(error instanceof Error ? error.message : "No se pudieron cargar los plugins", "err");
     } finally {
       loading = false;
+    }
+  }
+
+  async function connectDrive() {
+    googleConnecting = true;
+    try {
+      await connectGoogleDrive();
+      googleConnected = true;
+      showToast("Google Drive conectado");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo conectar Google Drive", "err");
+    } finally {
+      googleConnecting = false;
+    }
+  }
+
+  async function disconnectDrive() {
+    googleConnecting = true;
+    try {
+      await disconnectGoogleDrive();
+      googleConnected = false;
+      showToast("Google Drive desconectado");
+    } finally {
+      googleConnecting = false;
     }
   }
 
@@ -169,7 +212,7 @@
   }
 
   async function handleSecretAction(plugin: TenantPlugin, action: "save" | "replace" | "remove") {
-    if (action !== "remove" && !stripeSecretInput.trim()) {
+    if (action !== "remove" && !credentialInputs[plugin.plugin_key].trim()) {
       showToast("Debes ingresar una credencial válida", "err");
       return;
     }
@@ -180,9 +223,9 @@
         plugin.enabled,
         plugin.config,
         action,
-        action === "remove" ? undefined : stripeSecretInput.trim(),
+        action === "remove" ? undefined : credentialInputs[plugin.plugin_key].trim(),
       );
-      stripeSecretInput = "";
+      credentialInputs[plugin.plugin_key] = "";
       plugins = plugins.map((item) => (item.plugin_key === saved.plugin_key ? saved : item));
       const msg =
         action === "remove"
@@ -208,7 +251,9 @@
   async function test(plugin: TenantPlugin) {
     testing = plugin.plugin_key;
     try {
-      const result = await api.testPlugin(plugin.plugin_key);
+      const result = plugin.plugin_key === "google_drive"
+        ? await testGoogleDriveConnection()
+        : await api.testPlugin(plugin.plugin_key);
       showToast(result.message);
       await load();
       if (logsOpen[plugin.plugin_key]) {
@@ -236,7 +281,7 @@
   <div class="rounded-2xl border border-purple-400/20 bg-purple-500/[0.06] px-4 py-3">
     <p class="text-sm font-medium text-[var(--color-purple-bright)]">Plugins por tienda</p>
     <p class="mt-1 text-xs leading-relaxed text-[var(--color-muted)]">
-      La activación y la configuración pertenecen únicamente a la empresa seleccionada. La credencial de Stripe MCP se gestiona desde esta pantalla con cifrado autenticado AES-256-GCM en el servidor. Nunca se revelan ni almacenan secretos en texto plano.
+      La activación y la configuración pertenecen únicamente a la empresa seleccionada. Las credenciales de Stripe y Google Drive se cifran con AES-256-GCM en el servidor y nunca se devuelven a la interfaz. En modo navegador local, el token de Drive solo permanece en la sesión de la pestaña.
     </p>
   </div>
 
@@ -260,7 +305,7 @@
               <div class="min-w-0">
                 <div class="mb-2 flex flex-wrap items-center gap-2">
                   <span class="flex h-9 w-9 items-center justify-center rounded-xl border border-purple-400/25 bg-purple-500/15 text-lg text-[var(--color-purple-bright)]">
-                    {plugin.plugin_key === "stripe_mcp" ? "S" : "DB"}
+                    {plugin.plugin_key === "stripe_mcp" ? "S" : plugin.plugin_key === "google_drive" ? "GD" : "DB"}
                   </span>
                   <div>
                     <h3 class="font-semibold text-[var(--color-text)]">{plugin.name}</h3>
@@ -311,6 +356,8 @@
                   <span class="font-medium text-[var(--color-text)]">
                     {plugin.plugin_key === "database_bridge"
                       ? (plugin.config.access_mode === "read_write" ? "Lectura y escritura" : "Solo lectura")
+                      : plugin.plugin_key === "google_drive"
+                        ? (plugin.config.folder_id ? "Carpeta configurada" : "Mi unidad")
                       : (plugin.config.environment === "live" ? "Producción (Live)" : "Sandbox / Pruebas")}
                   </span>
                 </div>
@@ -322,6 +369,8 @@
                   : (plugin.config.allow_write_tools ? 'text-amber-300' : 'text-emerald-400')}">
                   {plugin.plugin_key === "database_bridge"
                     ? (plugin.config.access_mode === "read_write" ? "Permitidos" : "Bloqueados (solo lectura)")
+                    : plugin.plugin_key === "google_drive"
+                      ? "Subida de archivos"
                     : (plugin.config.allow_write_tools ? "Permitidos (requiere confirmación humana)" : "Bloqueados (solo lectura)")}
                 </span>
               </div>
@@ -375,6 +424,32 @@
                     <input class="field font-mono text-xs" value={plugin.config.database_url_env ?? ""} oninput={(event) => updateConfig(plugin, { database_url_env: event.currentTarget.value })} />
                     <span class="text-[11px] text-[var(--color-muted-dim)]">Indica únicamente el nombre de la variable de entorno. Nunca ingreses URLs ni contraseñas reales.</span>
                   </label>
+                {:else if plugin.plugin_key === "google_drive"}
+                  <div class="grid gap-3 sm:grid-cols-2">
+                    <label class="flex flex-col gap-1.5 text-sm">
+                      <span class="font-medium text-[var(--color-muted)]">Nombre de la carpeta</span>
+                      <input class="field" value={plugin.config.folder_name ?? ""} oninput={(event) => updateConfig(plugin, { folder_name: event.currentTarget.value })} />
+                    </label>
+                    <label class="flex flex-col gap-1.5 text-sm">
+                      <span class="font-medium text-[var(--color-muted)]">ID de carpeta de Drive</span>
+                      <input class="field font-mono text-xs" value={plugin.config.folder_id ?? ""} oninput={(event) => updateConfig(plugin, { folder_id: event.currentTarget.value })} placeholder="1AbC…" />
+                    </label>
+                  </div>
+                  <p class="mt-2 text-[11px] text-[var(--color-muted-dim)]">Deja el ID vacío para subir a «Mi unidad». El ID aparece en la URL de la carpeta después de <code>/folders/</code>.</p>
+                  <div class="mt-3 rounded-xl border border-white/[0.08] bg-black/40 p-3.5 space-y-3" data-google-drive-oauth-box>
+                    <div class="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p class="text-xs font-semibold text-[var(--color-text)]">Cuenta de Google</p>
+                        <p class="mt-1 text-[11px] {googleConnected ? 'text-emerald-300' : 'text-[var(--color-muted-dim)]'}">{googleConnected ? "Conectada · renovación automática" : "Sin conectar"}</p>
+                      </div>
+                      {#if googleConnected}
+                        <Button variant="danger" disabled={googleConnecting} onclick={disconnectDrive}>Desconectar</Button>
+                      {:else}
+                        <Button disabled={googleConnecting} onclick={connectDrive}>{googleConnecting ? "Conectando…" : "Conectar con Google"}</Button>
+                      {/if}
+                    </div>
+                    <p class="text-[10px] text-[var(--color-muted-dim)]">Solo tendrás que autorizar Google una vez. Hexa renueva el acceso automáticamente; nunca muestra ni solicita tokens.</p>
+                  </div>
                 {:else}
                   <div class="grid gap-3 sm:grid-cols-2">
                     <Select
@@ -410,7 +485,7 @@
                           type="password"
                           class="field font-mono text-xs"
                           placeholder={plugin.secret_configured ? "••••••••••••••••••••••••" : "rk_test_... o sk_test_..."}
-                          bind:value={stripeSecretInput}
+                          bind:value={credentialInputs.stripe_mcp}
                           autocomplete="off"
                         />
                         <span class="text-[10px] text-[var(--color-muted-dim)]">
@@ -422,7 +497,7 @@
                         {#if plugin.secret_configured}
                           <Button
                             variant="secondary"
-                            disabled={busy === plugin.plugin_key || !stripeSecretInput.trim()}
+                            disabled={busy === plugin.plugin_key || !credentialInputs.stripe_mcp.trim()}
                             onclick={() => handleSecretAction(plugin, "replace")}
                           >
                             Reemplazar credencial
@@ -436,7 +511,7 @@
                           </Button>
                         {:else}
                           <Button
-                            disabled={busy === plugin.plugin_key || !stripeSecretInput.trim()}
+                            disabled={busy === plugin.plugin_key || !credentialInputs.stripe_mcp.trim()}
                             onclick={() => handleSecretAction(plugin, "save")}
                           >
                             Guardar credencial
@@ -459,8 +534,10 @@
 
                 {#if plugin.last_error}
                   <p class="mt-3 rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">{plugin.last_error}</p>
+                {:else if plugin.plugin_key === "google_drive" && !googleConnected}
+                  <p class="mt-3 rounded-xl border border-amber-400/20 bg-amber-500/[0.07] px-3 py-2 text-xs text-amber-100/80">Conecta una cuenta de Google para activar las subidas.</p>
                 {:else if !plugin.secret_configured}
-                  <p class="mt-3 rounded-xl border border-amber-400/20 bg-amber-500/[0.07] px-3 py-2 text-xs text-amber-100/80">Guarda la credencial de Stripe en la bóveda para activar las funciones.</p>
+                  <p class="mt-3 rounded-xl border border-amber-400/20 bg-amber-500/[0.07] px-3 py-2 text-xs text-amber-100/80">Guarda la credencial de {plugin.plugin_key === "google_drive" ? "Google Drive" : "Stripe"} para activar las funciones.</p>
                 {/if}
 
                 <div class="mt-4 flex flex-wrap justify-end gap-2">

@@ -3,7 +3,7 @@
   import { page } from "$app/stores";
   import { goto } from "$app/navigation";
   import { api } from "$lib/api/client";
-  import { session, isAdmin } from "$lib/stores/session";
+  import { session, isAdmin, currentUser } from "$lib/stores/session";
   import { showToast } from "$lib/stores/ui";
   import type {
     WorkCategory,
@@ -22,6 +22,8 @@
   import Modal from "$lib/components/Modal.svelte";
   import Select from "$lib/components/Select.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
+  import AssigneeAvatar from "$lib/components/users/AssigneeAvatar.svelte";
+  import { isTaskDueSoon, isTaskOverdue, sortTasksByDueDate } from "$lib/work/task-dates";
 
   let items = $state<WorkItem[]>([]);
   let categories = $state<WorkCategory[]>([]);
@@ -70,13 +72,15 @@
 
   // Track active company switch
   let lastCompanyId = $state<number | null>(null);
+  let assigneeFilterInitializedCompanyId = $state<number | null>(null);
 
   // Options for selects
   const statusOptions = [
     { value: "", label: "Todos los estados" },
-    { value: "inbox", label: "Inbox" },
+    { value: "inbox", label: "Backlog" },
     { value: "planned", label: "Planificado" },
     { value: "in_progress", label: "En progreso" },
+    { value: "validation", label: "Validación" },
     { value: "blocked", label: "Bloqueado" },
     { value: "done", label: "Hecho" },
     { value: "archived", label: "Archivados" },
@@ -106,9 +110,10 @@
   ];
 
   const detailStatusOptions = [
-    { value: "inbox", label: "Inbox" },
+    { value: "inbox", label: "Backlog" },
     { value: "planned", label: "Planificado" },
     { value: "in_progress", label: "En progreso" },
+    { value: "validation", label: "Validación" },
     { value: "blocked", label: "Bloqueado" },
     { value: "done", label: "Hecho" },
     { value: "archived", label: "Archivado" },
@@ -165,6 +170,13 @@
       members = mems;
       items = workList;
       projects = projList;
+      const activeCompanyId = $session.activeCompanyId;
+      if (assigneeFilterInitializedCompanyId !== activeCompanyId) {
+        filterAssignee = $currentUser?.id && mems.some((member) => member.id === $currentUser?.id)
+          ? String($currentUser.id)
+          : "";
+        assigneeFilterInitializedCompanyId = activeCompanyId;
+      }
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Error al cargar datos de Trabajo", "err");
     } finally {
@@ -238,7 +250,7 @@
         status: "inbox",
         priority: "normal",
         project_id: quickProjectId ? Number(quickProjectId) : null,
-        assignee_id: null,
+        assignee_id: $currentUser?.id ?? null,
       });
       quickTitle = "";
       quickCategoryName = "";
@@ -262,7 +274,7 @@
       priority: "normal",
       category_id: "",
       project_id: filterProject && filterProject !== "none" ? filterProject : "",
-      assignee_id: "",
+      assignee_id: $currentUser?.id ? String($currentUser.id) : "",
       start_date: "",
       due_date: "",
     };
@@ -424,7 +436,7 @@
 
   // Filter items
   const filteredItems = $derived(
-    items.filter((item) => {
+    sortTasksByDueDate(items.filter((item) => {
       if (filterText.trim()) {
         const q = filterText.trim().toLowerCase();
         const titleMatch = item.title.toLowerCase().includes(q);
@@ -444,7 +456,7 @@
         }
       }
       return true;
-    })
+    }))
   );
 
   // Group filtered items by category
@@ -473,6 +485,22 @@
     return p ? p.name : null;
   }
 
+  function hasOverdueSubtask(itemId: number) {
+    return items.some((item) => item.parent_id === itemId && isTaskOverdue(item));
+  }
+
+  function hasDueSoonSubtask(itemId: number) {
+    return items.some((item) => item.parent_id === itemId && isTaskDueSoon(item));
+  }
+
+  function itemIsDanger(item: WorkItem) {
+    return isTaskOverdue(item) || hasOverdueSubtask(item.id);
+  }
+
+  function itemIsDueSoon(item: WorkItem) {
+    return !itemIsDanger(item) && (isTaskDueSoon(item) || hasDueSoonSubtask(item.id));
+  }
+
   function typeLabel(t: string) {
     switch (t) {
       case "idea": return "Idea";
@@ -485,9 +513,10 @@
 
   function statusLabel(s: string) {
     switch (s) {
-      case "inbox": return "Inbox";
+      case "inbox": return "Backlog";
       case "planned": return "Planificado";
       case "in_progress": return "En progreso";
+      case "validation": return "Validación";
       case "blocked": return "Bloqueado";
       case "done": return "Hecho";
       case "archived": return "Archivado";
@@ -515,10 +544,11 @@
     }
   }
 
-  function statusBadgeTone(s: string): "neutral" | "ok" | "warn" | "danger" | "ai" {
+  function statusBadgeTone(s: string): "neutral" | "ok" | "warn" | "danger" | "info" | "ai" {
     switch (s) {
       case "done": return "ok";
       case "in_progress": return "ai";
+      case "validation": return "info";
       case "blocked": return "danger";
       case "planned": return "warn";
       default: return "neutral";
@@ -703,7 +733,7 @@
                   <button
                     type="button"
                     onclick={() => openEditTaskModal(item)}
-                    class="group flex w-full flex-wrap items-center justify-between gap-3 px-4 py-3.5 text-left transition hover:bg-purple-500/[0.06]"
+                    class="group flex w-full flex-wrap items-center justify-between gap-3 border-l-2 px-4 py-3.5 text-left transition hover:bg-purple-500/[0.06] {itemIsDanger(item) ? 'border-l-rose-500 bg-rose-500/[0.07]' : itemIsDueSoon(item) ? 'border-l-amber-400 bg-amber-500/[0.06]' : 'border-l-transparent'}"
                   >
                     <div class="min-w-0 flex-1">
                       <div class="flex items-center gap-2">
@@ -737,13 +767,11 @@
                       <Badge tone={priorityBadgeTone(item.priority)}>{priorityLabel(item.priority)}</Badge>
 
                       {#if item.assignee_name}
-                        <span class="text-xs text-[var(--color-muted)]">
-                          👤 {item.assignee_name}
-                        </span>
+                        <AssigneeAvatar name={item.assignee_name} avatar={item.assignee_avatar_data_url} status={item.status} />
                       {/if}
 
                       {#if item.due_date}
-                        <span class="text-xs text-[var(--color-muted-dim)] tabular">
+                        <span class="text-xs tabular {isTaskOverdue(item) ? 'font-semibold text-rose-300' : isTaskDueSoon(item) ? 'font-semibold text-amber-300' : 'text-[var(--color-muted-dim)]'}">
                           📅 {formatDate(item.due_date)}
                         </span>
                       {/if}

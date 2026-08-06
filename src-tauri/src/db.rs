@@ -101,6 +101,8 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT NOT NULL UNIQUE,
             display_name TEXT NOT NULL,
+            phone TEXT NOT NULL DEFAULT '',
+            avatar_data_url TEXT NOT NULL DEFAULT '',
             role TEXT NOT NULL DEFAULT 'cajero',
             pin_hash TEXT NOT NULL,
             active INTEGER NOT NULL DEFAULT 1,
@@ -199,6 +201,8 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         "ALTER TABLE users ADD COLUMN temp_password_issued_at TEXT",
         [],
     );
+    let _ = conn.execute("ALTER TABLE users ADD COLUMN phone TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE users ADD COLUMN avatar_data_url TEXT NOT NULL DEFAULT ''", []);
     let _ = conn.execute(
         "ALTER TABLE products ADD COLUMN category TEXT NOT NULL DEFAULT ''",
         [],
