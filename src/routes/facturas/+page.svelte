@@ -13,7 +13,8 @@
   type ManualLine = { product_id: string; description: string; quantity: string | number; unit_price: string | number; vat_rate: string | number };
 
   function numberValue(value: string | number | null | undefined): number {
-    return Number(String(value ?? "").replace(",", "."));
+    const normalized = String(value ?? "").replace(",", ".").trim();
+    return normalized === "" ? 0 : Number(normalized);
   }
 
   let invoices = $state<Invoice[]>([]);
@@ -37,10 +38,13 @@
   let datePreset = $state<"all" | "month" | "quarter" | "previous_quarter" | "year" | "previous_year" | "custom">("all");
   let fromFilter = $state("");
   let toFilter = $state("");
+  let calendarOpen = $state(false);
+  let calendarCursor = $state(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
   let customers = $state<Customer[]>([]);
   let products = $state<Product[]>([]);
   let manualOpen = $state(false);
   let manualSaving = $state(false);
+  let manualError = $state("");
   let creatingCustomer = $state(false);
   let previewOpen = $state(false);
   let previewInvoice = $state<Invoice | null>(null);
@@ -64,13 +68,13 @@
   }));
 
   function clearInvoiceFilters() {
-    invoiceSearch = ""; invoiceStatusFilter = "all"; paymentFilter = "all"; customerFilter = ""; seriesFilter = ""; datePreset = "all"; fromFilter = ""; toFilter = "";
+    invoiceSearch = ""; invoiceStatusFilter = "all"; paymentFilter = "all"; customerFilter = ""; seriesFilter = ""; datePreset = "all"; fromFilter = ""; toFilter = ""; calendarOpen = false;
   }
 
   function setDatePreset(value: typeof datePreset) {
     datePreset = value;
     if (value === "all") { fromFilter = ""; toFilter = ""; return; }
-    if (value === "custom") return;
+    if (value === "custom") { openRangeCalendar(); return; }
     const today = new Date();
     let from = new Date(today.getFullYear(), today.getMonth(), today.getDate());
     let to = new Date(today.getFullYear(), today.getMonth(), today.getDate());
@@ -82,6 +86,27 @@
     const iso = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
     fromFilter = iso(from); toFilter = iso(to);
   }
+
+  function isoDate(date: Date): string { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`; }
+  function openRangeCalendar() {
+    datePreset = "custom";
+    const anchor = fromFilter ? new Date(`${fromFilter}T00:00:00`) : new Date();
+    calendarCursor = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+    calendarOpen = true;
+  }
+  function moveCalendar(months: number) { calendarCursor = new Date(calendarCursor.getFullYear(), calendarCursor.getMonth() + months, 1); }
+  function calendarDays(offset: number): Array<{ date: string; day: number } | null> {
+    const month = new Date(calendarCursor.getFullYear(), calendarCursor.getMonth() + offset, 1);
+    const leading = (month.getDay() + 6) % 7;
+    const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+    return [...Array.from({ length: leading }, () => null), ...Array.from({ length: days }, (_, index) => ({ date: isoDate(new Date(month.getFullYear(), month.getMonth(), index + 1)), day: index + 1 }))];
+  }
+  function monthLabel(offset: number): string { return new Intl.DateTimeFormat("es-ES", { month: "long", year: "numeric" }).format(new Date(calendarCursor.getFullYear(), calendarCursor.getMonth() + offset, 1)); }
+  function chooseCalendarDate(date: string) {
+    if (!fromFilter || toFilter) { fromFilter = date; toFilter = ""; return; }
+    if (date < fromFilter) { toFilter = fromFilter; fromFilter = date; } else { toFilter = date; calendarOpen = false; }
+  }
+  function inCalendarRange(date: string): boolean { return !!fromFilter && !!toFilter && date >= fromFilter && date <= toFilter; }
 
   function isOverdue(invoice: Invoice) {
     return invoice.status === "issued" && invoice.payment_status !== "paid" && !!invoice.due_at && invoice.due_at.slice(0, 10) < new Date().toISOString().slice(0, 10);
@@ -101,6 +126,7 @@
   function openManualInvoice() {
     manualForm = { kind: "complete", customer_id: "", customer_name: "", customer_nif: "", customer_email: "", operation_date: new Date().toISOString().slice(0, 10), due_at: "", irpf_rate: irpfRate, notes: "" };
     manualLines = [{ product_id: "", description: "", quantity: "1", unit_price: "", vat_rate: "21" }];
+    manualError = "";
     manualOpen = true;
   }
 
@@ -138,6 +164,7 @@
 
   async function saveManualInvoice() {
     manualSaving = true;
+    manualError = "";
     try {
       const lines = manualLines.map((line) => ({ description: line.description.trim(), quantity: numberValue(line.quantity), unit_price_cents: Math.round(numberValue(line.unit_price) * 100), vat_rate: numberValue(line.vat_rate) as 0 | 4 | 10 | 21 }));
       if (lines.some((line) => !line.description || !Number.isFinite(line.quantity) || line.quantity <= 0 || !Number.isFinite(line.unit_price_cents) || line.unit_price_cents < 0)) throw new Error("Revisa las líneas de la factura");
@@ -152,7 +179,7 @@
       previewInvoice = invoice;
       previewOpen = true;
       await load();
-    } catch (error) { showToast(error instanceof Error ? error.message : "No se pudo crear la factura", "err"); }
+    } catch (error) { manualError = error instanceof Error ? error.message : "No se pudo crear la factura"; showToast(manualError, "err"); }
     finally { manualSaving = false; }
   }
 
@@ -212,7 +239,7 @@
       <select class="field" bind:value={customerFilter}><option value="">Cliente: todos</option>{#each customers as customer}<option value={customer.id}>{customer.name}</option>{/each}</select>
       <select class="field" bind:value={seriesFilter}><option value="">Serie: todas</option>{#each invoiceSeriesOptions as invoiceSeriesOption}<option value={invoiceSeriesOption}>{invoiceSeriesOption}</option>{/each}</select>
       <select class="field" value={datePreset} onchange={(event) => setDatePreset(event.currentTarget.value as typeof datePreset)}><option value="all">Fecha: todas</option><option value="month">Este mes</option><option value="quarter">Trimestre actual</option><option value="previous_quarter">Trimestre anterior</option><option value="year">Este año</option><option value="previous_year">Año anterior</option><option value="custom">Personalizado</option></select>
-      {#if datePreset === "custom"}<div class="flex gap-2 sm:col-span-2"><label class="min-w-0 flex-1 text-xs text-slate-400"><span class="mb-1 block">Desde</span><input type="date" class="field w-full" aria-label="Desde" bind:value={fromFilter} /></label><label class="min-w-0 flex-1 text-xs text-slate-400"><span class="mb-1 block">Hasta</span><input type="date" class="field w-full" aria-label="Hasta" bind:value={toFilter} /></label></div>{/if}
+      {#if datePreset === "custom"}<div class="relative sm:col-span-2"><button type="button" class="field flex w-full items-center justify-between text-left" onclick={() => (calendarOpen = !calendarOpen)}><span>{fromFilter && toFilter ? `${fromFilter} → ${toFilter}` : fromFilter ? `${fromFilter} → Selecciona la fecha final` : "Seleccionar intervalo"}</span><span class="text-slate-400">▣</span></button>{#if calendarOpen}<div class="absolute left-0 top-full z-30 mt-2 w-[min(46rem,calc(100vw-3rem))] rounded-2xl border border-white/15 bg-[#17121f] p-4 shadow-2xl"><div class="mb-3 flex items-center justify-between"><Button variant="ghost" class="px-2 text-lg" onclick={() => moveCalendar(-1)}>‹</Button><p class="text-xs text-slate-400">Selecciona inicio y fin</p><Button variant="ghost" class="px-2 text-lg" onclick={() => moveCalendar(1)}>›</Button></div><div class="grid gap-5 sm:grid-cols-2">{#each [0, 1] as offset}<div><p class="mb-2 text-center text-sm font-semibold capitalize">{monthLabel(offset)}</p><div class="mb-1 grid grid-cols-7 text-center text-[10px] uppercase text-slate-500">{#each ["L", "M", "X", "J", "V", "S", "D"] as weekday}<span>{weekday}</span>{/each}</div><div class="grid grid-cols-7 gap-1">{#each calendarDays(offset) as cell}<div class="aspect-square">{#if cell}<button type="button" class="h-full w-full rounded-lg text-xs transition hover:bg-purple-500/30 {cell.date === fromFilter || cell.date === toFilter ? "bg-purple-500 text-white" : inCalendarRange(cell.date) ? "bg-purple-500/20 text-purple-100" : "text-slate-300"}" onclick={() => chooseCalendarDate(cell.date)}>{cell.day}</button>{/if}</div>{/each}</div></div>{/each}</div><div class="mt-4 flex justify-end gap-2 border-t border-white/10 pt-3"><Button variant="ghost" class="text-xs" onclick={() => { fromFilter = ""; toFilter = ""; }}>Borrar</Button><Button variant="secondary" class="text-xs" onclick={() => (calendarOpen = false)}>Aplicar</Button></div></div>{/if}</div>{/if}
     </div>
   </Card>
 
@@ -239,6 +266,7 @@
     </div>
     <div class="rounded-2xl border border-white/10 bg-white/[0.02] p-4"><div class="mb-3 flex flex-wrap items-center justify-between gap-2"><div><h3 class="font-semibold">Conceptos de la factura</h3><p class="text-xs text-slate-400">Añade productos del catálogo o escribe un servicio personalizado. El total se calcula automáticamente.</p></div><Button variant="secondary" class="text-xs" onclick={addManualLine}>+ Añadir línea</Button></div><div class="hidden gap-2 px-1 pb-2 text-[11px] uppercase tracking-wide text-slate-500 lg:grid lg:grid-cols-[13rem_minmax(0,1fr)_5rem_7rem_6rem_6rem_auto]"><span>Producto / servicio</span><span>Descripción</span><span>Cant.</span><span>Precio (€)</span><span>IVA</span><span>Importe</span><span></span></div><div class="space-y-3">{#each manualLines as line, index}<div class="rounded-xl border border-white/10 bg-black/10 p-3"><div class="grid items-end gap-2 lg:grid-cols-[13rem_minmax(0,1fr)_5rem_7rem_6rem_6rem_auto]"><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Producto / servicio</span><select class="field w-full" value={line.product_id} onchange={(event) => selectManualProduct(index, event.currentTarget.value)}><option value="">Personalizado</option>{#each products as product}<option value={product.id}>{product.name}</option>{/each}</select></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Descripción</span><input class="field w-full" placeholder="Descripción del concepto" bind:value={line.description} /></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Cantidad</span><input type="number" min="0.01" step="0.01" class="field w-full" bind:value={line.quantity} /></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Precio (€)</span><input type="number" min="0" step="0.01" class="field w-full" bind:value={line.unit_price} /></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">IVA</span><select class="field w-full" bind:value={line.vat_rate}><option value="21">21%</option><option value="10">10%</option><option value="4">4%</option><option value="0">0%</option></select></label><div class="text-right text-sm font-semibold tabular"><span class="mb-1 block text-slate-400 lg:hidden">Importe</span>{formatEUR((Math.round(numberValue(line.quantity) * numberValue(line.unit_price) * 100) || 0) + Math.round((Math.round(numberValue(line.quantity) * numberValue(line.unit_price) * 100) || 0) * numberValue(line.vat_rate) / 100))}</div><Button variant="ghost" class="text-xs" disabled={manualLines.length === 1} onclick={() => removeManualLine(index)}>Quitar</Button></div></div>{/each}</div><div class="mt-4 flex flex-wrap justify-end gap-x-6 gap-y-1 border-t border-white/10 pt-3 text-sm"><span>Base: <strong>{formatEUR(manualTotals.base)}</strong></span><span>IVA: <strong>{formatEUR(manualTotals.vat)}</strong></span><span class="text-base">Total: <strong>{formatEUR(manualTotals.total)}</strong></span></div></div>
     <div class="grid gap-3 sm:grid-cols-3"><label class="text-sm"><span class="mb-1 block text-slate-400">IRPF %</span><input type="number" min="0" max="100" step="0.01" class="field w-full" bind:value={manualForm.irpf_rate} /></label><label class="text-sm sm:col-span-2"><span class="mb-1 block text-slate-400">Notas</span><input class="field w-full" placeholder="Condiciones de pago, referencia…" bind:value={manualForm.notes} /></label></div>
+    {#if manualError}<p class="rounded-xl border border-rose-400/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-200" role="alert">{manualError}</p>{/if}
     <div class="flex justify-end gap-2"><Button variant="ghost" onclick={() => (manualOpen = false)}>Cancelar</Button><Button variant="primary" disabled={manualSaving} onclick={saveManualInvoice}>{manualSaving ? "Guardando…" : "Emitir factura"}</Button></div>
   </div>
 </Modal>
