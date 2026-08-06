@@ -22,6 +22,7 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 - Las facturas emitidas pueden crearse directamente sin venta, con cliente, líneas, IVA, IRPF, vencimiento, notas e impresión, manteniendo la trazabilidad VERI*FACTU.
 - El editor de facturas usa un flujo por secciones con selector de productos, líneas y totales automáticos, y abre una vista previa limpia tras emitir para imprimir o guardar en PDF.
 - La serie de facturación queda configurada por empresa en el perfil fiscal; la factura toma automáticamente los datos de la empresa activa y permite crear o actualizar el cliente desde el propio formulario.
+- El listado de facturas incorpora una vista tabular con búsqueda, filtros por estado, cobro, cliente, serie y rango de fechas, además de acciones rápidas para PDF, cobro, abono y anulación.
 
 ### Fixed
 
