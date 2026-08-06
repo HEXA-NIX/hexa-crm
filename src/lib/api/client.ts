@@ -42,6 +42,7 @@ import type {
   SupplierInput,
   UserInput,
   VatSummary,
+  VerifactuRecord,
   Warehouse,
   WorkCategory,
   WorkItem,
@@ -181,6 +182,8 @@ async function callLocal<T>(cmd: string, args: Record<string, any>, token: strin
     case "add_invoice_payment": return browserApi.add_invoice_payment(args.input, token) as T;
     case "list_expense_payments": return browserApi.list_expense_payments(args.expense_id, token) as T;
     case "add_expense_payment": return browserApi.add_expense_payment(args.input, token) as T;
+    case "list_verifactu_records": return browserApi.list_verifactu_records(token) as T;
+    case "verify_verifactu_chain": return browserApi.verify_verifactu_chain(token) as T;
     case "archive_work_item": return browserApi.archiveWorkItem(args.id, token) as Promise<T>;
     case "list_work_projects": return browserApi.listWorkProjects(args.status_filter, token) as Promise<T>;
     case "get_work_project": return browserApi.getWorkProject(args.reference ?? args.id, token) as Promise<T>;
@@ -340,6 +343,8 @@ export const api = {
   addInvoicePayment: (input: InvoicePaymentInput) => call<InvoicePayment>("add_invoice_payment", { input }),
   listExpensePayments: (expenseId: number) => call<ExpensePayment[]>("list_expense_payments", { expense_id: expenseId }),
   addExpensePayment: (input: ExpensePaymentInput) => call<ExpensePayment>("add_expense_payment", { input }),
+  listVerifactuRecords: () => call<VerifactuRecord[]>("list_verifactu_records"),
+  verifyVerifactuChain: () => call<{ ok: boolean; error?: string }>("verify_verifactu_chain"),
   syncWhatsAppExpense: async (kind: ExpenseDocument["kind"] = "invoice") => {
     if (WEB_DATA_MODE === "local" && !isTauri()) {
       const input = await localWhatsApp<ExpenseDocumentInput & { status?: ExpenseDocument["status"] }>("sync_expense", { kind });

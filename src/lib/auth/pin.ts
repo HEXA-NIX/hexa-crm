@@ -22,6 +22,11 @@ export async function sha256Hex(message: string): Promise<string> {
   return sha256Pure(message);
 }
 
+/** Synchronous SHA-256 used for deterministic fiscal fingerprints. */
+export function sha256HexSync(message: string): string {
+  return sha256Pure(message);
+}
+
 function sha256Pure(message: string): string {
   const k = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,

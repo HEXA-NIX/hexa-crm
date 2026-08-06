@@ -48,6 +48,7 @@ import type {
   UserInput,
   UserRole,
   VatSummary,
+  VerifactuRecord,
   Warehouse,
   WorkCategory,
   WorkItem,
@@ -60,6 +61,7 @@ import type {
 } from "../types";
 import { buildModel303Draft } from "../taxes/model303";
 import { buildInvoiceFromSale, buildRectifyingInvoice } from "../invoicing/invoice";
+import { createVerifactuRecord, verifyVerifactuChain } from "../verifactu/records";
 import {
   PLUGIN_CATALOG,
   listStripeTools,
@@ -169,6 +171,7 @@ type Store = {
   invoices: Invoice[];
   invoicePayments: InvoicePayment[];
   expensePayments: ExpensePayment[];
+  verifactuRecords: VerifactuRecord[];
   fiscalProfiles: FiscalProfile[];
   stockMovements: {
     id: number;
@@ -199,6 +202,7 @@ type Store = {
     invoice: number;
     invoicePayment: number;
     expensePayment: number;
+    verifactuRecord: number;
     stock: number;
     user: number;
     company: number;
@@ -214,6 +218,18 @@ type Store = {
 
 function now() {
   return new Date().toISOString();
+}
+
+function appendVerifactuRecord(s: Store, invoice: Invoice, recordType: "alta" | "anulacion") {
+  const profile = s.fiscalProfiles.find((candidate) => candidate.company_id === invoice.company_id);
+  if (!profile || (profile.verifactu_mode ?? "disabled") === "disabled") return;
+  const previous = s.verifactuRecords
+    .filter((record) => record.company_id === invoice.company_id)
+    .sort((a, b) => b.id - a.id)[0]?.hash ?? "";
+  const draft = createVerifactuRecord({ invoice, profile, recordType, previousHash: previous });
+  if (!draft) return;
+  s.seq.verifactuRecord += 1;
+  s.verifactuRecords.push({ id: s.seq.verifactuRecord, ...draft });
 }
 
 function defaultSettings(): Settings {
@@ -370,6 +386,7 @@ function seed(): Store {
     invoices: [],
     invoicePayments: [],
     expensePayments: [],
+    verifactuRecords: [],
     fiscalProfiles: [],
     stockMovements: [],
     warehouses: [],
@@ -394,6 +411,7 @@ function seed(): Store {
       invoice: 0,
       invoicePayment: 0,
       expensePayment: 0,
+      verifactuRecord: 0,
       stock: 0,
       user: 0,
       company: 2,
@@ -459,7 +477,9 @@ function load(): Store {
     if (!memoryStore.invoices) memoryStore.invoices = [];
     if (!memoryStore.invoicePayments) memoryStore.invoicePayments = [];
     if (!memoryStore.expensePayments) memoryStore.expensePayments = [];
+    if (!memoryStore.verifactuRecords) memoryStore.verifactuRecords = [];
     if (memoryStore.seq.expensePayment == null) memoryStore.seq.expensePayment = memoryStore.expensePayments.length;
+    if (memoryStore.seq.verifactuRecord == null) memoryStore.seq.verifactuRecord = memoryStore.verifactuRecords.length;
     if (memoryStore.seq.invoicePayment == null) memoryStore.seq.invoicePayment = memoryStore.invoicePayments.length;
     if (memoryStore.seq.warehouse == null) memoryStore.seq.warehouse = 0;
     if (memoryStore.seq.stockLocation == null) memoryStore.seq.stockLocation = 0;
@@ -512,6 +532,7 @@ function load(): Store {
     if (!parsed.invoices) parsed.invoices = [];
     if (!parsed.invoicePayments) parsed.invoicePayments = [];
     if (!parsed.expensePayments) parsed.expensePayments = [];
+    if (!parsed.verifactuRecords) parsed.verifactuRecords = [];
     if (!parsed.seq) {
       parsed.seq = {
         product: 0,
@@ -523,6 +544,7 @@ function load(): Store {
         invoice: 0,
         invoicePayment: 0,
         expensePayment: 0,
+        verifactuRecord: 0,
         stock: 0,
         user: 0,
         company: 0,
@@ -540,6 +562,7 @@ function load(): Store {
     if (parsed.seq.invoice == null) parsed.seq.invoice = parsed.invoices.length;
     if (parsed.seq.invoicePayment == null) parsed.seq.invoicePayment = parsed.invoicePayments.length;
     if (parsed.seq.expensePayment == null) parsed.seq.expensePayment = parsed.expensePayments.length;
+    if (parsed.seq.verifactuRecord == null) parsed.seq.verifactuRecord = parsed.verifactuRecords.length;
     if (parsed.seq.company == null) parsed.seq.company = parsed.companies?.length ?? 0;
     if (parsed.seq.warehouse == null) parsed.seq.warehouse = parsed.warehouses.length;
     if (parsed.seq.stockLocation == null) parsed.seq.stockLocation = parsed.stockLocations.length;
@@ -2095,6 +2118,7 @@ export const browserApi = {
       rectifying.series = series;
       rectifying.operation_date = input.operation_date || base.operation_date;
       s.invoices.push(rectifying);
+      appendVerifactuRecord(s, rectifying, "alta");
       save(s);
       return { ...rectifying };
     }
@@ -2112,6 +2136,7 @@ export const browserApi = {
     s.seq.invoice += 1;
     const invoice = buildInvoiceFromSale({ id: s.seq.invoice, company, customer, sale, lines: s.saleLines.filter((line) => line.sale_id === sale.id), invoice: input, created_by: user.id, number: `${year}-${String(count).padStart(5, "0")}`, profile: s.fiscalProfiles.find((item) => item.company_id === cid) ?? null });
     s.invoices.push(invoice);
+    appendVerifactuRecord(s, invoice, "alta");
     save(s);
     return { ...invoice };
   },
@@ -2125,8 +2150,21 @@ export const browserApi = {
     if (invoice.status === "cancelled") return { ...invoice };
     invoice.status = "cancelled";
     invoice.updated_at = now();
+    appendVerifactuRecord(s, invoice, "anulacion");
     save(s);
     return { ...invoice };
+  },
+
+  list_verifactu_records(token?: string | null): VerifactuRecord[] {
+    const s = load();
+    const cid = sessionCompanyId(s, token);
+    return s.verifactuRecords.filter((record) => record.company_id === cid).sort((a, b) => b.id - a.id);
+  },
+
+  verify_verifactu_chain(token?: string | null): { ok: boolean; error?: string } {
+    const s = load();
+    const cid = sessionCompanyId(s, token);
+    return verifyVerifactuChain(s.verifactuRecords.filter((record) => record.company_id === cid));
   },
 
   list_invoice_payments(invoiceId: number, token?: string | null): InvoicePayment[] {
@@ -2263,6 +2301,10 @@ export const browserApi = {
     if (!["monthly", "quarterly"].includes(period)) throw new Error("Periodicidad no válida");
     const rate = Number(input.default_irpf_rate ?? 0);
     if (!Number.isFinite(rate) || rate < 0 || rate > 100) throw new Error("El IRPF debe estar entre 0 y 100");
+    const verifactuMode = input.verifactu_mode ?? "disabled";
+    if (!["disabled", "test", "production"].includes(verifactuMode)) throw new Error("Modo VERI*FACTU no válido");
+    const producerNif = (input.verifactu_producer_nif ?? "").trim().toUpperCase();
+    if (verifactuMode !== "disabled" && !producerNif) throw new Error("El NIF emisor es obligatorio para activar VERI*FACTU");
     const profile: FiscalProfile = {
       company_id: cid,
       regime: regime as FiscalProfile["regime"],
@@ -2270,6 +2312,12 @@ export const browserApi = {
       irpf_enabled: !!input.irpf_enabled,
       default_irpf_rate: rate,
       sii_enabled: !!input.sii_enabled,
+      verifactu_mode: verifactuMode,
+      verifactu_software_id: input.verifactu_software_id?.trim() || "hexa-crm",
+      verifactu_software_name: input.verifactu_software_name?.trim() || "Hexa CRM",
+      verifactu_software_version: input.verifactu_software_version?.trim() || "0.3.2",
+      verifactu_producer_name: input.verifactu_producer_name?.trim() || "",
+      verifactu_producer_nif: producerNif,
       updated_at: now(),
     };
     const index = s.fiscalProfiles.findIndex((item) => item.company_id === cid);
@@ -2524,6 +2572,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     const invoices = Array.isArray(payload.invoices) ? payload.invoices : [];
     const invoicePayments = Array.isArray(payload.invoicePayments) ? payload.invoicePayments : [];
     const expensePayments = Array.isArray(payload.expensePayments) ? payload.expensePayments : [];
+    const verifactuRecords = Array.isArray(payload.verifactuRecords) ? payload.verifactuRecords : [];
     const seq = {
       product: payload.seq?.product ?? 0,
       customer: payload.seq?.customer ?? 0,
@@ -2534,6 +2583,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       invoice: payload.seq?.invoice ?? invoices.length,
       invoicePayment: payload.seq?.invoicePayment ?? invoicePayments.length,
       expensePayment: payload.seq?.expensePayment ?? expensePayments.length,
+      verifactuRecord: payload.seq?.verifactuRecord ?? verifactuRecords.length,
       stock: payload.seq?.stock ?? 0,
       user: payload.seq?.user ?? 0,
       company: payload.seq?.company ?? 0,
@@ -2559,6 +2609,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       invoices,
       invoicePayments,
       expensePayments,
+      verifactuRecords,
       seq,
       sessions: {},
     });

@@ -234,6 +234,9 @@ export type ExpenseDocumentInput = Partial<Omit<ExpenseDocument, "id" | "company
 
 export type FiscalRegime = "general" | "simplified" | "recargo_equivalencia" | "other";
 export type FiscalPeriod = "monthly" | "quarterly";
+export type VerifactuMode = "disabled" | "test" | "production";
+export type VerifactuRecordType = "alta" | "anulacion";
+export type VerifactuRecordStatus = "generated" | "queued" | "sent" | "accepted" | "accepted_with_errors" | "rejected";
 export type FiscalProfile = {
   company_id: number;
   regime: FiscalRegime;
@@ -241,6 +244,12 @@ export type FiscalProfile = {
   irpf_enabled: boolean;
   default_irpf_rate: number;
   sii_enabled: boolean;
+  verifactu_mode?: VerifactuMode;
+  verifactu_software_id?: string;
+  verifactu_software_name?: string;
+  verifactu_software_version?: string;
+  verifactu_producer_name?: string;
+  verifactu_producer_nif?: string;
   updated_at: string;
 };
 
@@ -334,6 +343,28 @@ export type InvoicePaymentInput = {
   paid_at?: string | null;
   method?: InvoicePayment["method"];
   notes?: string;
+};
+export type VerifactuRecord = {
+  id: number;
+  company_id: number;
+  invoice_id: number;
+  record_type: VerifactuRecordType;
+  issuer_nif: string;
+  issuer_name: string;
+  invoice_series: string;
+  invoice_number: string;
+  invoice_date: string;
+  invoice_type: string;
+  vat_cents: number;
+  total_cents: number;
+  previous_hash: string;
+  hash: string;
+  generated_at: string;
+  mode: VerifactuMode;
+  status: VerifactuRecordStatus;
+  qr_url: string;
+  payload_json: string;
+  error: string | null;
 };
 export type ExpensePayment = {
   id: number;

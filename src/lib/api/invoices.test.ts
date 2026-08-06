@@ -17,4 +17,17 @@ describe("ciclo de facturas emitidas", () => {
     expect(credit.kind).toBe("rectifying");
     expect(credit.total_cents).toBe(-invoice.total_cents);
   });
+
+  it("genera registros VERI*FACTU encadenados en el entorno de pruebas", async () => {
+    const { token } = await browserApi.login("admin", "1234");
+    await browserApi.upsert_fiscal_profile({ verifactu_mode: "test", verifactu_producer_nif: "B00000000" }, token);
+    const product = browserApi.list_products(true, token)[0];
+    const sale = browserApi.create_sale([{ product_id: product.id, qty: 1 }], null, "venta verifactu", token);
+    const invoice = browserApi.issue_invoice({ sale_id: sale.id, kind: "simplified" }, token);
+    expect(browserApi.list_verifactu_records(token)).toHaveLength(1);
+    expect(browserApi.verify_verifactu_chain(token)).toEqual({ ok: true });
+    browserApi.cancel_invoice(invoice.id, token);
+    expect(browserApi.list_verifactu_records(token)).toHaveLength(2);
+    expect(browserApi.verify_verifactu_chain(token)).toEqual({ ok: true });
+  });
 });

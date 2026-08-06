@@ -9,6 +9,7 @@ import {
   validatePermanentPassword,
 } from "../auth/password-policy";
 import { validatePin } from "../auth/pin";
+import { createVerifactuRecord, verifyVerifactuChain } from "../verifactu/records";
 import { extractOllamaReply, ollamaChatBody } from "../ai/ollama-reply";
 import { isVatRate, lineBreakdown, type VatRate } from "../vat";
 import {
@@ -63,6 +64,7 @@ import type {
   TenantPlugin,
   UserInput,
   VatSummary,
+  VerifactuRecord,
   Warehouse,
   WorkCategory,
   WorkItem,
@@ -187,9 +189,21 @@ export async function initDb() {
       irpf_enabled BOOLEAN NOT NULL DEFAULT FALSE,
       default_irpf_rate NUMERIC(5,2) NOT NULL DEFAULT 0,
       sii_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      verifactu_mode TEXT NOT NULL DEFAULT 'disabled',
+      verifactu_software_id TEXT NOT NULL DEFAULT 'hexa-crm',
+      verifactu_software_name TEXT NOT NULL DEFAULT 'Hexa CRM',
+      verifactu_software_version TEXT NOT NULL DEFAULT '0.3.2',
+      verifactu_producer_name TEXT NOT NULL DEFAULT '',
+      verifactu_producer_nif TEXT NOT NULL DEFAULT '',
       updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     );
   `;
+  await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS verifactu_mode TEXT NOT NULL DEFAULT 'disabled'`;
+  await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS verifactu_software_id TEXT NOT NULL DEFAULT 'hexa-crm'`;
+  await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS verifactu_software_name TEXT NOT NULL DEFAULT 'Hexa CRM'`;
+  await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS verifactu_software_version TEXT NOT NULL DEFAULT '0.3.2'`;
+  await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS verifactu_producer_name TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS verifactu_producer_nif TEXT NOT NULL DEFAULT ''`;
   await sql`
     CREATE TABLE IF NOT EXISTS operator_accounts (
       id UUID PRIMARY KEY,
@@ -467,6 +481,19 @@ export async function initDb() {
     );
   `;
   await sql`CREATE INDEX IF NOT EXISTS idx_invoice_payments_invoice ON invoice_payments(invoice_id, paid_at DESC)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS verifactu_records (
+      id BIGSERIAL PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE, record_type TEXT NOT NULL,
+      issuer_nif TEXT NOT NULL, issuer_name TEXT NOT NULL DEFAULT '', invoice_series TEXT NOT NULL,
+      invoice_number TEXT NOT NULL, invoice_date DATE NOT NULL, invoice_type TEXT NOT NULL,
+      vat_cents INTEGER NOT NULL DEFAULT 0, total_cents INTEGER NOT NULL DEFAULT 0,
+      previous_hash TEXT NOT NULL DEFAULT '', hash TEXT NOT NULL, generated_at TIMESTAMPTZ NOT NULL,
+      mode TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'generated', qr_url TEXT NOT NULL DEFAULT '',
+      payload_json JSONB NOT NULL DEFAULT '{}'::jsonb, error TEXT
+    );
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_verifactu_records_company ON verifactu_records(company_id, id)`;
   await sql`
     CREATE TABLE IF NOT EXISTS whatsapp_expense_pending (
       id BIGSERIAL PRIMARY KEY, company_id BIGINT NOT NULL, user_id BIGINT NOT NULL,
@@ -1202,6 +1229,12 @@ function formatFiscalProfile(r: any): FiscalProfile {
     irpf_enabled: !!r.irpf_enabled,
     default_irpf_rate: Number(r.default_irpf_rate ?? 0),
     sii_enabled: !!r.sii_enabled,
+    verifactu_mode: r.verifactu_mode ?? "disabled",
+    verifactu_software_id: r.verifactu_software_id ?? "hexa-crm",
+    verifactu_software_name: r.verifactu_software_name ?? "Hexa CRM",
+    verifactu_software_version: r.verifactu_software_version ?? "0.3.2",
+    verifactu_producer_name: r.verifactu_producer_name ?? "",
+    verifactu_producer_nif: r.verifactu_producer_nif ?? "",
     updated_at: toIso(r.updated_at),
   };
 }
@@ -2575,6 +2608,14 @@ export const postgresApi = {
     return rows.map(formatInvoice);
   },
 
+  async appendVerifactuRecord(invoice: Invoice, profile: FiscalProfile | null, recordType: "alta" | "anulacion"): Promise<void> {
+    if (!profile || (profile.verifactu_mode ?? "disabled") === "disabled") return;
+    const previousRows = await sql`SELECT hash FROM verifactu_records WHERE company_id=${invoice.company_id} ORDER BY id DESC LIMIT 1`;
+    const draft = createVerifactuRecord({ invoice, profile, recordType, previousHash: previousRows[0]?.hash ?? "" });
+    if (!draft) return;
+    await sql`INSERT INTO verifactu_records (company_id,invoice_id,record_type,issuer_nif,issuer_name,invoice_series,invoice_number,invoice_date,invoice_type,vat_cents,total_cents,previous_hash,hash,generated_at,mode,status,qr_url,payload_json,error) VALUES (${draft.company_id},${draft.invoice_id},${draft.record_type},${draft.issuer_nif},${draft.issuer_name},${draft.invoice_series},${draft.invoice_number},${draft.invoice_date.slice(0, 10)},${draft.invoice_type},${draft.vat_cents},${draft.total_cents},${draft.previous_hash},${draft.hash},${draft.generated_at},${draft.mode},${draft.status},${draft.qr_url},${sql.json(JSON.parse(draft.payload_json))},${draft.error})`;
+  },
+
   async issueInvoice(input: InvoiceInput, token: string | null): Promise<Invoice> {
     const user = await requireSession(token);
     const companyId = await resolveActiveCompanyId(token, user.id);
@@ -2591,7 +2632,10 @@ export const postgresApi = {
       invoice.series = series;
       invoice.operation_date = input.operation_date || base.operation_date;
       const rows = await sql`INSERT INTO invoices (company_id,sale_id,series,number,kind,status,issued_at,operation_date,due_at,seller_legal_name,seller_nif,seller_trade_name,customer_id,customer_name,customer_nif,customer_email,lines,base_cents,vat_cents,irpf_rate,irpf_cents,total_cents,paid_cents,payment_status,notes,created_by) VALUES (${companyId},${invoice.sale_id},${invoice.series},${invoice.number},${invoice.kind},${invoice.status},${invoice.issued_at},${invoice.operation_date},${invoice.due_at},${invoice.seller_legal_name},${invoice.seller_nif},${invoice.seller_trade_name},${invoice.customer_id},${invoice.customer_name},${invoice.customer_nif},${invoice.customer_email},${sql.json(invoice.lines as any)},${invoice.base_cents},${invoice.vat_cents},${invoice.irpf_rate},${invoice.irpf_cents},${invoice.total_cents},0,'pending',${invoice.notes},${user.id}) RETURNING *`;
-      return formatInvoice(rows[0]);
+      const saved = formatInvoice(rows[0]);
+      const profileRows = await sql`SELECT * FROM fiscal_profiles WHERE company_id=${companyId}`;
+      await this.appendVerifactuRecord(saved, profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "alta");
+      return saved;
     }
     if (!input.sale_id) throw new Error("La venta es obligatoria");
     const saleRows = await sql`SELECT * FROM sales WHERE id = ${input.sale_id} AND company_id = ${companyId}`;
@@ -2617,7 +2661,9 @@ export const postgresApi = {
       customer, sale: sale as any, lines: linesRows as any, invoice: input, created_by: user.id, number, issued_at: issuedAt, profile: profileRows[0] ? formatFiscalProfile(profileRows[0]) : null,
     });
     const rows = await sql`INSERT INTO invoices (company_id,sale_id,series,number,kind,status,issued_at,operation_date,due_at,seller_legal_name,seller_nif,seller_trade_name,customer_id,customer_name,customer_nif,customer_email,lines,base_cents,vat_cents,irpf_rate,irpf_cents,total_cents,paid_cents,payment_status,notes,created_by) VALUES (${companyId},${invoice.sale_id},${invoice.series},${invoice.number},${invoice.kind},${invoice.status},${invoice.issued_at},${invoice.operation_date},${invoice.due_at},${invoice.seller_legal_name},${invoice.seller_nif},${invoice.seller_trade_name},${invoice.customer_id},${invoice.customer_name},${invoice.customer_nif},${invoice.customer_email},${sql.json(invoice.lines as any)},${invoice.base_cents},${invoice.vat_cents},${invoice.irpf_rate},${invoice.irpf_cents},${invoice.total_cents},0,'pending',${invoice.notes},${user.id}) RETURNING *`;
-    return formatInvoice(rows[0]);
+    const saved = formatInvoice(rows[0]);
+    await this.appendVerifactuRecord(saved, profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "alta");
+    return saved;
   },
 
   async cancelInvoice(id: number, token: string | null): Promise<Invoice> {
@@ -2625,8 +2671,27 @@ export const postgresApi = {
     const companyId = await resolveActiveCompanyId(token, user.id);
     const rows = await sql`UPDATE invoices SET status='cancelled', updated_at=NOW() WHERE id=${id} AND company_id=${companyId} RETURNING *`;
     if (!rows.length) throw new Error("Factura no encontrada");
+    const profileRows = await sql`SELECT * FROM fiscal_profiles WHERE company_id=${companyId}`;
+    await this.appendVerifactuRecord(formatInvoice(rows[0]), profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "anulacion");
     void user;
     return formatInvoice(rows[0]);
+  },
+
+  async listVerifactuRecords(token: string | null): Promise<VerifactuRecord[]> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const rows = await sql`SELECT * FROM verifactu_records WHERE company_id=${companyId} ORDER BY id DESC`;
+    return rows.map((row: any) => ({
+      id: Number(row.id), company_id: Number(row.company_id), invoice_id: Number(row.invoice_id), record_type: row.record_type,
+      issuer_nif: row.issuer_nif, issuer_name: row.issuer_name ?? "", invoice_series: row.invoice_series, invoice_number: row.invoice_number,
+      invoice_date: String(row.invoice_date).slice(0, 10), invoice_type: row.invoice_type, vat_cents: Number(row.vat_cents ?? 0), total_cents: Number(row.total_cents ?? 0),
+      previous_hash: row.previous_hash ?? "", hash: row.hash, generated_at: toIso(row.generated_at), mode: row.mode, status: row.status,
+      qr_url: row.qr_url ?? "", payload_json: typeof row.payload_json === "string" ? row.payload_json : JSON.stringify(row.payload_json ?? {}), error: row.error ?? null,
+    }));
+  },
+
+  async verifyVerifactuChain(token: string | null): Promise<{ ok: boolean; error?: string }> {
+    return verifyVerifactuChain(await this.listVerifactuRecords(token));
   },
 
   async listInvoicePayments(invoiceId: number, token: string | null): Promise<InvoicePayment[]> {
@@ -2913,12 +2978,19 @@ export const postgresApi = {
     if (!["monthly", "quarterly"].includes(period)) throw new Error("Periodicidad no válida");
     const rate = Number(input?.default_irpf_rate ?? 0);
     if (!Number.isFinite(rate) || rate < 0 || rate > 100) throw new Error("El IRPF debe estar entre 0 y 100");
+    const verifactuMode = String(input?.verifactu_mode ?? "disabled");
+    if (!["disabled", "test", "production"].includes(verifactuMode)) throw new Error("Modo VERI*FACTU no válido");
+    const producerNif = String(input?.verifactu_producer_nif ?? "").trim().toUpperCase();
+    if (verifactuMode !== "disabled" && !producerNif) throw new Error("El NIF emisor es obligatorio para activar VERI*FACTU");
     const rows = await sql`
-      INSERT INTO fiscal_profiles (company_id, regime, period, irpf_enabled, default_irpf_rate, sii_enabled, updated_at)
-      VALUES (${companyId}, ${regime}, ${period}, ${!!input?.irpf_enabled}, ${rate}, ${!!input?.sii_enabled}, NOW())
+      INSERT INTO fiscal_profiles (company_id, regime, period, irpf_enabled, default_irpf_rate, sii_enabled, verifactu_mode, verifactu_software_id, verifactu_software_name, verifactu_software_version, verifactu_producer_name, verifactu_producer_nif, updated_at)
+      VALUES (${companyId}, ${regime}, ${period}, ${!!input?.irpf_enabled}, ${rate}, ${!!input?.sii_enabled}, ${verifactuMode}, ${String(input?.verifactu_software_id ?? "hexa-crm")}, ${String(input?.verifactu_software_name ?? "Hexa CRM")}, ${String(input?.verifactu_software_version ?? "0.3.2")}, ${String(input?.verifactu_producer_name ?? "")}, ${producerNif}, NOW())
       ON CONFLICT (company_id) DO UPDATE SET regime=EXCLUDED.regime, period=EXCLUDED.period,
         irpf_enabled=EXCLUDED.irpf_enabled, default_irpf_rate=EXCLUDED.default_irpf_rate,
-        sii_enabled=EXCLUDED.sii_enabled, updated_at=NOW()
+        sii_enabled=EXCLUDED.sii_enabled, verifactu_mode=EXCLUDED.verifactu_mode,
+        verifactu_software_id=EXCLUDED.verifactu_software_id, verifactu_software_name=EXCLUDED.verifactu_software_name,
+        verifactu_software_version=EXCLUDED.verifactu_software_version, verifactu_producer_name=EXCLUDED.verifactu_producer_name,
+        verifactu_producer_nif=EXCLUDED.verifactu_producer_nif, updated_at=NOW()
       RETURNING *
     `;
     return formatFiscalProfile(rows[0]);
@@ -4109,6 +4181,8 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   add_invoice_payment(input: InvoicePaymentInput, token?: string | null) { return this.addInvoicePayment(input, token ?? null); },
   list_expense_payments(expenseId: number, token?: string | null) { return this.listExpensePayments(expenseId, token ?? null); },
   add_expense_payment(input: ExpensePaymentInput, token?: string | null) { return this.addExpensePayment(input, token ?? null); },
+  list_verifactu_records(token?: string | null) { return this.listVerifactuRecords(token ?? null); },
+  verify_verifactu_chain(token?: string | null) { return this.verifyVerifactuChain(token ?? null); },
   list_fiscal_profiles(token?: string | null) { return this.listFiscalProfiles(token ?? null); },
   upsert_fiscal_profile(input: any, token?: string | null) { return this.upsertFiscalProfile(input, token ?? null); },
   model303_draft(from: string, to: string, token?: string | null) { return this.model303Draft(from, to, token ?? null); },

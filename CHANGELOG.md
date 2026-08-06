@@ -18,6 +18,7 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 - Facturación emitida separada de las facturas recibidas: series y numeración por empresa, conversión de ventas a factura o simplificada, IVA/IRPF, estados de emisión/anulación e impresión del documento.
 - El ciclo de factura incorpora fecha de operación y vencimiento, cobros parciales por método, estado pendiente/parcial/pagada y emisión de rectificativas/abonos vinculados.
 - Las facturas recibidas admiten pagos parciales por método, estados pendiente/parcial/pagada y un movimiento de Caja por cada pago registrado.
+- Preparación VERI*FACTU por empresa: registros de alta y anulación encadenados con SHA-256, URL del QR tributario de pruebas, exportación JSON y comprobación de integridad local. La remisión automática a la AEAT queda pendiente de certificado, firma y conexión homologada.
 
 ### Fixed
 
