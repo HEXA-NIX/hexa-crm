@@ -2,13 +2,15 @@
   import { onMount } from "svelte";
   import QRCode from "qrcode";
   import { api } from "$lib/api/client";
-  import type { Customer, Invoice, Sale, VerifactuRecord } from "$lib/types";
+  import type { Customer, Invoice, Product, Sale, VerifactuRecord } from "$lib/types";
   import { formatEUR } from "$lib/money";
   import Card from "$lib/components/Card.svelte";
   import Button from "$lib/components/Button.svelte";
   import Badge from "$lib/components/Badge.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import { showToast } from "$lib/stores/ui";
+
+  type ManualLine = { product_id: string; description: string; quantity: string; unit_price: string; vat_rate: string };
 
   let invoices = $state<Invoice[]>([]);
   let sales = $state<Sale[]>([]);
@@ -24,10 +26,11 @@
   let paymentMethod = $state<"cash" | "bank_transfer" | "card" | "other">("bank_transfer");
   let paying = $state(false);
   let customers = $state<Customer[]>([]);
+  let products = $state<Product[]>([]);
   let manualOpen = $state(false);
   let manualSaving = $state(false);
   let manualForm = $state({ series: "F", kind: "complete" as "complete" | "simplified", customer_id: "", customer_name: "", customer_nif: "", customer_email: "", operation_date: new Date().toISOString().slice(0, 10), due_at: "", irpf_rate: "", notes: "" });
-  let manualLines = $state([{ description: "", quantity: "1", unit_price: "", vat_rate: "21" }]);
+  let manualLines = $state<ManualLine[]>([{ product_id: "", description: "", quantity: "1", unit_price: "", vat_rate: "21" }]);
 
   const availableSales = $derived(sales.filter((sale) => sale.status !== "cancelled" && !invoices.some((invoice) => invoice.sale_id === sale.id && invoice.status !== "cancelled")));
   const pendingCents = $derived(invoices.filter((invoice) => invoice.status === "issued").reduce((sum, invoice) => sum + Math.max(0, invoice.total_cents - invoice.paid_cents), 0));
@@ -39,7 +42,7 @@
 
   async function load() {
     loading = true;
-    try { [invoices, sales, verifactuRecords, customers] = await Promise.all([api.listInvoices(), api.listSales(), api.listVerifactuRecords(), api.listCustomers()]); }
+    try { [invoices, sales, verifactuRecords, customers, products] = await Promise.all([api.listInvoices(), api.listSales(), api.listVerifactuRecords(), api.listCustomers(), api.listProducts(true)]); }
     catch (error) { showToast(error instanceof Error ? error.message : "No se pudieron cargar las facturas", "err"); }
     finally { loading = false; }
   }
@@ -47,7 +50,7 @@
 
   function openManualInvoice() {
     manualForm = { series, kind: "complete", customer_id: "", customer_name: "", customer_nif: "", customer_email: "", operation_date: new Date().toISOString().slice(0, 10), due_at: "", irpf_rate: irpfRate, notes: "" };
-    manualLines = [{ description: "", quantity: "1", unit_price: "", vat_rate: "21" }];
+    manualLines = [{ product_id: "", description: "", quantity: "1", unit_price: "", vat_rate: "21" }];
     manualOpen = true;
   }
 
@@ -57,8 +60,19 @@
     if (customer) { manualForm.customer_name = customer.name; manualForm.customer_nif = customer.nif; manualForm.customer_email = customer.email; }
   }
 
-  function addManualLine() { manualLines = [...manualLines, { description: "", quantity: "1", unit_price: "", vat_rate: "21" }]; }
+  function selectManualProduct(index: number, productId: string) {
+    const product = products.find((item) => String(item.id) === productId);
+    manualLines = manualLines.map((line, lineIndex) => lineIndex === index && product ? { ...line, product_id: productId, description: product.name, unit_price: String(product.price_cents / 100), vat_rate: String(product.vat_rate) } : lineIndex === index ? { ...line, product_id: productId } : line);
+  }
+
+  function addManualLine() { manualLines = [...manualLines, { product_id: "", description: "", quantity: "1", unit_price: "", vat_rate: "21" }]; }
   function removeManualLine(index: number) { if (manualLines.length > 1) manualLines = manualLines.filter((_, lineIndex) => lineIndex !== index); }
+
+  const manualTotals = $derived(manualLines.reduce((total, line) => {
+    const base = Math.round(Number(line.quantity.replace(",", ".")) * Number(line.unit_price.replace(",", ".")) * 100) || 0;
+    const vat = Math.round(base * Number(line.vat_rate) / 100) || 0;
+    return { base: total.base + base, vat: total.vat + vat, total: total.total + base + vat };
+  }, { base: 0, vat: 0, total: 0 }));
 
   async function saveManualInvoice() {
     manualSaving = true;
@@ -141,7 +155,7 @@
       <label class="text-sm"><span class="mb-1 block text-slate-400">NIF {manualForm.kind === "complete" ? "(obligatorio)" : "(opcional)"}</span><input class="field w-full" bind:value={manualForm.customer_nif} /></label>
       <label class="text-sm"><span class="mb-1 block text-slate-400">Email</span><input type="email" class="field w-full" bind:value={manualForm.customer_email} /></label>
     </div>
-    <div><div class="mb-2 flex items-center justify-between"><h3 class="font-semibold">Líneas</h3><Button variant="ghost" class="text-xs" onclick={addManualLine}>+ Añadir línea</Button></div><div class="space-y-2">{#each manualLines as line, index}<div class="grid items-end gap-2 sm:grid-cols-[minmax(0,1fr)_6rem_8rem_7rem_auto]"><label class="text-sm"><span class="mb-1 block text-slate-400">Descripción</span><input class="field w-full" placeholder="Servicio o producto" bind:value={line.description} /></label><label class="text-sm"><span class="mb-1 block text-slate-400">Cantidad</span><input type="number" min="0.01" step="0.01" class="field w-full" bind:value={line.quantity} /></label><label class="text-sm"><span class="mb-1 block text-slate-400">Precio (€)</span><input type="number" min="0" step="0.01" class="field w-full" bind:value={line.unit_price} /></label><label class="text-sm"><span class="mb-1 block text-slate-400">IVA</span><select class="field w-full" bind:value={line.vat_rate}><option value="21">21%</option><option value="10">10%</option><option value="4">4%</option><option value="0">0%</option></select></label><Button variant="ghost" class="text-xs" disabled={manualLines.length === 1} onclick={() => removeManualLine(index)}>Quitar</Button></div>{/each}</div></div>
+    <div class="rounded-2xl border border-white/10 bg-white/[0.02] p-4"><div class="mb-3 flex flex-wrap items-center justify-between gap-2"><div><h3 class="font-semibold">Conceptos de la factura</h3><p class="text-xs text-slate-400">Añade productos del catálogo o escribe un servicio personalizado. El total se calcula automáticamente.</p></div><Button variant="secondary" class="text-xs" onclick={addManualLine}>+ Añadir línea</Button></div><div class="hidden gap-2 px-1 pb-2 text-[11px] uppercase tracking-wide text-slate-500 lg:grid lg:grid-cols-[13rem_minmax(0,1fr)_5rem_7rem_6rem_6rem_auto]"><span>Producto / servicio</span><span>Descripción</span><span>Cant.</span><span>Precio (€)</span><span>IVA</span><span>Importe</span><span></span></div><div class="space-y-3">{#each manualLines as line, index}<div class="rounded-xl border border-white/10 bg-black/10 p-3"><div class="grid items-end gap-2 lg:grid-cols-[13rem_minmax(0,1fr)_5rem_7rem_6rem_6rem_auto]"><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Producto / servicio</span><select class="field w-full" value={line.product_id} onchange={(event) => selectManualProduct(index, event.currentTarget.value)}><option value="">Personalizado</option>{#each products as product}<option value={product.id}>{product.name}</option>{/each}</select></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Descripción</span><input class="field w-full" placeholder="Descripción del concepto" bind:value={line.description} /></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Cantidad</span><input type="number" min="0.01" step="0.01" class="field w-full" bind:value={line.quantity} /></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Precio (€)</span><input type="number" min="0" step="0.01" class="field w-full" bind:value={line.unit_price} /></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">IVA</span><select class="field w-full" bind:value={line.vat_rate}><option value="21">21%</option><option value="10">10%</option><option value="4">4%</option><option value="0">0%</option></select></label><div class="text-right text-sm font-semibold tabular"><span class="mb-1 block text-slate-400 lg:hidden">Importe</span>{formatEUR(Math.round(Number(line.quantity.replace(",", ".")) * Number(line.unit_price.replace(",", ".")) * 100) + Math.round((Math.round(Number(line.quantity.replace(",", ".")) * Number(line.unit_price.replace(",", ".")) * 100) || 0) * Number(line.vat_rate) / 100) || 0)}</div><Button variant="ghost" class="text-xs" disabled={manualLines.length === 1} onclick={() => removeManualLine(index)}>Quitar</Button></div></div>{/each}</div><div class="mt-4 flex flex-wrap justify-end gap-x-6 gap-y-1 border-t border-white/10 pt-3 text-sm"><span>Base: <strong>{formatEUR(manualTotals.base)}</strong></span><span>IVA: <strong>{formatEUR(manualTotals.vat)}</strong></span><span class="text-base">Total: <strong>{formatEUR(manualTotals.total)}</strong></span></div></div>
     <div class="grid gap-3 sm:grid-cols-3"><label class="text-sm"><span class="mb-1 block text-slate-400">IRPF %</span><input type="number" min="0" max="100" step="0.01" class="field w-full" bind:value={manualForm.irpf_rate} /></label><label class="text-sm sm:col-span-2"><span class="mb-1 block text-slate-400">Notas</span><input class="field w-full" placeholder="Condiciones de pago, referencia…" bind:value={manualForm.notes} /></label></div>
     <div class="flex justify-end gap-2"><Button variant="ghost" onclick={() => (manualOpen = false)}>Cancelar</Button><Button variant="primary" disabled={manualSaving} onclick={saveManualInvoice}>{manualSaving ? "Guardando…" : "Emitir factura"}</Button></div>
   </div>
