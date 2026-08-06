@@ -19,7 +19,12 @@ async function request(path: string, init: RequestInit = {}) {
   headers.set("Accept", "application/json");
   if (authorization) headers.set("Authorization", authorization);
   if (init.body) headers.set("Content-Type", "application/json");
-  const response = await fetch(`${baseUrl}${path}`, { ...init, headers, signal: AbortSignal.timeout(15_000) });
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}${path}`, { ...init, headers, signal: AbortSignal.timeout(15_000) });
+  } catch (error) {
+    throw new Error(`No se puede conectar con GOWA en ${baseUrl}: ${error instanceof Error ? error.message : "fallo de red"}`);
+  }
   const data = await response.json().catch(() => ({})) as Record<string, any>;
   if (!response.ok) {
     const message = String(data.message || data.error || `HTTP ${response.status}`);
@@ -35,7 +40,12 @@ async function requestBinary(path: string, headersInit: HeadersInit = {}): Promi
   const headers = new Headers(headersInit);
   headers.set("Accept", "application/octet-stream, application/json");
   if (authorization) headers.set("Authorization", authorization);
-  const response = await fetch(`${baseUrl}${path}`, { headers, signal: AbortSignal.timeout(30_000) });
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}${path}`, { headers, signal: AbortSignal.timeout(30_000) });
+  } catch (error) {
+    throw new Error(`No se puede descargar el multimedia desde GOWA: ${error instanceof Error ? error.message : "fallo de red"}`);
+  }
   const mimeType = response.headers.get("content-type") || "application/octet-stream";
   const disposition = response.headers.get("content-disposition") || "";
   const fileName = disposition.match(/filename="?([^";]+)"?/i)?.[1];
@@ -45,7 +55,19 @@ async function requestBinary(path: string, headersInit: HeadersInit = {}): Promi
     const result = data.results || data;
     const encoded = String(result.data_base64 || result.base64 || result.content_base64 || "");
     if (!encoded && result.file_url) {
-      const fileResponse = await fetch(String(result.file_url), { headers, signal: AbortSignal.timeout(30_000) });
+      const fileUrl = new URL(String(result.file_url), `${baseUrl}/`);
+      const configuredUrl = new URL(baseUrl);
+      if (["localhost", "127.0.0.1", "::1"].includes(fileUrl.hostname)) {
+        fileUrl.protocol = configuredUrl.protocol;
+        fileUrl.hostname = configuredUrl.hostname;
+        fileUrl.port = configuredUrl.port;
+      }
+      let fileResponse: Response;
+      try {
+        fileResponse = await fetch(fileUrl, { headers, signal: AbortSignal.timeout(30_000) });
+      } catch (error) {
+        throw new Error(`GOWA devolvió una URL de archivo inaccesible (${fileUrl}): ${error instanceof Error ? error.message : "fallo de red"}`);
+      }
       if (!fileResponse.ok) throw new Error(`GOWA no pudo descargar el archivo (HTTP ${fileResponse.status})`);
       return { bytes: new Uint8Array(await fileResponse.arrayBuffer()), mimeType: fileResponse.headers.get("content-type") || "application/octet-stream", fileName: result.filename || result.file_name };
     }
