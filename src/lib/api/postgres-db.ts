@@ -414,7 +414,7 @@ export async function initDb() {
       id SERIAL PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
       status TEXT NOT NULL DEFAULT 'review', kind TEXT NOT NULL DEFAULT 'invoice', title TEXT NOT NULL,
       supplier_name TEXT NOT NULL DEFAULT '', supplier_tax_id TEXT NOT NULL DEFAULT '', invoice_number TEXT NOT NULL DEFAULT '',
-      issued_at DATE, due_at DATE, project_id INTEGER,
+      issued_at DATE, accounting_date DATE, due_at DATE, deductible BOOLEAN NOT NULL DEFAULT TRUE, deduction_period TEXT, project_id INTEGER,
       category TEXT NOT NULL DEFAULT 'otros', base_cents INTEGER NOT NULL DEFAULT 0, vat_rate INTEGER NOT NULL DEFAULT 21,
       vat_cents INTEGER NOT NULL DEFAULT 0, withholding_cents INTEGER NOT NULL DEFAULT 0, total_cents INTEGER NOT NULL DEFAULT 0,
       currency TEXT NOT NULL DEFAULT 'EUR', notes TEXT NOT NULL DEFAULT '', attachments JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -423,6 +423,9 @@ export async function initDb() {
     );
   `;
   await sql`CREATE INDEX IF NOT EXISTS idx_expense_documents_company ON expense_documents(company_id, created_at DESC)`;
+  await sql`ALTER TABLE expense_documents ADD COLUMN IF NOT EXISTS accounting_date DATE`;
+  await sql`ALTER TABLE expense_documents ADD COLUMN IF NOT EXISTS deductible BOOLEAN NOT NULL DEFAULT TRUE`;
+  await sql`ALTER TABLE expense_documents ADD COLUMN IF NOT EXISTS deduction_period TEXT`;
   await sql`
     CREATE TABLE IF NOT EXISTS invoices (
       id SERIAL PRIMARY KEY,
@@ -1170,7 +1173,7 @@ function formatExpenseDocument(r: any): ExpenseDocument {
   return {
     id: r.id, company_id: r.company_id, status: r.status, kind: r.kind, title: r.title,
     supplier_name: r.supplier_name ?? "", supplier_tax_id: r.supplier_tax_id ?? "", invoice_number: r.invoice_number ?? "",
-    issued_at: toIso(r.issued_at) || null, due_at: toIso(r.due_at) || null, project_id: r.project_id ?? null,
+    issued_at: toIso(r.issued_at) || null, accounting_date: toIso(r.accounting_date) || null, deductible: r.deductible !== false, deduction_period: r.deduction_period ?? null, due_at: toIso(r.due_at) || null, project_id: r.project_id ?? null,
     category: r.category ?? "otros", base_cents: r.base_cents ?? 0, vat_rate: r.vat_rate ?? 21, vat_cents: r.vat_cents ?? 0,
     withholding_cents: r.withholding_cents ?? 0, total_cents: r.total_cents ?? 0, currency: r.currency ?? "EUR", notes: r.notes ?? "",
     attachments: Array.isArray(r.attachments) ? r.attachments : [], source: r.source ?? "manual", source_phone: r.source_phone ?? null,
@@ -2655,9 +2658,9 @@ export const postgresApi = {
     if (id) {
       const existing = await sql`SELECT id FROM expense_documents WHERE id = ${id} AND company_id = ${companyId}`;
       if (!existing.length) throw new Error("Gasto no encontrado.");
-      await sql`UPDATE expense_documents SET status=${input.status ?? "review"}, kind=${input.kind ?? "invoice"}, title=${String(input.title).trim()}, supplier_name=${input.supplier_name ?? ""}, supplier_tax_id=${input.supplier_tax_id ?? ""}, invoice_number=${input.invoice_number ?? ""}, issued_at=${input.issued_at || null}, due_at=${input.due_at || null}, project_id=${input.project_id ?? null}, category=${input.category ?? "otros"}, base_cents=${input.base_cents ?? 0}, vat_rate=${input.vat_rate ?? 21}, vat_cents=${input.vat_cents ?? 0}, withholding_cents=${input.withholding_cents ?? 0}, total_cents=${input.total_cents ?? 0}, currency=${input.currency ?? "EUR"}, notes=${input.notes ?? ""}, attachments=${sql.json(input.attachments ?? [])}, source=${input.source ?? "manual"}, source_phone=${input.source_phone ?? null}, ocr_confidence=${input.ocr_confidence ?? null}, updated_at=NOW() WHERE id=${id} AND company_id=${companyId}`;
+      await sql`UPDATE expense_documents SET status=${input.status ?? "review"}, kind=${input.kind ?? "invoice"}, title=${String(input.title).trim()}, supplier_name=${input.supplier_name ?? ""}, supplier_tax_id=${input.supplier_tax_id ?? ""}, invoice_number=${input.invoice_number ?? ""}, issued_at=${input.issued_at || null}, accounting_date=${input.accounting_date || input.issued_at || null}, deductible=${input.deductible !== false}, deduction_period=${input.deduction_period ?? null}, due_at=${input.due_at || null}, project_id=${input.project_id ?? null}, category=${input.category ?? "otros"}, base_cents=${input.base_cents ?? 0}, vat_rate=${input.vat_rate ?? 21}, vat_cents=${input.vat_cents ?? 0}, withholding_cents=${input.withholding_cents ?? 0}, total_cents=${input.total_cents ?? 0}, currency=${input.currency ?? "EUR"}, notes=${input.notes ?? ""}, attachments=${sql.json(input.attachments ?? [])}, source=${input.source ?? "manual"}, source_phone=${input.source_phone ?? null}, ocr_confidence=${input.ocr_confidence ?? null}, updated_at=NOW() WHERE id=${id} AND company_id=${companyId}`;
     } else {
-      const result = await sql`INSERT INTO expense_documents (company_id,status,kind,title,supplier_name,supplier_tax_id,invoice_number,issued_at,due_at,project_id,category,base_cents,vat_rate,vat_cents,withholding_cents,total_cents,currency,notes,attachments,source,source_phone,ocr_confidence,created_by) VALUES (${companyId},${input.status ?? "review"},${input.kind ?? "invoice"},${String(input.title).trim()},${input.supplier_name ?? ""},${input.supplier_tax_id ?? ""},${input.invoice_number ?? ""},${input.issued_at || null},${input.due_at || null},${input.project_id ?? null},${input.category ?? "otros"},${input.base_cents ?? 0},${input.vat_rate ?? 21},${input.vat_cents ?? 0},${input.withholding_cents ?? 0},${input.total_cents ?? 0},${input.currency ?? "EUR"},${input.notes ?? ""},${sql.json(input.attachments ?? [])},${input.source ?? "manual"},${input.source_phone ?? null},${input.ocr_confidence ?? null},${user.id}) RETURNING id`;
+      const result = await sql`INSERT INTO expense_documents (company_id,status,kind,title,supplier_name,supplier_tax_id,invoice_number,issued_at,accounting_date,deductible,deduction_period,due_at,project_id,category,base_cents,vat_rate,vat_cents,withholding_cents,total_cents,currency,notes,attachments,source,source_phone,ocr_confidence,created_by) VALUES (${companyId},${input.status ?? "review"},${input.kind ?? "invoice"},${String(input.title).trim()},${input.supplier_name ?? ""},${input.supplier_tax_id ?? ""},${input.invoice_number ?? ""},${input.issued_at || null},${input.accounting_date || input.issued_at || null},${input.deductible !== false},${input.deduction_period ?? null},${input.due_at || null},${input.project_id ?? null},${input.category ?? "otros"},${input.base_cents ?? 0},${input.vat_rate ?? 21},${input.vat_cents ?? 0},${input.withholding_cents ?? 0},${input.total_cents ?? 0},${input.currency ?? "EUR"},${input.notes ?? ""},${sql.json(input.attachments ?? [])},${input.source ?? "manual"},${input.source_phone ?? null},${input.ocr_confidence ?? null},${user.id}) RETURNING id`;
       id = result[0].id;
     }
     const rows = await sql`SELECT * FROM expense_documents WHERE id=${id} AND company_id=${companyId}`;

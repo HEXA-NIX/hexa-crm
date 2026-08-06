@@ -31,7 +31,8 @@ export function buildModel303Draft(input: {
   }
   let withholding_cents = 0;
   for (const expense of input.expenses) {
-    if (expense.status === "rejected" || !expense.issued_at || expense.issued_at.slice(0, 10) < input.from || expense.issued_at.slice(0, 10) > input.to) continue;
+    const fiscalDate = expense.accounting_date || expense.issued_at;
+    if (expense.status === "rejected" || expense.deductible === false || !fiscalDate || fiscalDate.slice(0, 10) < input.from || fiscalDate.slice(0, 10) > input.to) continue;
     const bucket = purchased.get(expense.vat_rate ?? 21)!;
     bucket.base_cents += expense.base_cents;
     bucket.vat_cents += expense.vat_cents;

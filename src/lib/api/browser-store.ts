@@ -1997,7 +1997,7 @@ export const browserApi = {
       status: input.status ?? existing?.status ?? "review", kind: input.kind ?? existing?.kind ?? "invoice",
       title: input.title.trim(), supplier_name: input.supplier_name ?? existing?.supplier_name ?? "",
       supplier_tax_id: input.supplier_tax_id ?? existing?.supplier_tax_id ?? "", invoice_number: input.invoice_number ?? existing?.invoice_number ?? "",
-      issued_at: input.issued_at !== undefined ? input.issued_at : existing?.issued_at ?? null, due_at: input.due_at !== undefined ? input.due_at : existing?.due_at ?? null,
+      issued_at: input.issued_at !== undefined ? input.issued_at : existing?.issued_at ?? null, accounting_date: input.accounting_date !== undefined ? input.accounting_date : existing?.accounting_date ?? input.issued_at ?? null, deductible: input.deductible !== undefined ? input.deductible : existing?.deductible ?? true, deduction_period: input.deduction_period !== undefined ? input.deduction_period : existing?.deduction_period ?? null, due_at: input.due_at !== undefined ? input.due_at : existing?.due_at ?? null,
       project_id: input.project_id !== undefined ? input.project_id : existing?.project_id ?? null, category: input.category ?? existing?.category ?? "otros",
       base_cents: input.base_cents ?? existing?.base_cents ?? 0, vat_rate: input.vat_rate ?? existing?.vat_rate ?? 21,
       vat_cents: input.vat_cents ?? existing?.vat_cents ?? 0, withholding_cents: input.withholding_cents ?? existing?.withholding_cents ?? 0,

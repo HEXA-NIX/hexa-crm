@@ -204,6 +204,11 @@ export type ExpenseDocument = {
   supplier_tax_id: string;
   invoice_number: string;
   issued_at: string | null;
+  /** Fecha contable usada para el periodo fiscal; por defecto fecha de emisión. */
+  accounting_date?: string | null;
+  /** Permite separar gastos deducibles de justificantes no deducibles. */
+  deductible?: boolean;
+  deduction_period?: string | null;
   due_at: string | null;
   project_id: number | null;
   category: string;
