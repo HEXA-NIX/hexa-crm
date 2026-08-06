@@ -259,6 +259,54 @@ export type Model303Draft = {
   generated_at: string;
 };
 
+export type InvoiceStatus = "draft" | "issued" | "cancelled";
+export type InvoiceKind = "complete" | "simplified" | "rectifying";
+export type InvoiceLine = {
+  description: string;
+  quantity: number;
+  unit_price_cents: number;
+  vat_rate: VatRate;
+  base_cents: number;
+  vat_cents: number;
+  total_cents: number;
+};
+export type Invoice = {
+  id: number;
+  company_id: number;
+  sale_id: number | null;
+  series: string;
+  number: string;
+  kind: InvoiceKind;
+  status: InvoiceStatus;
+  issued_at: string;
+  due_at: string | null;
+  seller_legal_name: string;
+  seller_nif: string;
+  seller_trade_name: string;
+  customer_id: number | null;
+  customer_name: string;
+  customer_nif: string;
+  customer_email: string;
+  lines: InvoiceLine[];
+  base_cents: number;
+  vat_cents: number;
+  irpf_rate: number;
+  irpf_cents: number;
+  total_cents: number;
+  notes: string;
+  created_by: number;
+  created_at: string;
+  updated_at: string;
+};
+export type InvoiceInput = {
+  sale_id: number;
+  series?: string;
+  kind?: InvoiceKind;
+  due_at?: string | null;
+  irpf_rate?: number;
+  notes?: string;
+};
+
 export type VatBucket = {
   vat_rate: VatRate;
   base_cents: number;

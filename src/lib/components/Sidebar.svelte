@@ -42,7 +42,8 @@
       label: "FINANZAS",
       links: [
         { href: "/caja", label: "Caja", icon: "€" },
-        { href: "/gastos", label: "Gastos y facturas", icon: "▣" },
+        { href: "/facturas", label: "Facturas emitidas", icon: "▤" },
+        { href: "/gastos", label: "Facturas recibidas", icon: "▣" },
         { href: "/impuestos", label: "Impuestos", icon: "%" },
       ],
     },

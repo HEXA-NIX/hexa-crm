@@ -34,6 +34,8 @@ import type {
   CustomerInput,
   ExpenseDocument,
   FiscalProfile,
+  Invoice,
+  InvoiceInput,
   Model303Draft,
   DashboardStats,
   InventoryMovement,
@@ -67,6 +69,7 @@ import type {
   WorkProjectInput,
 } from "../types";
 import { buildModel303Draft } from "../taxes/model303";
+import { buildInvoiceFromSale } from "../invoicing/invoice";
 import {
   billingByCompany,
   canAccessCompany,
@@ -418,6 +421,23 @@ export async function initDb() {
     );
   `;
   await sql`CREATE INDEX IF NOT EXISTS idx_expense_documents_company ON expense_documents(company_id, created_at DESC)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS invoices (
+      id SERIAL PRIMARY KEY,
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      sale_id INTEGER REFERENCES sales(id) ON DELETE SET NULL,
+      series TEXT NOT NULL DEFAULT 'F', number TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'complete', status TEXT NOT NULL DEFAULT 'issued',
+      issued_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(), due_at DATE,
+      seller_legal_name TEXT NOT NULL DEFAULT '', seller_nif TEXT NOT NULL DEFAULT '', seller_trade_name TEXT NOT NULL DEFAULT '',
+      customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, customer_name TEXT NOT NULL DEFAULT '', customer_nif TEXT NOT NULL DEFAULT '', customer_email TEXT NOT NULL DEFAULT '',
+      lines JSONB NOT NULL DEFAULT '[]'::jsonb, base_cents INTEGER NOT NULL DEFAULT 0, vat_cents INTEGER NOT NULL DEFAULT 0,
+      irpf_rate NUMERIC(5,2) NOT NULL DEFAULT 0, irpf_cents INTEGER NOT NULL DEFAULT 0, total_cents INTEGER NOT NULL DEFAULT 0,
+      notes TEXT NOT NULL DEFAULT '', created_by INTEGER NOT NULL, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(), updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      UNIQUE(company_id, series, number)
+    );
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_invoices_company ON invoices(company_id, issued_at DESC)`;
   await sql`
     CREATE TABLE IF NOT EXISTS whatsapp_expense_pending (
       id BIGSERIAL PRIMARY KEY, company_id BIGINT NOT NULL, user_id BIGINT NOT NULL,
@@ -1154,6 +1174,19 @@ function formatFiscalProfile(r: any): FiscalProfile {
     default_irpf_rate: Number(r.default_irpf_rate ?? 0),
     sii_enabled: !!r.sii_enabled,
     updated_at: toIso(r.updated_at),
+  };
+}
+
+function formatInvoice(r: any): Invoice {
+  return {
+    id: Number(r.id), company_id: Number(r.company_id), sale_id: r.sale_id == null ? null : Number(r.sale_id),
+    series: r.series, number: r.number, kind: r.kind, status: r.status,
+    issued_at: toIso(r.issued_at), due_at: toIso(r.due_at) || null,
+    seller_legal_name: r.seller_legal_name ?? "", seller_nif: r.seller_nif ?? "", seller_trade_name: r.seller_trade_name ?? "",
+    customer_id: r.customer_id == null ? null : Number(r.customer_id), customer_name: r.customer_name ?? "", customer_nif: r.customer_nif ?? "", customer_email: r.customer_email ?? "",
+    lines: Array.isArray(r.lines) ? r.lines : [], base_cents: Number(r.base_cents ?? 0), vat_cents: Number(r.vat_cents ?? 0),
+    irpf_rate: Number(r.irpf_rate ?? 0), irpf_cents: Number(r.irpf_cents ?? 0), total_cents: Number(r.total_cents ?? 0), notes: r.notes ?? "",
+    created_by: Number(r.created_by), created_at: toIso(r.created_at), updated_at: toIso(r.updated_at),
   };
 }
 
@@ -2504,6 +2537,51 @@ export const postgresApi = {
       sale_number: m.sale_number || undefined,
       occurred_at: toIso(m.occurred_at),
     }));
+  },
+
+  async listInvoices(token: string | null): Promise<Invoice[]> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const rows = await sql`SELECT * FROM invoices WHERE company_id = ${companyId} ORDER BY issued_at DESC, id DESC`;
+    return rows.map(formatInvoice);
+  },
+
+  async issueInvoice(input: InvoiceInput, token: string | null): Promise<Invoice> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const saleRows = await sql`SELECT * FROM sales WHERE id = ${input.sale_id} AND company_id = ${companyId}`;
+    if (!saleRows.length) throw new Error("Venta no encontrada");
+    const existingRows = await sql`SELECT * FROM invoices WHERE sale_id = ${input.sale_id} AND company_id = ${companyId} AND status <> 'cancelled' LIMIT 1`;
+    if (existingRows.length) return formatInvoice(existingRows[0]);
+    const [companyRows, customerRows, linesRows, profileRows] = await Promise.all([
+      sql`SELECT * FROM companies WHERE id = ${companyId}`,
+      saleRows[0].customer_id ? sql`SELECT * FROM customers WHERE id = ${saleRows[0].customer_id} AND company_id = ${companyId}` : Promise.resolve([]),
+      sql`SELECT sl.*, p.name AS product_name FROM sale_lines sl JOIN products p ON p.id = sl.product_id WHERE sl.sale_id = ${input.sale_id}`,
+      sql`SELECT * FROM fiscal_profiles WHERE company_id = ${companyId}`,
+    ]);
+    const company = companyRows[0];
+    const sale = { ...saleRows[0], sold_at: toIso(saleRows[0].sold_at), company_id: companyId };
+    const customer = customerRows[0] ? { id: customerRows[0].id, company_id: companyId, name: customerRows[0].name, email: customerRows[0].email ?? "", phone: customerRows[0].phone ?? "", nif: customerRows[0].nif ?? "", notes: customerRows[0].notes ?? "", created_at: toIso(customerRows[0].created_at) } : null;
+    const issuedAt = new Date().toISOString();
+    const series = (input.series ?? "F").trim().toUpperCase() || "F";
+    const year = issuedAt.slice(0, 4);
+    const countRows = await sql`SELECT COUNT(*)::int AS count FROM invoices WHERE company_id = ${companyId} AND series = ${series} AND issued_at >= ${new Date(`${year}-01-01T00:00:00Z`)}`;
+    const number = `${year}-${String(Number(countRows[0]?.count ?? 0) + 1).padStart(5, "0")}`;
+    const invoice = buildInvoiceFromSale({
+      id: 0, company: { id: company.id, code: company.code, legal_name: company.legal_name, trade_name: company.trade_name, nif: company.nif, kind: company.kind, active: company.active, created_at: toIso(company.created_at) },
+      customer, sale: sale as any, lines: linesRows as any, invoice: input, created_by: user.id, number, issued_at: issuedAt, profile: profileRows[0] ? formatFiscalProfile(profileRows[0]) : null,
+    });
+    const rows = await sql`INSERT INTO invoices (company_id,sale_id,series,number,kind,status,issued_at,due_at,seller_legal_name,seller_nif,seller_trade_name,customer_id,customer_name,customer_nif,customer_email,lines,base_cents,vat_cents,irpf_rate,irpf_cents,total_cents,notes,created_by) VALUES (${companyId},${invoice.sale_id},${invoice.series},${invoice.number},${invoice.kind},${invoice.status},${invoice.issued_at},${invoice.due_at},${invoice.seller_legal_name},${invoice.seller_nif},${invoice.seller_trade_name},${invoice.customer_id},${invoice.customer_name},${invoice.customer_nif},${invoice.customer_email},${sql.json(invoice.lines as any)},${invoice.base_cents},${invoice.vat_cents},${invoice.irpf_rate},${invoice.irpf_cents},${invoice.total_cents},${invoice.notes},${user.id}) RETURNING *`;
+    return formatInvoice(rows[0]);
+  },
+
+  async cancelInvoice(id: number, token: string | null): Promise<Invoice> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const rows = await sql`UPDATE invoices SET status='cancelled', updated_at=NOW() WHERE id=${id} AND company_id=${companyId} RETURNING *`;
+    if (!rows.length) throw new Error("Factura no encontrada");
+    void user;
+    return formatInvoice(rows[0]);
   },
 
   async listExpenseDocuments(token: string | null): Promise<ExpenseDocument[]> {
@@ -3927,6 +4005,9 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   list_expense_documents(token?: string | null) { return this.listExpenseDocuments(token ?? null); },
   upsert_expense_document(input: any, token?: string | null) { return this.upsertExpenseDocument(input, token ?? null); },
   approve_expense_document(id: number, token?: string | null) { return this.approveExpenseDocument(id, token ?? null); },
+  list_invoices(token?: string | null) { return this.listInvoices(token ?? null); },
+  issue_invoice(input: InvoiceInput, token?: string | null) { return this.issueInvoice(input, token ?? null); },
+  cancel_invoice(id: number, token?: string | null) { return this.cancelInvoice(id, token ?? null); },
   list_fiscal_profiles(token?: string | null) { return this.listFiscalProfiles(token ?? null); },
   upsert_fiscal_profile(input: any, token?: string | null) { return this.upsertFiscalProfile(input, token ?? null); },
   model303_draft(from: string, to: string, token?: string | null) { return this.model303Draft(from, to, token ?? null); },

@@ -13,6 +13,8 @@ import type {
   ExpenseDocument,
   ExpenseDocumentInput,
   FiscalProfile,
+  Invoice,
+  InvoiceInput,
   Model303Draft,
   DashboardStats,
   InventoryMovement,
@@ -168,6 +170,9 @@ async function callLocal<T>(cmd: string, args: Record<string, any>, token: strin
     case "list_expense_documents": return browserApi.list_expense_documents(token) as T;
     case "upsert_expense_document": return browserApi.upsert_expense_document(args.input, token) as T;
     case "approve_expense_document": return browserApi.approve_expense_document(args.id, token) as T;
+    case "list_invoices": return browserApi.list_invoices(token) as T;
+    case "issue_invoice": return browserApi.issue_invoice(args.input, token) as T;
+    case "cancel_invoice": return browserApi.cancel_invoice(args.id, token) as T;
     case "archive_work_item": return browserApi.archiveWorkItem(args.id, token) as Promise<T>;
     case "list_work_projects": return browserApi.listWorkProjects(args.status_filter, token) as Promise<T>;
     case "get_work_project": return browserApi.getWorkProject(args.reference ?? args.id, token) as Promise<T>;
@@ -320,6 +325,9 @@ export const api = {
   listExpenseDocuments: () => call<ExpenseDocument[]>("list_expense_documents"),
   upsertExpenseDocument: (input: ExpenseDocumentInput) => call<ExpenseDocument>("upsert_expense_document", { input }),
   approveExpenseDocument: (id: number) => call<ExpenseDocument>("approve_expense_document", { id }),
+  listInvoices: () => call<Invoice[]>("list_invoices"),
+  issueInvoice: (input: InvoiceInput) => call<Invoice>("issue_invoice", { input }),
+  cancelInvoice: (id: number) => call<Invoice>("cancel_invoice", { id }),
   syncWhatsAppExpense: async (kind: ExpenseDocument["kind"] = "invoice") => {
     if (WEB_DATA_MODE === "local" && !isTauri()) {
       const input = await localWhatsApp<ExpenseDocumentInput & { status?: ExpenseDocument["status"] }>("sync_expense", { kind });

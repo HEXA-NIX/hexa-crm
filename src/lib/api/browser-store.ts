@@ -17,6 +17,8 @@ import type {
   ExpenseDocument,
   ExpenseDocumentInput,
   FiscalProfile,
+  Invoice,
+  InvoiceInput,
   Model303Draft,
   DashboardStats,
   InventoryMovement,
@@ -53,6 +55,7 @@ import type {
   WorkStatus,
 } from "../types";
 import { buildModel303Draft } from "../taxes/model303";
+import { buildInvoiceFromSale } from "../invoicing/invoice";
 import {
   PLUGIN_CATALOG,
   listStripeTools,
@@ -159,6 +162,7 @@ type Store = {
   saleLines: NonNullable<Sale["lines"]>;
   cash: CashMovement[];
   expenses: ExpenseDocument[];
+  invoices: Invoice[];
   fiscalProfiles: FiscalProfile[];
   stockMovements: {
     id: number;
@@ -186,6 +190,7 @@ type Store = {
     line: number;
     cash: number;
     expense: number;
+    invoice: number;
     stock: number;
     user: number;
     company: number;
@@ -354,6 +359,7 @@ function seed(): Store {
     saleLines: [],
     cash: [],
     expenses: [],
+    invoices: [],
     fiscalProfiles: [],
     stockMovements: [],
     warehouses: [],
@@ -375,6 +381,7 @@ function seed(): Store {
       line: 0,
       cash: 0,
       expense: 0,
+      invoice: 0,
       stock: 0,
       user: 0,
       company: 2,
@@ -437,6 +444,7 @@ function load(): Store {
     if (!memoryStore.tenantPlugins) memoryStore.tenantPlugins = [];
     if (!memoryStore.pluginAuditLogs) memoryStore.pluginAuditLogs = [];
     if (!memoryStore.fiscalProfiles) memoryStore.fiscalProfiles = [];
+    if (!memoryStore.invoices) memoryStore.invoices = [];
     if (memoryStore.seq.warehouse == null) memoryStore.seq.warehouse = 0;
     if (memoryStore.seq.stockLocation == null) memoryStore.seq.stockLocation = 0;
     if (memoryStore.seq.inventoryMovement == null) memoryStore.seq.inventoryMovement = 0;
@@ -444,6 +452,7 @@ function load(): Store {
     if (memoryStore.seq.workProject == null) memoryStore.seq.workProject = 0;
     if (memoryStore.seq.workItem == null) memoryStore.seq.workItem = 0;
     if (memoryStore.seq.pluginAuditLog == null) memoryStore.seq.pluginAuditLog = 0;
+    if (memoryStore.seq.invoice == null) memoryStore.seq.invoice = memoryStore.invoices.length;
     return memoryStore;
   }
   let raw = localStorage.getItem(KEY);
@@ -484,6 +493,7 @@ function load(): Store {
     if (!parsed.pluginAuditLogs) parsed.pluginAuditLogs = [];
     if (!parsed.expenses) parsed.expenses = [];
     if (!parsed.fiscalProfiles) parsed.fiscalProfiles = [];
+    if (!parsed.invoices) parsed.invoices = [];
     if (!parsed.seq) {
       parsed.seq = {
         product: 0,
@@ -492,6 +502,7 @@ function load(): Store {
         line: 0,
         cash: 0,
         expense: 0,
+        invoice: 0,
         stock: 0,
         user: 0,
         company: 0,
@@ -506,6 +517,7 @@ function load(): Store {
     }
     if (parsed.seq.user == null) parsed.seq.user = parsed.users.length;
     if (parsed.seq.expense == null) parsed.seq.expense = parsed.expenses.length;
+    if (parsed.seq.invoice == null) parsed.seq.invoice = parsed.invoices.length;
     if (parsed.seq.company == null) parsed.seq.company = parsed.companies?.length ?? 0;
     if (parsed.seq.warehouse == null) parsed.seq.warehouse = parsed.warehouses.length;
     if (parsed.seq.stockLocation == null) parsed.seq.stockLocation = parsed.stockLocations.length;
@@ -2004,6 +2016,48 @@ export const browserApi = {
     return { ...expense };
   },
 
+  list_invoices(token?: string | null): Invoice[] {
+    const s = load();
+    ensureCompanies(s);
+    const cid = sessionCompanyId(s, token);
+    return filterByCompanyId(s.invoices, cid).sort((a, b) => b.issued_at.localeCompare(a.issued_at));
+  },
+
+  issue_invoice(input: InvoiceInput, token?: string | null): Invoice {
+    const s = load();
+    const user = requireSession(s, token);
+    ensureCompanies(s);
+    const cid = sessionCompanyId(s, token);
+    const sale = s.sales.find((item) => item.id === input.sale_id && (item.company_id ?? 1) === cid);
+    if (!sale) throw new Error("Venta no encontrada");
+    const existing = s.invoices.find((item) => item.sale_id === sale.id && item.status !== "cancelled");
+    if (existing) return { ...existing };
+    const company = s.companies.find((item) => item.id === cid);
+    if (!company) throw new Error("Empresa no encontrada");
+    const customer = sale.customer_id == null ? null : s.customers.find((item) => item.id === sale.customer_id && (item.company_id ?? 1) === cid) ?? null;
+    const series = (input.series ?? "F").trim().toUpperCase() || "F";
+    const year = new Date().getFullYear();
+    const count = s.invoices.filter((item) => item.company_id === cid && item.series === series && item.issued_at.startsWith(String(year))).length + 1;
+    s.seq.invoice += 1;
+    const invoice = buildInvoiceFromSale({ id: s.seq.invoice, company, customer, sale, lines: s.saleLines.filter((line) => line.sale_id === sale.id), invoice: input, created_by: user.id, number: `${year}-${String(count).padStart(5, "0")}`, profile: s.fiscalProfiles.find((item) => item.company_id === cid) ?? null });
+    s.invoices.push(invoice);
+    save(s);
+    return { ...invoice };
+  },
+
+  cancel_invoice(id: number, token?: string | null): Invoice {
+    const s = load();
+    requireSession(s, token);
+    const cid = sessionCompanyId(s, token);
+    const invoice = s.invoices.find((item) => item.id === id && item.company_id === cid);
+    if (!invoice) throw new Error("Factura no encontrada");
+    if (invoice.status === "cancelled") return { ...invoice };
+    invoice.status = "cancelled";
+    invoice.updated_at = now();
+    save(s);
+    return { ...invoice };
+  },
+
   create_cash_movement(input: CashInput, token?: string | null): CashMovement {
     const s = load();
     ensureCompanies(s);
@@ -2367,6 +2421,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       : [];
     const workItems = Array.isArray(payload.workItems) ? payload.workItems : [];
     const expenses = Array.isArray(payload.expenses) ? payload.expenses : [];
+    const invoices = Array.isArray(payload.invoices) ? payload.invoices : [];
     const seq = {
       product: payload.seq?.product ?? 0,
       customer: payload.seq?.customer ?? 0,
@@ -2374,6 +2429,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       line: payload.seq?.line ?? 0,
       cash: payload.seq?.cash ?? 0,
       expense: payload.seq?.expense ?? expenses.length,
+      invoice: payload.seq?.invoice ?? invoices.length,
       stock: payload.seq?.stock ?? 0,
       user: payload.seq?.user ?? 0,
       company: payload.seq?.company ?? 0,
@@ -2396,6 +2452,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       workProjects,
       workItems,
       expenses,
+      invoices,
       seq,
       sessions: {},
     });

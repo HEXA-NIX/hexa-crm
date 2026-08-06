@@ -177,6 +177,9 @@ export const POST: RequestHandler = async ({ request }) => {
       case "list_expense_documents": result = await postgresApi.list_expense_documents(token); break;
       case "upsert_expense_document": result = await postgresApi.upsert_expense_document(args?.input, token); break;
       case "approve_expense_document": result = await postgresApi.approve_expense_document(Number(args?.id), token); break;
+      case "list_invoices": result = await postgresApi.list_invoices(token); break;
+      case "issue_invoice": result = await postgresApi.issue_invoice(args?.input, token); break;
+      case "cancel_invoice": result = await postgresApi.cancel_invoice(Number(args?.id), token); break;
       case "sync_whatsapp_expense": result = await postgresApi.sync_whatsapp_expense(token, args?.kind); break;
       case "get_cash_balance":
         result = await postgresApi.get_cash_balance(token);

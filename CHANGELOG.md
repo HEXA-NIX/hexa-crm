@@ -15,6 +15,7 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 - Webhook firmado de WhatsApp para convertir mensajes con documentos en borradores de gastos por empresa y usuario.
 - Botón «Leer WhatsApp» para consultar multimedia de GOWA, descargar la última foto/documento y extraer sus datos mediante un modelo de visión Ollama antes de crear el borrador.
 - Primera fase fiscal: perfil fiscal por empresa, IVA repercutido y soportado, retenciones y borrador revisable del modelo 303 con exportación CSV. No realiza presentación ante la AEAT.
+- Facturación emitida separada de las facturas recibidas: series y numeración por empresa, conversión de ventas a factura o simplificada, IVA/IRPF, estados de emisión/anulación e impresión del documento.
 
 ### Fixed
 

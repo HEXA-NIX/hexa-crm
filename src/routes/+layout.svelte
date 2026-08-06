@@ -75,8 +75,12 @@
       subtitle: "Saldo, ingresos y gastos",
     },
     "/gastos": {
-      title: "Gastos y facturas",
+      title: "Facturas recibidas",
       subtitle: "Facturas recibidas, adjuntos y revisión de gastos",
+    },
+    "/facturas": {
+      title: "Facturas emitidas",
+      subtitle: "Ventas facturadas, series y documentos para clientes",
     },
     "/clientes": {
       title: "Clientes",
