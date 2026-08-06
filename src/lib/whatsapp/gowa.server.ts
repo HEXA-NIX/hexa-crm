@@ -30,6 +30,30 @@ async function request(path: string, init: RequestInit = {}) {
   return data;
 }
 
+async function requestBinary(path: string, headersInit: HeadersInit = {}): Promise<{ bytes: Uint8Array; mimeType: string; fileName?: string }> {
+  const { baseUrl, authorization } = config();
+  const headers = new Headers(headersInit);
+  headers.set("Accept", "application/octet-stream, application/json");
+  if (authorization) headers.set("Authorization", authorization);
+  const response = await fetch(`${baseUrl}${path}`, { headers, signal: AbortSignal.timeout(30_000) });
+  const mimeType = response.headers.get("content-type") || "application/octet-stream";
+  const disposition = response.headers.get("content-disposition") || "";
+  const fileName = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+  if (!response.ok) throw new Error(`GOWA: HTTP ${response.status}`);
+  if (mimeType.includes("application/json")) {
+    const data = await response.json() as any;
+    const result = data.results || data;
+    const encoded = String(result.data_base64 || result.base64 || result.content_base64 || "");
+    if (!encoded) throw new Error("GOWA no devolvió el contenido multimedia");
+    return { bytes: new Uint8Array(Buffer.from(encoded, "base64")), mimeType: String(result.mime_type || result.mimetype || "application/octet-stream"), fileName: result.file_name || result.filename };
+  }
+  return { bytes: new Uint8Array(await response.arrayBuffer()), mimeType, fileName };
+}
+
+function unwrapResults<T = any>(data: any): T {
+  return (data?.results ?? data) as T;
+}
+
 export function normalizeWhatsAppPhone(value: string): string {
   const clean = value.trim().replace(/[\s().-]/g, "");
   if (!/^\+[1-9]\d{7,14}$/.test(clean)) {
@@ -106,4 +130,47 @@ export async function gowaSendText(deviceId: string, phone: string, message: str
   });
   const result = data.results || data;
   return { message_id: result.message_id ? String(result.message_id) : undefined };
+}
+
+export async function gowaListChats(deviceId: string): Promise<any[]> {
+  const data = await request(`/chats?limit=50&has_media=true`, { headers: { "X-Device-Id": deviceId } });
+  const result = unwrapResults<any>(data);
+  return Array.isArray(result) ? result : Array.isArray(result?.chats) ? result.chats : [];
+}
+
+export async function gowaGetChatMessages(deviceId: string, chatJid: string): Promise<any[]> {
+  const path = `/chat/${encodeURIComponent(chatJid)}/messages?limit=50&media_only=true`;
+  const data = await request(path, { headers: { "X-Device-Id": deviceId } });
+  const result = unwrapResults<any>(data);
+  return Array.isArray(result) ? result : Array.isArray(result?.messages) ? result.messages : [];
+}
+
+export async function gowaDownloadMessageMedia(deviceId: string, messageId: string, phone: string): Promise<{ data_url: string; mime_type: string; name: string }> {
+  const downloaded = await requestBinary(`/message/${encodeURIComponent(messageId)}/download?phone=${encodeURIComponent(phone)}`, { "X-Device-Id": deviceId });
+  const mime = downloaded.mimeType.split(";")[0] || "application/octet-stream";
+  const extension = mime.split("/")[1]?.replace("jpeg", "jpg") || "bin";
+  return { data_url: `data:${mime};base64,${Buffer.from(downloaded.bytes).toString("base64")}`, mime_type: mime, name: downloaded.fileName || `whatsapp-${messageId}.${extension}` };
+}
+
+export async function gowaLatestMedia(deviceId: string): Promise<{ media: { data_url: string; mime_type: string; name: string }; caption: string; from: string; message_id: string }> {
+  const chats = await gowaListChats(deviceId);
+  const candidates: any[] = [];
+  for (const chat of chats.slice(0, 50)) {
+    const jid = String(chat.jid || chat.chat_jid || chat.id || chat.phone || "");
+    if (!jid) continue;
+    const messages = await gowaGetChatMessages(deviceId, jid).catch(() => []);
+    for (const message of messages) {
+      const mediaType = String(message.media_type || message.type || message.message_type || "").toLowerCase();
+      if (!message.id && !message.message_id) continue;
+      if (!mediaType || !["image", "document", "file", "pdf", "media"].some((kind) => mediaType.includes(kind))) continue;
+      candidates.push({ message, jid, timestamp: Number(message.timestamp || message.time || message.created_at || 0) || 0 });
+    }
+  }
+  candidates.sort((a, b) => b.timestamp - a.timestamp);
+  const candidate = candidates[0];
+  if (!candidate) throw new Error("No hay imágenes o documentos nuevos en los chats de WhatsApp");
+  const message = candidate.message;
+  const messageId = String(message.id || message.message_id);
+  const media = await gowaDownloadMessageMedia(deviceId, messageId, candidate.jid);
+  return { media, caption: String(message.caption || message.content || message.body || message.text || ""), from: String(message.from || message.sender || candidate.jid), message_id: messageId };
 }

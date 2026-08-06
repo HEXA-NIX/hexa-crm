@@ -86,8 +86,9 @@ import { normalizeProjectBrief, normalizeProjectPrd, normalizeTechStack } from "
 import { validateProjectLogo } from "../projects/project-logo";
 import { validateUserAvatar } from "../users/user-avatar";
 import { decodeBase64File, testGoogleDrive, uploadToGoogleDrive } from "../storage/google-drive";
-import { gowaDeviceId, gowaLoginQr, gowaLogout, gowaSendText, gowaStatus, normalizeWhatsAppPhone } from "../whatsapp/gowa.server";
+import { gowaDeviceId, gowaLatestMedia, gowaLoginQr, gowaLogout, gowaSendText, gowaStatus, normalizeWhatsAppPhone } from "../whatsapp/gowa.server";
 import { extractExpenseHints } from "../expenses/ocr";
+import { extractExpenseFromImage } from "../expenses/vision.server";
 import {
   callStripeTool,
   listStripeTools,
@@ -2522,6 +2523,18 @@ export const postgresApi = {
     return formatExpenseDocument(result[0]);
   },
 
+  async syncWhatsAppExpense(token: string | null): Promise<ExpenseDocument> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const deviceId = gowaDeviceId(companyId, user.id);
+    const latest = await gowaLatestMedia(deviceId);
+    const settings = await this.get_settings(token);
+    const vision = await extractExpenseFromImage(latest.media.data_url, latest.caption, { baseUrl: settings.ollama_url, model: settings.ollama_model });
+    const hints = { ...extractExpenseHints(latest.caption), ...vision };
+    const input = { title: hints.title || latest.media.name, supplier_name: hints.supplier_name || "", supplier_tax_id: hints.supplier_tax_id || "", invoice_number: hints.invoice_number || "", issued_at: hints.issued_at || null, base_cents: hints.base_cents || 0, vat_cents: hints.vat_cents || 0, total_cents: hints.total_cents || 0, notes: hints.notes || latest.caption, ocr_confidence: hints.ocr_confidence ?? 0.8, attachments: [{ id: `wa-${latest.message_id}`, name: latest.media.name, mime_type: latest.media.mime_type, size: Math.floor((latest.media.data_url.length * 3) / 4), data_url: latest.media.data_url }], source: "whatsapp" as const, source_phone: latest.from };
+    return this.upsertExpenseDocument(input, token);
+  },
+
   async create_cash_movement(input: CashInput, token: string | null): Promise<CashMovement> {
     const user = await requireSession(token);
     const companyId = await resolveActiveCompanyId(token, user.id);
@@ -3788,6 +3801,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   upsert_expense_document(input: any, token?: string | null) { return this.upsertExpenseDocument(input, token ?? null); },
   approve_expense_document(id: number, token?: string | null) { return this.approveExpenseDocument(id, token ?? null); },
   ingest_whatsapp_expense(deviceId: string, payload: any) { return this.ingestWhatsAppExpense(deviceId, payload); },
+  sync_whatsapp_expense(token?: string | null) { return this.syncWhatsAppExpense(token ?? null); },
   capture_dashboard_alert(input: any, token?: string | null) { return this.captureDashboardAlert(input, token); },
 
   async list_warehouses(token?: string | null): Promise<Warehouse[]> {

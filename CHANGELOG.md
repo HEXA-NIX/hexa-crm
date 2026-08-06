@@ -13,6 +13,7 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 - Primera base de la bandeja de gastos y facturas recibidas: adjuntos PDF/imagen, revisión, proyecto asociado y aprobación que genera el movimiento de Caja.
 - Webhook firmado de WhatsApp para convertir mensajes con documentos en borradores de gastos por empresa y usuario.
+- Botón «Leer WhatsApp» para consultar multimedia de GOWA, descargar la última foto/documento y extraer sus datos mediante un modelo de visión Ollama antes de crear el borrador.
 
 ### Fixed
 

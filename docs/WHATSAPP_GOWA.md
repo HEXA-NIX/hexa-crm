@@ -23,6 +23,7 @@ Reinicia Hexa CRM después de modificar el entorno. En `Ajustes → WhatsApp`, c
 - El teléfono se guarda en formato internacional y nunca se usa como credencial.
 - Las credenciales de GOWA solo se leen en el servidor; no llegan al navegador.
 - Para recibir tickets y facturas, configura `WHATSAPP_WEBHOOK=https://tu-crm.example/api/whatsapp/webhook`, `WHATSAPP_WEBHOOK_EVENTS=message`, `WHATSAPP_AUTO_DOWNLOAD_MEDIA=true` y el mismo secreto en `GOWA_WEBHOOK_SECRET`/`WHATSAPP_WEBHOOK_SECRET`. Hexa crea un borrador en Gastos y facturas; nunca lo contabiliza sin aprobación.
+- También puedes usar «Gastos y facturas → Leer WhatsApp»: Hexa consulta los chats con multimedia, descarga la última foto/documento y ejecuta visión con `HEXA_OLLAMA_URL`/`HEXA_OLLAMA_MODEL` (por defecto `llama3.2-vision`). El resultado siempre queda pendiente de revisión humana.
 - Cada envío exige confirmación humana y queda registrado en auditoría.
 - La primera versión solo permite mensajes individuales de texto, hasta 4.000 caracteres.
 - No se permiten campañas masivas. Al depender de WhatsApp Web, Meta puede cerrar sesiones o limitar números.

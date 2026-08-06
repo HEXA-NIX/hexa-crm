@@ -91,7 +91,7 @@ function withToken(args?: Record<string, unknown>): Record<string, unknown> {
   return { ...(args ?? {}), token: token ?? null };
 }
 
-async function localWhatsApp<T>(action: "status" | "login" | "logout" | "send", input: Record<string, unknown> = {}): Promise<T> {
+async function localWhatsApp<T>(action: "status" | "login" | "logout" | "send" | "sync_expense", input: Record<string, unknown> = {}): Promise<T> {
   const token = getToken();
   if (!token) throw new Error("Sesión no iniciada");
   const response = await fetch("/api/whatsapp/local", {
@@ -315,6 +315,13 @@ export const api = {
   listExpenseDocuments: () => call<ExpenseDocument[]>("list_expense_documents"),
   upsertExpenseDocument: (input: ExpenseDocumentInput) => call<ExpenseDocument>("upsert_expense_document", { input }),
   approveExpenseDocument: (id: number) => call<ExpenseDocument>("approve_expense_document", { id }),
+  syncWhatsAppExpense: async () => {
+    if (WEB_DATA_MODE === "local" && !isTauri()) {
+      const input = await localWhatsApp<ExpenseDocumentInput & { status?: ExpenseDocument["status"] }>("sync_expense");
+      return browserApi.upsert_expense_document(input, getToken());
+    }
+    return call<ExpenseDocument>("sync_whatsapp_expense");
+  },
   getCashBalance: () => remoteOperatorConfig ? remoteWriteUnavailable() : call<number>("get_cash_balance"),
   vatSummary: (from: string, to: string) => remoteOperatorConfig ? remoteWriteUnavailable() : call<VatSummary>("vat_summary", { from, to }),
   dashboardStats: () => remoteOperatorConfig ? remoteOperatorApi.dashboard(requireRemoteConfig(), getToken() ?? "") : call<DashboardStats>("dashboard_stats"),
