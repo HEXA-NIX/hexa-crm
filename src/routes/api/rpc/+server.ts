@@ -184,6 +184,15 @@ export const POST: RequestHandler = async ({ request }) => {
       case "vat_summary":
         result = await postgresApi.vat_summary(args?.from as string, args?.to as string, token);
         break;
+      case "list_fiscal_profiles":
+        result = await postgresApi.list_fiscal_profiles(token);
+        break;
+      case "upsert_fiscal_profile":
+        result = await postgresApi.upsert_fiscal_profile(args?.input, token);
+        break;
+      case "model303_draft":
+        result = await postgresApi.model303_draft(args?.from as string, args?.to as string, token);
+        break;
       case "dashboard_stats":
         result = await postgresApi.dashboard_stats(token);
         break;

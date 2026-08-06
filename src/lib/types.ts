@@ -225,6 +225,40 @@ export type ExpenseDocument = {
 };
 export type ExpenseDocumentInput = Partial<Omit<ExpenseDocument, "id" | "company_id" | "created_by" | "created_at" | "updated_at">> & { id?: number | null };
 
+export type FiscalRegime = "general" | "simplified" | "recargo_equivalencia" | "other";
+export type FiscalPeriod = "monthly" | "quarterly";
+export type FiscalProfile = {
+  company_id: number;
+  regime: FiscalRegime;
+  period: FiscalPeriod;
+  irpf_enabled: boolean;
+  default_irpf_rate: number;
+  sii_enabled: boolean;
+  updated_at: string;
+};
+
+export type Model303Bucket = {
+  vat_rate: VatRate;
+  base_cents: number;
+  vat_cents: number;
+};
+export type Model303Draft = {
+  company_id: number;
+  from: string;
+  to: string;
+  output_buckets: Model303Bucket[];
+  input_buckets: Model303Bucket[];
+  output_base_cents: number;
+  output_vat_cents: number;
+  input_base_cents: number;
+  input_vat_cents: number;
+  net_vat_cents: number;
+  withholding_cents: number;
+  status: "draft";
+  warnings: string[];
+  generated_at: string;
+};
+
 export type VatBucket = {
   vat_rate: VatRate;
   base_cents: number;

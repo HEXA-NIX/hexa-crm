@@ -16,6 +16,8 @@ import type {
   CustomerInput,
   ExpenseDocument,
   ExpenseDocumentInput,
+  FiscalProfile,
+  Model303Draft,
   DashboardStats,
   InventoryMovement,
   InventoryMovementType,
@@ -50,6 +52,7 @@ import type {
   WorkProjectInput,
   WorkStatus,
 } from "../types";
+import { buildModel303Draft } from "../taxes/model303";
 import {
   PLUGIN_CATALOG,
   listStripeTools,
@@ -156,6 +159,7 @@ type Store = {
   saleLines: NonNullable<Sale["lines"]>;
   cash: CashMovement[];
   expenses: ExpenseDocument[];
+  fiscalProfiles: FiscalProfile[];
   stockMovements: {
     id: number;
     product_id: number;
@@ -350,6 +354,7 @@ function seed(): Store {
     saleLines: [],
     cash: [],
     expenses: [],
+    fiscalProfiles: [],
     stockMovements: [],
     warehouses: [],
     stockLocations: [],
@@ -431,6 +436,7 @@ function load(): Store {
     else memoryStore.workItems = memoryStore.workItems.map((item) => ({ ...item, parent_id: item.parent_id ?? null }));
     if (!memoryStore.tenantPlugins) memoryStore.tenantPlugins = [];
     if (!memoryStore.pluginAuditLogs) memoryStore.pluginAuditLogs = [];
+    if (!memoryStore.fiscalProfiles) memoryStore.fiscalProfiles = [];
     if (memoryStore.seq.warehouse == null) memoryStore.seq.warehouse = 0;
     if (memoryStore.seq.stockLocation == null) memoryStore.seq.stockLocation = 0;
     if (memoryStore.seq.inventoryMovement == null) memoryStore.seq.inventoryMovement = 0;
@@ -477,6 +483,7 @@ function load(): Store {
     if (!parsed.tenantPlugins) parsed.tenantPlugins = [];
     if (!parsed.pluginAuditLogs) parsed.pluginAuditLogs = [];
     if (!parsed.expenses) parsed.expenses = [];
+    if (!parsed.fiscalProfiles) parsed.fiscalProfiles = [];
     if (!parsed.seq) {
       parsed.seq = {
         product: 0,
@@ -2082,6 +2089,55 @@ export const browserApi = {
       vat_cents: buckets.reduce((a, b) => a + b.vat_cents, 0),
       total_cents: buckets.reduce((a, b) => a + b.total_cents, 0),
     };
+  },
+
+  list_fiscal_profiles(token?: string | null): FiscalProfile[] {
+    const s = load();
+    ensureCompanies(s);
+    const cid = sessionCompanyId(s, token);
+    return s.fiscalProfiles.filter((profile) => profile.company_id === cid);
+  },
+
+  upsert_fiscal_profile(input: Partial<FiscalProfile>, token?: string | null): FiscalProfile {
+    const s = load();
+    const user = requireSession(s, token);
+    if (user.role !== "admin") throw new Error("Se requieren permisos de administrador");
+    const cid = sessionCompanyId(s, token);
+    const regime = input.regime ?? "general";
+    const period = input.period ?? "quarterly";
+    if (!["general", "simplified", "recargo_equivalencia", "other"].includes(regime)) throw new Error("Régimen fiscal no válido");
+    if (!["monthly", "quarterly"].includes(period)) throw new Error("Periodicidad no válida");
+    const rate = Number(input.default_irpf_rate ?? 0);
+    if (!Number.isFinite(rate) || rate < 0 || rate > 100) throw new Error("El IRPF debe estar entre 0 y 100");
+    const profile: FiscalProfile = {
+      company_id: cid,
+      regime: regime as FiscalProfile["regime"],
+      period: period as FiscalProfile["period"],
+      irpf_enabled: !!input.irpf_enabled,
+      default_irpf_rate: rate,
+      sii_enabled: !!input.sii_enabled,
+      updated_at: now(),
+    };
+    const index = s.fiscalProfiles.findIndex((item) => item.company_id === cid);
+    if (index >= 0) s.fiscalProfiles[index] = profile; else s.fiscalProfiles.push(profile);
+    save(s);
+    return profile;
+  },
+
+  model303_draft(from: string, to: string, token?: string | null): Model303Draft {
+    const s = load();
+    ensureCompanies(s);
+    const cid = sessionCompanyId(s, token);
+    const profile = s.fiscalProfiles.find((item) => item.company_id === cid) ?? null;
+    return buildModel303Draft({
+      company_id: cid,
+      from,
+      to,
+      sales: filterByCompanyId(s.sales, cid),
+      saleLines: s.saleLines,
+      expenses: filterByCompanyId(s.expenses, cid),
+      profile,
+    });
   },
 
   dashboard_stats(token?: string | null): DashboardStats {

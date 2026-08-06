@@ -12,6 +12,8 @@ import type {
   CustomerInput,
   ExpenseDocument,
   ExpenseDocumentInput,
+  FiscalProfile,
+  Model303Draft,
   DashboardStats,
   InventoryMovement,
   LoginResult,
@@ -142,6 +144,9 @@ async function callLocal<T>(cmd: string, args: Record<string, any>, token: strin
     case "create_cash_movement": return browserApi.create_cash_movement(args.input, token) as T;
     case "get_cash_balance": return browserApi.get_cash_balance(token) as T;
     case "vat_summary": return browserApi.vat_summary(args.from, args.to, token) as T;
+    case "list_fiscal_profiles": return browserApi.list_fiscal_profiles(token) as T;
+    case "upsert_fiscal_profile": return browserApi.upsert_fiscal_profile(args.input, token) as T;
+    case "model303_draft": return browserApi.model303_draft(args.from, args.to, token) as T;
     case "dashboard_stats": return browserApi.dashboard_stats(token) as T;
     case "get_settings": return browserApi.get_settings(token) as T;
     case "update_settings": return browserApi.update_settings(args.partial, token) as T;
@@ -324,6 +329,9 @@ export const api = {
   },
   getCashBalance: () => remoteOperatorConfig ? remoteWriteUnavailable() : call<number>("get_cash_balance"),
   vatSummary: (from: string, to: string) => remoteOperatorConfig ? remoteWriteUnavailable() : call<VatSummary>("vat_summary", { from, to }),
+  listFiscalProfiles: () => call<FiscalProfile[]>("list_fiscal_profiles"),
+  upsertFiscalProfile: (input: Partial<FiscalProfile>) => call<FiscalProfile>("upsert_fiscal_profile", { input }),
+  model303Draft: (from: string, to: string) => call<Model303Draft>("model303_draft", { from, to }),
   dashboardStats: () => remoteOperatorConfig ? remoteOperatorApi.dashboard(requireRemoteConfig(), getToken() ?? "") : call<DashboardStats>("dashboard_stats"),
   getSettings: () => call<Settings>("get_settings"),
   updateSettings: (partial: Partial<Settings>) =>

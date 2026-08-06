@@ -33,6 +33,8 @@ import type {
   Customer,
   CustomerInput,
   ExpenseDocument,
+  FiscalProfile,
+  Model303Draft,
   DashboardStats,
   InventoryMovement,
   LoginResult,
@@ -64,6 +66,7 @@ import type {
   WorkProject,
   WorkProjectInput,
 } from "../types";
+import { buildModel303Draft } from "../taxes/model303";
 import {
   billingByCompany,
   canAccessCompany,
@@ -167,6 +170,17 @@ export async function initDb() {
       signature TEXT NOT NULL,
       expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
       PRIMARY KEY (key_id, signature)
+    );
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS fiscal_profiles (
+      company_id INTEGER PRIMARY KEY REFERENCES companies(id) ON DELETE CASCADE,
+      regime TEXT NOT NULL DEFAULT 'general',
+      period TEXT NOT NULL DEFAULT 'quarterly',
+      irpf_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      default_irpf_rate NUMERIC(5,2) NOT NULL DEFAULT 0,
+      sii_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     );
   `;
   await sql`
@@ -1128,6 +1142,18 @@ function formatExpenseDocument(r: any): ExpenseDocument {
     attachments: Array.isArray(r.attachments) ? r.attachments : [], source: r.source ?? "manual", source_phone: r.source_phone ?? null,
     ocr_confidence: r.ocr_confidence == null ? null : Number(r.ocr_confidence), created_by: r.created_by,
     created_at: toIso(r.created_at), updated_at: toIso(r.updated_at), approved_at: toIso(r.approved_at) || null,
+  };
+}
+
+function formatFiscalProfile(r: any): FiscalProfile {
+  return {
+    company_id: Number(r.company_id),
+    regime: r.regime,
+    period: r.period,
+    irpf_enabled: !!r.irpf_enabled,
+    default_irpf_rate: Number(r.default_irpf_rate ?? 0),
+    sii_enabled: !!r.sii_enabled,
+    updated_at: toIso(r.updated_at),
   };
 }
 
@@ -2696,6 +2722,55 @@ export const postgresApi = {
     };
   },
 
+  async listFiscalProfiles(token: string | null): Promise<FiscalProfile[]> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const rows = await sql`SELECT * FROM fiscal_profiles WHERE company_id = ${companyId}`;
+    return rows.map(formatFiscalProfile);
+  },
+
+  async upsertFiscalProfile(input: any, token: string | null): Promise<FiscalProfile> {
+    const user = await requireAdmin(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const regime = String(input?.regime ?? "general");
+    const period = String(input?.period ?? "quarterly");
+    if (!["general", "simplified", "recargo_equivalencia", "other"].includes(regime)) throw new Error("Régimen fiscal no válido");
+    if (!["monthly", "quarterly"].includes(period)) throw new Error("Periodicidad no válida");
+    const rate = Number(input?.default_irpf_rate ?? 0);
+    if (!Number.isFinite(rate) || rate < 0 || rate > 100) throw new Error("El IRPF debe estar entre 0 y 100");
+    const rows = await sql`
+      INSERT INTO fiscal_profiles (company_id, regime, period, irpf_enabled, default_irpf_rate, sii_enabled, updated_at)
+      VALUES (${companyId}, ${regime}, ${period}, ${!!input?.irpf_enabled}, ${rate}, ${!!input?.sii_enabled}, NOW())
+      ON CONFLICT (company_id) DO UPDATE SET regime=EXCLUDED.regime, period=EXCLUDED.period,
+        irpf_enabled=EXCLUDED.irpf_enabled, default_irpf_rate=EXCLUDED.default_irpf_rate,
+        sii_enabled=EXCLUDED.sii_enabled, updated_at=NOW()
+      RETURNING *
+    `;
+    return formatFiscalProfile(rows[0]);
+  },
+
+  async model303Draft(from: string, to: string, token: string | null): Promise<Model303Draft> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const [salesRows, linesRows, expenseRows, profileRows] = await Promise.all([
+      sql`SELECT * FROM sales WHERE company_id = ${companyId} AND sold_at >= ${new Date(from)} AND sold_at <= ${new Date(to + "T23:59:59.999Z")}`,
+      sql`SELECT sl.* FROM sale_lines sl JOIN sales s ON s.id = sl.sale_id WHERE s.company_id = ${companyId} AND s.sold_at >= ${new Date(from)} AND s.sold_at <= ${new Date(to + "T23:59:59.999Z")}`,
+      sql`SELECT * FROM expense_documents WHERE company_id = ${companyId}`,
+      sql`SELECT * FROM fiscal_profiles WHERE company_id = ${companyId}`,
+    ]);
+    const sales = salesRows.map((row: any) => ({ ...row, sold_at: toIso(row.sold_at), company_id: companyId }));
+    const saleLines = linesRows.map((row: any) => ({ ...row, returned_qty: row.returned_qty ?? 0 }));
+    return buildModel303Draft({
+      company_id: companyId,
+      from,
+      to,
+      sales: sales as any,
+      saleLines: saleLines as any,
+      expenses: expenseRows.map(formatExpenseDocument),
+      profile: profileRows[0] ? formatFiscalProfile(profileRows[0]) : null,
+    });
+  },
+
   async dashboard_stats(token: string | null): Promise<DashboardStats & { sales_yesterday_cents?: number }> {
     const user = await requireSession(token);
     if (!token) throw new Error("Sesión no iniciada");
@@ -3852,6 +3927,9 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   list_expense_documents(token?: string | null) { return this.listExpenseDocuments(token ?? null); },
   upsert_expense_document(input: any, token?: string | null) { return this.upsertExpenseDocument(input, token ?? null); },
   approve_expense_document(id: number, token?: string | null) { return this.approveExpenseDocument(id, token ?? null); },
+  list_fiscal_profiles(token?: string | null) { return this.listFiscalProfiles(token ?? null); },
+  upsert_fiscal_profile(input: any, token?: string | null) { return this.upsertFiscalProfile(input, token ?? null); },
+  model303_draft(from: string, to: string, token?: string | null) { return this.model303Draft(from, to, token ?? null); },
   ingest_whatsapp_expense(deviceId: string, payload: any) { return this.ingestWhatsAppExpense(deviceId, payload); },
   process_whatsapp_expense_message(deviceId: string, payload: any) { return this.processWhatsAppExpenseMessage(deviceId, payload); },
   sync_whatsapp_expense(token?: string | null, kind?: ExpenseDocument["kind"]) { return this.syncWhatsAppExpense(token ?? null, kind); },
