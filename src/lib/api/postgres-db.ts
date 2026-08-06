@@ -86,7 +86,7 @@ import { normalizeProjectBrief, normalizeProjectPrd, normalizeTechStack } from "
 import { validateProjectLogo } from "../projects/project-logo";
 import { validateUserAvatar } from "../users/user-avatar";
 import { decodeBase64File, testGoogleDrive, uploadToGoogleDrive } from "../storage/google-drive";
-import { gowaDeviceId, gowaDownloadMessageMedia, gowaLatestMedia, gowaLoginQr, gowaLogout, gowaSendText, gowaStatus, normalizeWhatsAppPhone } from "../whatsapp/gowa.server";
+import { gowaDeviceId, gowaDownloadMessageMedia, gowaLatestMedia, gowaLoginQr, gowaLogout, gowaSendExpenseTypePoll, gowaSendText, gowaStatus, normalizeWhatsAppPhone } from "../whatsapp/gowa.server";
 import { extractExpenseHints } from "../expenses/ocr";
 import { extractExpenseFromImage } from "../expenses/vision.server";
 import {
@@ -2548,10 +2548,14 @@ export const postgresApi = {
       if (!messageId) throw new Error("El mensaje multimedia no incluye identificador para descargarlo.");
       const caption = String(payload.caption ?? payload.body ?? payload.content ?? "");
       await sql`INSERT INTO whatsapp_expense_pending (company_id,user_id,device_id,message_id,chat_jid,from_phone,caption,media_type,status,updated_at) VALUES (${companyId},${userId},${deviceId},${messageId},${chatJid},${from},${caption},${mediaType || "image"},'awaiting_type',NOW()) ON CONFLICT (device_id,message_id) DO UPDATE SET status='awaiting_type',updated_at=NOW()`;
-      if (from) await gowaSendText(deviceId, from, "He recibido el documento 📎. ¿Es un TICKET, una FACTURA, una FACTURA SIMPLIFICADA, un ABONO o un JUSTIFICANTE? Responde con una de esas palabras.");
+      if (from) {
+        try { await gowaSendExpenseTypePoll(deviceId, from); }
+        catch { await gowaSendText(deviceId, from, "He recibido el documento 📎. Responde TICKET, FACTURA, FACTURA SIMPLIFICADA, ABONO o JUSTIFICANTE."); }
+      }
       return { state: "awaiting_type" };
     }
-    const text = String(payload.body ?? payload.content ?? payload.text ?? "").trim().toLowerCase();
+    const pollSelection = Array.isArray(payload.selected_options) ? payload.selected_options[0] : payload.selected_option ?? payload.vote ?? "";
+    const text = String(pollSelection || payload.body || payload.content || payload.text || "").trim().toLowerCase();
     const kind = text.includes("simplificada") ? "simplified_invoice" : text.includes("ticket") ? "ticket" : text.includes("abono") || text.includes("rectific") ? "credit_note" : text.includes("justificante") || text.includes("recibo") ? "receipt" : text.includes("factura") ? "invoice" : null;
     const pendingRows = from ? await sql`SELECT * FROM whatsapp_expense_pending WHERE device_id=${deviceId} AND from_phone=${from} AND status='awaiting_type' ORDER BY created_at DESC LIMIT 1` : [];
     if (!pendingRows.length) return { state: "ignored" };

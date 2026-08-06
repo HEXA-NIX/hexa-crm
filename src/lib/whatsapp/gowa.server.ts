@@ -162,6 +162,20 @@ export async function gowaSendText(deviceId: string, phone: string, message: str
   return { message_id: result.message_id ? String(result.message_id) : undefined };
 }
 
+export async function gowaSendExpenseTypePoll(deviceId: string, phone: string): Promise<void> {
+  const destination = phone.includes("@g.us") || phone.includes("@s.whatsapp.net") ? phone : `${normalizeWhatsAppPhone(phone).slice(1)}@s.whatsapp.net`;
+  await request("/send/poll", {
+    method: "POST",
+    headers: { "X-Device-Id": deviceId },
+    body: JSON.stringify({
+      phone: destination,
+      question: "¿Qué tipo de documento has enviado?",
+      options: ["Ticket", "Factura", "Factura simplificada", "Abono", "Justificante"],
+      max_answer: 1,
+    }),
+  });
+}
+
 export async function gowaListChats(deviceId: string): Promise<any[]> {
   const data = await request(`/chats?limit=50&has_media=true`, { headers: { "X-Device-Id": deviceId } });
   const result = unwrapResults<any>(data);
