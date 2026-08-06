@@ -325,6 +325,9 @@ export type Invoice = {
   updated_at: string;
 };
 export type InvoiceInput = {
+  /** Drafts are never sent to VERI*FACTU; omitting status issues the invoice immediately. */
+  status?: InvoiceStatus;
+  draft_id?: number | null;
   sale_id?: number;
   customer_id?: number | null;
   customer_name?: string;

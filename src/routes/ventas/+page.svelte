@@ -15,6 +15,8 @@
   import { resolveQuickAdd } from "$lib/pos/quick-add";
   import { downloadCsv, salesToCsv } from "$lib/export/csv";
   import { MAX_POS_FAVORITES, normalizeFavoriteIds, toggleFavoriteId } from "$lib/pos/favorites";
+  import SortableHeader from "$lib/components/SortableHeader.svelte";
+  import { sortedCopy, type SortDirection } from "$lib/list-sort";
 
   let products = $state<Product[]>([]);
   let customers = $state<Customer[]>([]);
@@ -32,6 +34,13 @@
   let selectedSale = $state<Sale | null>(null);
   let favoriteIds = $state<number[]>([]);
   let searchInput: HTMLInputElement | undefined = $state();
+  let salesSortKey = $state<"number" | "date" | "total">("date");
+  let salesSortDirection = $state<SortDirection>("desc");
+  const displayedSales = $derived(sortedCopy(sales, (sale) => salesSortKey === "number" ? sale.number : salesSortKey === "date" ? sale.sold_at : sale.total_cents, salesSortDirection));
+  function sortSales(key: typeof salesSortKey) {
+    if (salesSortKey === key) salesSortDirection = salesSortDirection === "asc" ? "desc" : "asc";
+    else { salesSortKey = key; salesSortDirection = key === "date" ? "desc" : "asc"; }
+  }
 
   const filteredProducts = $derived(
     products.filter(
@@ -563,14 +572,14 @@
           <table class="w-full min-w-[28rem] text-left text-sm">
             <thead class="border-b border-[var(--color-border)] text-xs uppercase text-[var(--color-muted-dim)]">
               <tr>
-                <th class="px-3 py-3 sm:px-4">Ticket</th>
-                <th class="px-3 py-3 sm:px-4">Fecha</th>
-                <th class="px-3 py-3 sm:px-4">Total</th>
+                <SortableHeader label="Ticket" class="px-3 sm:px-4" active={salesSortKey === "number"} direction={salesSortDirection} onclick={() => sortSales("number")} />
+                <SortableHeader label="Fecha" class="px-3 sm:px-4" active={salesSortKey === "date"} direction={salesSortDirection} onclick={() => sortSales("date")} />
+                <SortableHeader label="Total" class="px-3 sm:px-4" active={salesSortKey === "total"} direction={salesSortDirection} onclick={() => sortSales("total")} />
                 <th class="px-3 py-3 sm:px-4"></th>
               </tr>
             </thead>
             <tbody>
-              {#each sales as s}
+              {#each displayedSales as s}
                 <tr class="border-b border-white/5 hover:bg-purple-500/[0.05]">
                   <td class="px-3 py-3 font-medium sm:px-4">
                     {s.number}

@@ -14,7 +14,7 @@ export function buildManualInvoice(input: {
 }): Invoice {
   const kind = input.invoice.kind ?? "complete";
   if (kind === "rectifying") throw new Error("Una factura manual no puede ser rectificativa");
-  if (kind === "complete" && !input.customer?.nif?.trim()) throw new Error("Una factura completa necesita el NIF del cliente");
+  if (kind === "complete" && input.invoice.status !== "draft" && !input.customer?.nif?.trim()) throw new Error("Una factura completa necesita el NIF del cliente");
   if (!input.lines.length) throw new Error("La factura debe tener al menos una línea");
   const lines = input.lines.map((line) => {
     const quantity = Number(line.quantity);
@@ -34,7 +34,7 @@ export function buildManualInvoice(input: {
   const issued_at = input.issued_at ?? new Date().toISOString();
   return {
     id: input.id, company_id: input.company.id, sale_id: null, series: (input.invoice.series ?? input.profile?.invoice_series ?? "F").trim().toUpperCase() || "F", number: input.number,
-    kind, status: "issued", issued_at, operation_date: input.invoice.operation_date || issued_at.slice(0, 10), due_at: input.invoice.due_at ?? null,
+    kind, status: input.invoice.status === "draft" ? "draft" : "issued", issued_at, operation_date: input.invoice.operation_date || issued_at.slice(0, 10), due_at: input.invoice.due_at ?? null,
     seller_legal_name: input.company.legal_name, seller_nif: input.company.nif, seller_trade_name: input.company.trade_name,
     customer_id: input.customer?.id && input.customer.id > 0 ? input.customer.id : null, customer_name: input.customer?.name || input.invoice.customer_name?.trim() || "Cliente contado",
     customer_nif: input.customer?.nif || input.invoice.customer_nif?.trim() || "", customer_email: input.customer?.email || input.invoice.customer_email?.trim() || "", lines,
@@ -56,7 +56,7 @@ export function buildInvoiceFromSale(input: {
   profile?: FiscalProfile | null;
 }): Invoice {
   const kind = input.invoice.kind ?? "complete";
-  if (kind === "complete" && !input.customer?.nif?.trim()) {
+  if (kind === "complete" && input.invoice.status !== "draft" && !input.customer?.nif?.trim()) {
     throw new Error("Una factura completa necesita el NIF del cliente");
   }
   const series = (input.invoice.series ?? input.profile?.invoice_series ?? "F").trim().toUpperCase() || "F";
@@ -81,7 +81,7 @@ export function buildInvoiceFromSale(input: {
     series,
     number: input.number,
     kind,
-    status: "issued",
+    status: input.invoice.status === "draft" ? "draft" : "issued",
     issued_at,
     operation_date: input.invoice.operation_date || input.sale.sold_at.slice(0, 10),
     due_at: input.invoice.due_at ?? null,

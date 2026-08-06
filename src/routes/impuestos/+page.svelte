@@ -10,6 +10,8 @@
   import Button from "$lib/components/Button.svelte";
   import { showToast } from "$lib/stores/ui";
   import { downloadCsv, vatSummaryToCsv } from "$lib/export/csv";
+  import SortableHeader from "$lib/components/SortableHeader.svelte";
+  import { sortedCopy, type SortDirection } from "$lib/list-sort";
 
   function monthRange(d = new Date()) {
     const y = d.getFullYear();
@@ -28,6 +30,14 @@
   let verifactuChain = $state<{ ok: boolean; error?: string }>({ ok: true });
   let loading = $state(true);
   let savingProfile = $state(false);
+  let verifactuSortKey = $state<"type" | "invoice" | "generated" | "hash" | "status">("generated");
+  let verifactuSortDirection = $state<SortDirection>("desc");
+  let vatSortKey = $state<"type" | "base" | "vat" | "total">("type");
+  let vatSortDirection = $state<SortDirection>("asc");
+  const displayedVerifactuRecords = $derived(sortedCopy(verifactuRecords.slice(0, 10), (record) => verifactuSortKey === "type" ? record.record_type : verifactuSortKey === "invoice" ? `${record.invoice_series}-${record.invoice_number}` : verifactuSortKey === "generated" ? record.generated_at : verifactuSortKey === "hash" ? record.hash : record.status, verifactuSortDirection));
+  const displayedVatBuckets = $derived(summary ? sortedCopy(summary.buckets, (bucket) => vatSortKey === "type" ? bucket.vat_rate : vatSortKey === "base" ? bucket.base_cents : vatSortKey === "vat" ? bucket.vat_cents : bucket.base_cents + bucket.vat_cents, vatSortDirection) : []);
+  function sortVerifactu(key: typeof verifactuSortKey) { if (verifactuSortKey === key) verifactuSortDirection = verifactuSortDirection === "asc" ? "desc" : "asc"; else { verifactuSortKey = key; verifactuSortDirection = key === "generated" ? "desc" : "asc"; } }
+  function sortVat(key: typeof vatSortKey) { if (vatSortKey === key) vatSortDirection = vatSortDirection === "asc" ? "desc" : "asc"; else { vatSortKey = key; vatSortDirection = "asc"; } }
 
   async function load() {
     loading = true;
@@ -156,7 +166,7 @@
 
   <Card lift={false} class="mb-4 p-4">
     <div class="mb-3 flex flex-wrap items-center justify-between gap-2"><div><h3 class="text-base font-semibold">Registro VERI*FACTU</h3><p class="text-xs text-slate-400">Cada factura emitida o anulada genera una huella encadenada y queda disponible para exportación. La remisión a AEAT todavía no se ejecuta automáticamente.</p></div><div class="flex items-center gap-2"><Badge tone={verifactuChain.ok ? "ok" : "danger"}>{verifactuChain.ok ? "Cadena íntegra" : "Revisar cadena"}</Badge><Button variant="secondary" onclick={exportVerifactu} disabled={!verifactuRecords.length}>Exportar JSON</Button></div></div>
-    {#if verifactuRecords.length === 0}<p class="text-sm text-slate-400">Activa «Pruebas AEAT» y emite una factura para generar el primer registro.</p>{:else}<div class="overflow-x-auto"><table class="w-full text-left text-xs"><thead class="border-b border-white/10 uppercase text-slate-500"><tr><th class="px-2 py-2">Tipo</th><th class="px-2 py-2">Factura</th><th class="px-2 py-2">Generado</th><th class="px-2 py-2">Huella</th><th class="px-2 py-2">Estado</th></tr></thead><tbody>{#each verifactuRecords.slice(0, 10) as record}<tr class="border-b border-white/5"><td class="px-2 py-2">{record.record_type === "alta" ? "Alta" : "Anulación"}</td><td class="px-2 py-2">{record.invoice_series}-{record.invoice_number}</td><td class="px-2 py-2">{record.generated_at.slice(0, 19).replace("T", " ")}</td><td class="max-w-[180px] truncate px-2 py-2 font-mono text-[10px]" title={record.hash}>{record.hash}</td><td class="px-2 py-2"><Badge tone={record.status === "rejected" ? "danger" : record.status === "accepted" ? "ok" : "warn"}>{record.status}</Badge></td></tr>{/each}</tbody></table></div>{/if}
+    {#if verifactuRecords.length === 0}<p class="text-sm text-slate-400">Activa «Pruebas AEAT» y emite una factura para generar el primer registro.</p>{:else}<div class="overflow-x-auto"><table class="w-full text-left text-xs"><thead class="border-b border-white/10 uppercase text-slate-500"><tr><SortableHeader label="Tipo" class="px-2 py-2" active={verifactuSortKey === "type"} direction={verifactuSortDirection} onclick={() => sortVerifactu("type")} /><SortableHeader label="Factura" class="px-2 py-2" active={verifactuSortKey === "invoice"} direction={verifactuSortDirection} onclick={() => sortVerifactu("invoice")} /><SortableHeader label="Generado" class="px-2 py-2" active={verifactuSortKey === "generated"} direction={verifactuSortDirection} onclick={() => sortVerifactu("generated")} /><SortableHeader label="Huella" class="px-2 py-2" active={verifactuSortKey === "hash"} direction={verifactuSortDirection} onclick={() => sortVerifactu("hash")} /><SortableHeader label="Estado" class="px-2 py-2" active={verifactuSortKey === "status"} direction={verifactuSortDirection} onclick={() => sortVerifactu("status")} /></tr></thead><tbody>{#each displayedVerifactuRecords as record}<tr class="border-b border-white/5"><td class="px-2 py-2">{record.record_type === "alta" ? "Alta" : "Anulación"}</td><td class="px-2 py-2">{record.invoice_series}-{record.invoice_number}</td><td class="px-2 py-2">{record.generated_at.slice(0, 19).replace("T", " ")}</td><td class="max-w-[180px] truncate px-2 py-2 font-mono text-[10px]" title={record.hash}>{record.hash}</td><td class="px-2 py-2"><Badge tone={record.status === "rejected" ? "danger" : record.status === "accepted" ? "ok" : "warn"}>{record.status}</Badge></td></tr>{/each}</tbody></table></div>{/if}
   </Card>
 
   <div class="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
@@ -177,14 +187,14 @@
     <table class="w-full text-left text-sm">
       <thead class="border-b border-white/10 text-xs uppercase text-slate-500">
         <tr>
-          <th class="px-4 py-3">Tipo</th>
-          <th class="px-4 py-3">Base</th>
-          <th class="px-4 py-3">Cuota</th>
-          <th class="px-4 py-3">Total</th>
+          <SortableHeader label="Tipo" active={vatSortKey === "type"} direction={vatSortDirection} onclick={() => sortVat("type")} />
+          <SortableHeader label="Base" active={vatSortKey === "base"} direction={vatSortDirection} onclick={() => sortVat("base")} />
+          <SortableHeader label="Cuota" active={vatSortKey === "vat"} direction={vatSortDirection} onclick={() => sortVat("vat")} />
+          <SortableHeader label="Total" active={vatSortKey === "total"} direction={vatSortDirection} onclick={() => sortVat("total")} />
         </tr>
       </thead>
       <tbody>
-        {#each summary.buckets as b}
+        {#each displayedVatBuckets as b}
           <tr class="border-b border-white/5">
             <td class="px-4 py-3">
               <Badge tone="vat">{vatLabel(b.vat_rate as VatRate)}</Badge>

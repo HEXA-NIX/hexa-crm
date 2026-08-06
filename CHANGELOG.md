@@ -11,6 +11,10 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Added
 
+- Las cabeceras de los listados tabulares principales (facturas, ventas, caja, impuestos e inventario) permiten ordenar ascendente/descendente con indicador visual.
+- Las facturas manuales pueden guardarse como borrador editable; al emitirlas pasan a estado inmutable y solo admiten cobro, anulación o abono rectificativo, sin volver a modificar sus datos registrados.
+- El registro de cobros se realiza desde un popup con validación de importe pendiente y mensajes de error visibles.
+
 - Primera base de la bandeja de gastos y facturas recibidas: adjuntos PDF/imagen, revisión, proyecto asociado y aprobación que genera el movimiento de Caja.
 - Webhook firmado de WhatsApp para convertir mensajes con documentos en borradores de gastos por empresa y usuario.
 - Botón «Leer WhatsApp» para consultar multimedia de GOWA, descargar la última foto/documento y extraer sus datos mediante un modelo de visión Ollama antes de crear el borrador.

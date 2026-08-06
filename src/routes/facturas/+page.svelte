@@ -8,6 +8,8 @@
   import Button from "$lib/components/Button.svelte";
   import Badge from "$lib/components/Badge.svelte";
   import Modal from "$lib/components/Modal.svelte";
+  import SortableHeader from "$lib/components/SortableHeader.svelte";
+  import { sortedCopy, type SortDirection } from "$lib/list-sort";
   import { showToast } from "$lib/stores/ui";
 
   type ManualLine = { product_id: string; description: string; quantity: string | number; unit_price: string | number; vat_rate: string | number };
@@ -30,11 +32,14 @@
   let paymentAmount = $state("");
   let paymentMethod = $state<"cash" | "bank_transfer" | "card" | "other">("bank_transfer");
   let paying = $state(false);
+  let paymentError = $state("");
   let invoiceSearch = $state("");
-  let invoiceStatusFilter = $state<"all" | "issued" | "cancelled">("all");
+  let invoiceStatusFilter = $state<"all" | "draft" | "issued" | "cancelled">("all");
   let paymentFilter = $state<"all" | "pending" | "partial" | "paid">("all");
   let customerFilter = $state("");
   let seriesFilter = $state("");
+  let invoiceSortKey = $state<"number" | "date" | "customer" | "base" | "vat" | "total" | "status" | "paid">("date");
+  let invoiceSortDirection = $state<SortDirection>("desc");
   let datePreset = $state<"all" | "month" | "quarter" | "previous_quarter" | "year" | "previous_year" | "custom">("all");
   let fromFilter = $state("");
   let toFilter = $state("");
@@ -48,6 +53,7 @@
   let creatingCustomer = $state(false);
   let previewOpen = $state(false);
   let previewInvoice = $state<Invoice | null>(null);
+  let manualDraftId = $state<number | null>(null);
   let manualForm = $state({ kind: "complete" as "complete" | "simplified", customer_id: "", customer_name: "", customer_nif: "", customer_email: "", operation_date: new Date().toISOString().slice(0, 10), due_at: "", irpf_rate: "", notes: "" });
   let manualLines = $state<ManualLine[]>([{ product_id: "", description: "", quantity: "1", unit_price: "", vat_rate: "21" }]);
 
@@ -66,6 +72,21 @@
       && (!fromFilter || invoice.issued_at.slice(0, 10) >= fromFilter)
       && (!toFilter || invoice.issued_at.slice(0, 10) <= toFilter);
   }));
+  const displayedInvoices = $derived(sortedCopy(filteredInvoices, (invoice) => {
+    if (invoiceSortKey === "number") return `${invoice.series}-${invoice.number}`;
+    if (invoiceSortKey === "date") return invoice.issued_at;
+    if (invoiceSortKey === "customer") return invoice.customer_name;
+    if (invoiceSortKey === "base") return invoice.base_cents;
+    if (invoiceSortKey === "vat") return invoice.vat_cents;
+    if (invoiceSortKey === "total") return invoice.total_cents;
+    if (invoiceSortKey === "paid") return invoice.paid_cents;
+    return invoice.status;
+  }, invoiceSortDirection));
+
+  function sortInvoices(key: typeof invoiceSortKey) {
+    if (invoiceSortKey === key) invoiceSortDirection = invoiceSortDirection === "asc" ? "desc" : "asc";
+    else { invoiceSortKey = key; invoiceSortDirection = key === "date" ? "desc" : "asc"; }
+  }
 
   function clearInvoiceFilters() {
     invoiceSearch = ""; invoiceStatusFilter = "all"; paymentFilter = "all"; customerFilter = ""; seriesFilter = ""; datePreset = "all"; fromFilter = ""; toFilter = ""; calendarOpen = false;
@@ -124,8 +145,17 @@
   onMount(load);
 
   function openManualInvoice() {
+    manualDraftId = null;
     manualForm = { kind: "complete", customer_id: "", customer_name: "", customer_nif: "", customer_email: "", operation_date: new Date().toISOString().slice(0, 10), due_at: "", irpf_rate: irpfRate, notes: "" };
     manualLines = [{ product_id: "", description: "", quantity: "1", unit_price: "", vat_rate: "21" }];
+    manualError = "";
+    manualOpen = true;
+  }
+
+  function editDraft(invoice: Invoice) {
+    manualDraftId = invoice.id;
+    manualForm = { kind: invoice.kind === "simplified" ? "simplified" : "complete", customer_id: invoice.customer_id ? String(invoice.customer_id) : "", customer_name: invoice.customer_name === "Cliente contado" ? "" : invoice.customer_name, customer_nif: invoice.customer_nif, customer_email: invoice.customer_email, operation_date: invoice.operation_date, due_at: invoice.due_at ?? "", irpf_rate: invoice.irpf_rate ? String(invoice.irpf_rate) : "", notes: invoice.notes };
+    manualLines = invoice.lines.map((line) => ({ product_id: "", description: line.description, quantity: String(line.quantity), unit_price: String(line.unit_price_cents / 100), vat_rate: String(line.vat_rate) }));
     manualError = "";
     manualOpen = true;
   }
@@ -162,7 +192,7 @@
     return { base: total.base + base, vat: total.vat + vat, total: total.total + base + vat };
   }, { base: 0, vat: 0, total: 0 }));
 
-  async function saveManualInvoice() {
+  async function saveManualInvoice(status: "draft" | "issued") {
     manualSaving = true;
     manualError = "";
     try {
@@ -173,11 +203,11 @@
         const customer = await api.upsertCustomer({ id: customerId, name: manualForm.customer_name.trim(), nif: manualForm.customer_nif.trim(), email: manualForm.customer_email.trim() });
         customerId = customer.id;
       }
-      const invoice = await api.issueInvoice({ series: invoiceSeries, kind: manualForm.kind, customer_id: customerId, customer_name: manualForm.customer_name, customer_nif: manualForm.customer_nif, customer_email: manualForm.customer_email, lines, operation_date: manualForm.operation_date || null, due_at: manualForm.due_at || null, irpf_rate: manualForm.irpf_rate ? Number(manualForm.irpf_rate) : undefined, notes: manualForm.notes });
-      showToast(`Factura ${invoice.series}-${invoice.number} emitida`);
+      const invoice = await api.issueInvoice({ draft_id: manualDraftId, status, series: invoiceSeries, kind: manualForm.kind, customer_id: customerId, customer_name: manualForm.customer_name, customer_nif: manualForm.customer_nif, customer_email: manualForm.customer_email, lines, operation_date: manualForm.operation_date || null, due_at: manualForm.due_at || null, irpf_rate: manualForm.irpf_rate ? Number(manualForm.irpf_rate) : undefined, notes: manualForm.notes });
+      showToast(status === "draft" ? "Borrador guardado" : `Factura ${invoice.series}-${invoice.number} emitida`);
       manualOpen = false;
-      previewInvoice = invoice;
-      previewOpen = true;
+      if (status === "issued") { previewInvoice = invoice; previewOpen = true; }
+      manualDraftId = status === "draft" ? invoice.id : null;
       await load();
     } catch (error) { manualError = error instanceof Error ? error.message : "No se pudo crear la factura"; showToast(manualError, "err"); }
     finally { manualSaving = false; }
@@ -195,9 +225,14 @@
 
   async function addPayment() {
     if (!selectedInvoice) return;
+    const amountCents = Math.round(Number(String(paymentAmount ?? "").replace(",", ".")) * 100);
+    const pending = selectedInvoice.total_cents - selectedInvoice.paid_cents;
+    if (!Number.isFinite(amountCents) || amountCents <= 0) { paymentError = "Introduce un importe válido mayor que cero."; return; }
+    if (amountCents > pending) { paymentError = `El cobro no puede superar el pendiente (${formatEUR(pending)}).`; return; }
     paying = true;
-    try { await api.addInvoicePayment({ invoice_id: selectedInvoice.id, amount_cents: Math.round(Number(paymentAmount.replace(",", ".")) * 100), method: paymentMethod }); showToast("Cobro registrado"); paymentAmount = ""; selectedInvoice = null; await load(); }
-    catch (error) { showToast(error instanceof Error ? error.message : "No se pudo registrar el cobro", "err"); }
+    paymentError = "";
+    try { await api.addInvoicePayment({ invoice_id: selectedInvoice.id, amount_cents: amountCents, method: paymentMethod }); showToast("Cobro registrado"); paymentAmount = ""; selectedInvoice = null; await load(); }
+    catch (error) { paymentError = error instanceof Error ? error.message : "No se pudo registrar el cobro"; showToast(paymentError, "err"); }
     finally { paying = false; }
   }
 
@@ -226,7 +261,7 @@
 </script>
 
 <section class="workspace-page">
-  <div class="workspace-intro workspace-intro-compact"><p class="workspace-index">FACTURACIÓN / VENTAS</p><div class="workspace-intro-row"><h2>Facturas<br /><em>emitidas.</em></h2><p>Ventas convertidas en facturas, separadas de las facturas recibidas de proveedores.</p></div></div>
+  <div class="mb-5 flex flex-wrap items-center justify-between gap-4"><div><p class="text-xs uppercase tracking-[0.18em] text-slate-500">Facturación / Ventas</p><h2 class="mt-1 text-2xl font-semibold tracking-tight">Facturas de venta <span class="text-sm text-slate-500">ⓘ</span></h2><p class="mt-1 text-sm text-slate-400">Gestiona facturas emitidas, vencimientos y cobros.</p></div><div class="flex flex-wrap gap-2"><Button variant="secondary" onclick={load}>Actualizar</Button><Button variant="primary" onclick={openManualInvoice}>Nueva factura</Button></div></div>
   <div class="mb-5 flex flex-wrap items-end gap-3"><div class="rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2 text-sm"><span class="block text-xs text-slate-400">Serie configurada</span><strong>{invoiceSeries}</strong><span class="ml-2 text-xs text-slate-500">(Ajustes fiscales)</span></div><label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">Fecha operación</span><input type="date" class="field" bind:value={operationDate} /></label><label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">Vencimiento</span><input type="date" class="field" bind:value={dueDate} /></label><label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">IRPF %</span><input type="number" min="0" max="100" step="0.01" class="field w-24" bind:value={irpfRate} /></label><Button variant="primary" onclick={openManualInvoice}>+ Nueva factura</Button><Button variant="secondary" onclick={load}>Actualizar</Button></div>
   <div class="mb-5 grid gap-3 sm:grid-cols-3"><Card lift={false} class="p-4"><p class="text-xs text-slate-400">Facturas emitidas</p><p class="mt-1 text-2xl font-semibold">{invoices.length}</p></Card><Card lift={false} class="p-4"><p class="text-xs text-slate-400">Pendiente de cobro</p><p class="mt-1 text-2xl font-semibold text-amber-200">{formatEUR(pendingCents)}</p></Card><Card lift={false} class="p-4"><p class="text-xs text-slate-400">Vencido</p><p class="mt-1 text-2xl font-semibold text-rose-300">{formatEUR(overdueCents)}</p></Card></div>
 
@@ -234,7 +269,7 @@
     <div class="mb-3 flex flex-wrap items-center justify-between gap-2"><div><h3 class="font-semibold">Listado de facturas</h3><p class="text-xs text-slate-400">Busca y filtra por los mismos criterios operativos: cliente, fecha, serie y estado.</p></div><Button variant="ghost" class="text-xs" onclick={clearInvoiceFilters}>Limpiar filtros</Button></div>
     <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
       <input class="field sm:col-span-2 xl:col-span-2" placeholder="Buscar número, cliente o NIF…" bind:value={invoiceSearch} />
-      <select class="field" bind:value={invoiceStatusFilter}><option value="all">Estado: todos</option><option value="issued">Emitidas</option><option value="cancelled">Anuladas</option></select>
+      <select class="field" bind:value={invoiceStatusFilter}><option value="all">Estado: todos</option><option value="draft">Borradores</option><option value="issued">Emitidas</option><option value="cancelled">Anuladas</option></select>
       <select class="field" bind:value={paymentFilter}><option value="all">Cobro: todos</option><option value="pending">Pendientes</option><option value="partial">Parciales</option><option value="paid">Pagadas</option></select>
       <select class="field" bind:value={customerFilter}><option value="">Cliente: todos</option>{#each customers as customer}<option value={customer.id}>{customer.name}</option>{/each}</select>
       <select class="field" bind:value={seriesFilter}><option value="">Serie: todas</option>{#each invoiceSeriesOptions as invoiceSeriesOption}<option value={invoiceSeriesOption}>{invoiceSeriesOption}</option>{/each}</select>
@@ -245,13 +280,27 @@
 
   {#if availableSales.length > 0}<Card lift={false} class="mb-5 p-4"><h3 class="mb-3 font-semibold">Ventas pendientes de facturar</h3><div class="space-y-2">{#each availableSales as sale}<div class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-white/10 px-3 py-3"><div><strong>{sale.number}</strong><span class="ml-2 text-sm text-slate-400">{sale.customer_name || "Cliente contado"} · {formatEUR(sale.total_cents)}</span></div><Button class="text-xs" disabled={issuing === sale.id} onclick={() => issue(sale)}>{issuing === sale.id ? "Emitiendo…" : sale.customer_id ? "Emitir factura" : "Emitir simplificada"}</Button></div>{/each}</div></Card>{/if}
 
-  {#if loading}<div class="skeleton h-48"></div>{:else if filteredInvoices.length === 0}<Card lift={false} class="p-10 text-center"><p class="text-sm text-[var(--color-muted)]">{invoices.length === 0 ? "Todavía no hay facturas emitidas." : "No hay facturas que coincidan con los filtros."}</p></Card>{:else}<Card lift={false} class="overflow-hidden p-0"><div class="overflow-x-auto"><table class="w-full min-w-[850px] text-left text-sm"><thead class="border-b border-white/10 text-xs uppercase tracking-wide text-slate-500"><tr><th class="px-4 py-3">Factura</th><th class="px-4 py-3">Fecha</th><th class="px-4 py-3">Cliente</th><th class="px-4 py-3 text-right">Base</th><th class="px-4 py-3 text-right">IVA</th><th class="px-4 py-3 text-right">Total</th><th class="px-4 py-3">Estado</th><th class="px-4 py-3 text-right">Acciones</th></tr></thead><tbody>{#each filteredInvoices as invoice}<tr class="border-b border-white/5 align-middle hover:bg-white/[0.025]"><td class="px-4 py-3"><p class="font-semibold">{invoice.series}-{invoice.number}</p><p class="text-xs text-slate-500">{invoice.kind === "simplified" ? "Simplificada" : "Completa"}</p></td><td class="px-4 py-3 text-slate-400">{invoice.issued_at.slice(0, 10)}</td><td class="px-4 py-3"><p>{invoice.customer_name}</p>{#if invoice.customer_nif}<p class="text-xs text-slate-500">{invoice.customer_nif}</p>{/if}</td><td class="px-4 py-3 text-right tabular">{formatEUR(invoice.base_cents)}</td><td class="px-4 py-3 text-right tabular">{formatEUR(invoice.vat_cents)}</td><td class="px-4 py-3 text-right font-semibold tabular">{formatEUR(invoice.total_cents)}</td><td class="px-4 py-3"><div class="flex flex-wrap gap-1"><Badge tone={invoice.status === "issued" ? "ok" : "danger"}>{invoice.status === "issued" ? "Emitida" : "Anulada"}</Badge>{#if isOverdue(invoice)}<Badge tone="danger">Vencida</Badge>{/if}<span class="text-xs text-slate-500">{invoice.payment_status === "paid" ? "Pagada" : invoice.payment_status === "partial" ? "Parcial" : "Pendiente"}</span></div></td><td class="px-4 py-3"><div class="flex justify-end gap-1"><Button variant="ghost" class="text-xs" onclick={() => print(invoice)}>PDF</Button>{#if invoice.status === "issued"}<Button variant="ghost" class="text-xs" onclick={() => { selectedInvoice = invoice; paymentAmount = String((invoice.total_cents - invoice.paid_cents) / 100); }}>Cobro</Button><Button variant="ghost" class="text-xs" onclick={() => rectify(invoice)}>Abono</Button><Button variant="ghost" class="text-xs" onclick={() => cancel(invoice)}>⋮</Button>{/if}</div></td></tr>{/each}</tbody></table></div></Card>{/if}
+  {#if loading}<div class="skeleton h-48"></div>{:else if filteredInvoices.length === 0}<Card lift={false} class="p-10 text-center"><p class="text-sm text-[var(--color-muted)]">{invoices.length === 0 ? "Todavía no hay facturas emitidas." : "No hay facturas que coincidan con los filtros."}</p></Card>{:else}<Card lift={false} class="overflow-hidden p-0"><div class="overflow-x-auto"><table class="w-full min-w-[950px] text-left text-sm"><thead class="border-b border-white/10 text-xs uppercase tracking-wide text-slate-500"><tr><SortableHeader label="Factura" active={invoiceSortKey === "number"} direction={invoiceSortDirection} onclick={() => sortInvoices("number")} /><SortableHeader label="Fecha" active={invoiceSortKey === "date"} direction={invoiceSortDirection} onclick={() => sortInvoices("date")} /><SortableHeader label="Cliente" active={invoiceSortKey === "customer"} direction={invoiceSortDirection} onclick={() => sortInvoices("customer")} /><SortableHeader label="Base" align="right" active={invoiceSortKey === "base"} direction={invoiceSortDirection} onclick={() => sortInvoices("base")} /><SortableHeader label="IVA" align="right" active={invoiceSortKey === "vat"} direction={invoiceSortDirection} onclick={() => sortInvoices("vat")} /><SortableHeader label="Total" align="right" active={invoiceSortKey === "total"} direction={invoiceSortDirection} onclick={() => sortInvoices("total")} /><SortableHeader label="Estado" active={invoiceSortKey === "status"} direction={invoiceSortDirection} onclick={() => sortInvoices("status")} /><SortableHeader label="Cobro" align="right" active={invoiceSortKey === "status"} direction={invoiceSortDirection} onclick={() => sortInvoices("status")} /><th class="px-4 py-3 text-right">Acciones</th></tr></thead><tbody>{#each displayedInvoices as invoice}<tr class="border-b border-white/5 align-middle hover:bg-white/[0.025]"><td class="px-4 py-3"><p class="font-semibold">{invoice.series}-{invoice.number}</p><p class="text-xs text-slate-500">{invoice.kind === "simplified" ? "Simplificada" : "Completa"}</p></td><td class="px-4 py-3 text-slate-400">{invoice.issued_at.slice(0, 10)}</td><td class="px-4 py-3"><p>{invoice.customer_name}</p>{#if invoice.customer_nif}<p class="text-xs text-slate-500">{invoice.customer_nif}</p>{/if}</td><td class="px-4 py-3 text-right tabular">{formatEUR(invoice.base_cents)}</td><td class="px-4 py-3 text-right tabular">{formatEUR(invoice.vat_cents)}</td><td class="px-4 py-3 text-right font-semibold tabular">{formatEUR(invoice.total_cents)}</td><td class="px-4 py-3"><div class="flex flex-wrap gap-1"><Badge tone={invoice.status === "issued" ? "ok" : invoice.status === "draft" ? "neutral" : "danger"}>{invoice.status === "issued" ? "Emitida" : invoice.status === "draft" ? "Borrador" : "Anulada"}</Badge>{#if isOverdue(invoice)}<Badge tone="danger">Vencida</Badge>{/if}</div></td><td class="px-4 py-3 text-right"><div class="space-y-1 text-right"><span class="block text-xs text-slate-400">{invoice.payment_status === "paid" ? "Pagada" : invoice.payment_status === "partial" ? "Parcial" : "Pendiente"}</span><span class="block text-sm font-semibold tabular">{formatEUR(invoice.paid_cents)} cobrados</span><span class="block text-xs text-slate-500">{formatEUR(Math.max(0, invoice.total_cents - invoice.paid_cents))} pendientes</span></div></td><td class="px-4 py-3"><div class="flex justify-end gap-1">{#if invoice.status === "draft"}<Button variant="secondary" class="text-xs" onclick={() => editDraft(invoice)}>Editar borrador</Button><Button variant="ghost" class="text-xs" onclick={() => cancel(invoice)}>Eliminar</Button>{:else}<Button variant="ghost" class="text-xs" onclick={() => print(invoice)}>PDF</Button>{#if invoice.status === "issued"}<Button variant="ghost" class="text-xs" onclick={() => { selectedInvoice = invoice; paymentAmount = String((invoice.total_cents - invoice.paid_cents) / 100); }}>Cobro</Button><Button variant="ghost" class="text-xs" onclick={() => rectify(invoice)}>Abono</Button><Button variant="ghost" class="text-xs" onclick={() => cancel(invoice)}>⋮</Button>{/if}{/if}</div></td></tr>{/each}</tbody></table></div></Card>{/if}
 
-  {#if selectedInvoice}<Card lift={false} class="mt-5 border border-emerald-400/30 p-4"><div class="flex flex-wrap items-end gap-3"><div><p class="font-semibold">Registrar cobro · {selectedInvoice.series}-{selectedInvoice.number}</p><p class="text-xs text-slate-400">Pendiente: {formatEUR(selectedInvoice.total_cents - selectedInvoice.paid_cents)}</p></div><label class="text-sm"><span class="mb-1 block text-slate-400">Importe (€)</span><input class="field w-32" type="number" min="0.01" step="0.01" bind:value={paymentAmount} /></label><label class="text-sm"><span class="mb-1 block text-slate-400">Método</span><select class="field" bind:value={paymentMethod}><option value="bank_transfer">Transferencia</option><option value="card">Tarjeta</option><option value="cash">Efectivo</option><option value="other">Otro</option></select></label><Button disabled={paying} onclick={addPayment}>{paying ? "Guardando…" : "Guardar cobro"}</Button><Button variant="ghost" onclick={() => (selectedInvoice = null)}>Cancelar</Button></div></Card>{/if}
+  <Modal open={!!selectedInvoice} title={selectedInvoice ? `Registrar cobro · ${selectedInvoice.series}-${selectedInvoice.number}` : "Registrar cobro"} size="sm" onclose={() => { selectedInvoice = null; paymentError = ""; }}>
+    {#if selectedInvoice}<div class="space-y-4"><div class="rounded-xl border border-emerald-400/20 bg-emerald-400/[0.06] p-3"><p class="text-sm text-slate-400">Pendiente de cobro</p><p class="mt-1 text-2xl font-semibold text-emerald-200">{formatEUR(selectedInvoice.total_cents - selectedInvoice.paid_cents)}</p></div><label class="block text-sm"><span class="mb-1 block text-slate-400">Importe (€)</span><input class="field w-full" type="number" min="0.01" step="0.01" bind:value={paymentAmount} autofocus /></label><label class="block text-sm"><span class="mb-1 block text-slate-400">Método</span><select class="field w-full" bind:value={paymentMethod}><option value="bank_transfer">Transferencia</option><option value="card">Tarjeta</option><option value="cash">Efectivo</option><option value="other">Otro</option></select></label>{#if paymentError}<p class="rounded-lg border border-rose-400/25 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert">{paymentError}</p>{/if}<div class="flex justify-end gap-2"><Button variant="ghost" onclick={() => (selectedInvoice = null)}>Cancelar</Button><Button disabled={paying} onclick={addPayment}>{paying ? "Guardando…" : "Guardar cobro"}</Button></div></div>{/if}
+  </Modal>
 </section>
 
-<Modal open={manualOpen} title="Nueva factura emitida" size="full" onclose={() => (manualOpen = false)}>
+<Modal open={manualOpen} title={manualDraftId ? "Editar borrador de factura" : "Nueva factura"} size="full" onclose={() => (manualOpen = false)}>
   <div class="space-y-5">
+    <div class="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-4">
+      <div>
+        <p class="text-xs uppercase tracking-[0.18em] text-slate-500">Facturación / Ventas</p>
+        <h3 class="mt-1 text-xl font-semibold">{manualDraftId ? "Editar borrador" : "Nueva factura"}</h3>
+        <p class="mt-1 text-xs text-slate-400">Completa los datos, añade líneas y revisa el total antes de emitir.</p>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <Button variant="ghost" onclick={() => (manualOpen = false)}>Volver</Button>
+        <Button variant="secondary" disabled={manualSaving} onclick={() => saveManualInvoice("draft")}>Guardar como borrador</Button>
+        <Button variant="primary" disabled={manualSaving} onclick={() => saveManualInvoice("issued")}>{manualSaving ? "Emitiendo…" : "Emitir factura"}</Button>
+      </div>
+    </div>
     <div class="grid gap-3 sm:grid-cols-3">
       <label class="text-sm"><span class="mb-1 block text-slate-400">Tipo</span><select class="field w-full" bind:value={manualForm.kind}><option value="complete">Completa</option><option value="simplified">Simplificada</option></select></label>
       <label class="text-sm"><span class="mb-1 block text-slate-400">Fecha operación</span><input type="date" class="field w-full" bind:value={manualForm.operation_date} /></label>
@@ -267,9 +316,10 @@
     <div class="rounded-2xl border border-white/10 bg-white/[0.02] p-4"><div class="mb-3 flex flex-wrap items-center justify-between gap-2"><div><h3 class="font-semibold">Conceptos de la factura</h3><p class="text-xs text-slate-400">Añade productos del catálogo o escribe un servicio personalizado. El total se calcula automáticamente.</p></div><Button variant="secondary" class="text-xs" onclick={addManualLine}>+ Añadir línea</Button></div><div class="hidden gap-2 px-1 pb-2 text-[11px] uppercase tracking-wide text-slate-500 lg:grid lg:grid-cols-[13rem_minmax(0,1fr)_5rem_7rem_6rem_6rem_auto]"><span>Producto / servicio</span><span>Descripción</span><span>Cant.</span><span>Precio (€)</span><span>IVA</span><span>Importe</span><span></span></div><div class="space-y-3">{#each manualLines as line, index}<div class="rounded-xl border border-white/10 bg-black/10 p-3"><div class="grid items-end gap-2 lg:grid-cols-[13rem_minmax(0,1fr)_5rem_7rem_6rem_6rem_auto]"><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Producto / servicio</span><select class="field w-full" value={line.product_id} onchange={(event) => selectManualProduct(index, event.currentTarget.value)}><option value="">Personalizado</option>{#each products as product}<option value={product.id}>{product.name}</option>{/each}</select></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Descripción</span><input class="field w-full" placeholder="Descripción del concepto" bind:value={line.description} /></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Cantidad</span><input type="number" min="0.01" step="0.01" class="field w-full" bind:value={line.quantity} /></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Precio (€)</span><input type="number" min="0" step="0.01" class="field w-full" bind:value={line.unit_price} /></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">IVA</span><select class="field w-full" bind:value={line.vat_rate}><option value="21">21%</option><option value="10">10%</option><option value="4">4%</option><option value="0">0%</option></select></label><div class="text-right text-sm font-semibold tabular"><span class="mb-1 block text-slate-400 lg:hidden">Importe</span>{formatEUR((Math.round(numberValue(line.quantity) * numberValue(line.unit_price) * 100) || 0) + Math.round((Math.round(numberValue(line.quantity) * numberValue(line.unit_price) * 100) || 0) * numberValue(line.vat_rate) / 100))}</div><Button variant="ghost" class="text-xs" disabled={manualLines.length === 1} onclick={() => removeManualLine(index)}>Quitar</Button></div></div>{/each}</div><div class="mt-4 flex flex-wrap justify-end gap-x-6 gap-y-1 border-t border-white/10 pt-3 text-sm"><span>Base: <strong>{formatEUR(manualTotals.base)}</strong></span><span>IVA: <strong>{formatEUR(manualTotals.vat)}</strong></span><span class="text-base">Total: <strong>{formatEUR(manualTotals.total)}</strong></span></div></div>
     <div class="grid gap-3 sm:grid-cols-3"><label class="text-sm"><span class="mb-1 block text-slate-400">IRPF %</span><input type="number" min="0" max="100" step="0.01" class="field w-full" bind:value={manualForm.irpf_rate} /></label><label class="text-sm sm:col-span-2"><span class="mb-1 block text-slate-400">Notas</span><input class="field w-full" placeholder="Condiciones de pago, referencia…" bind:value={manualForm.notes} /></label></div>
     {#if manualError}<p class="rounded-xl border border-rose-400/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-200" role="alert">{manualError}</p>{/if}
-    <div class="flex justify-end gap-2"><Button variant="ghost" onclick={() => (manualOpen = false)}>Cancelar</Button><Button variant="primary" disabled={manualSaving} onclick={saveManualInvoice}>{manualSaving ? "Guardando…" : "Emitir factura"}</Button></div>
+    <div class="flex flex-wrap justify-end gap-2"><Button variant="ghost" onclick={() => (manualOpen = false)}>Cancelar</Button><Button variant="secondary" disabled={manualSaving} onclick={() => saveManualInvoice("draft")}>{manualSaving ? "Guardando…" : "Guardar borrador"}</Button><Button variant="primary" disabled={manualSaving} onclick={() => saveManualInvoice("issued")}>{manualSaving ? "Guardando…" : "Emitir factura"}</Button></div>
   </div>
 </Modal>
+
 
 <Modal open={previewOpen} title={previewInvoice ? `Vista previa · ${previewInvoice.series}-${previewInvoice.number}` : "Vista previa de factura"} size="xl" onclose={() => (previewOpen = false)}>
   {#if previewInvoice}

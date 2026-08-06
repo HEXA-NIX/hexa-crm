@@ -2622,6 +2622,26 @@ export const postgresApi = {
   async issueInvoice(input: InvoiceInput, token: string | null): Promise<Invoice> {
     const user = await requireSession(token);
     const companyId = await resolveActiveCompanyId(token, user.id);
+    if (input.draft_id) {
+      const draftRows = await sql`SELECT * FROM invoices WHERE id=${input.draft_id} AND company_id=${companyId}`;
+      if (!draftRows.length) throw new Error("Borrador no encontrado");
+      const draft = formatInvoice(draftRows[0]);
+      if (draft.status !== "draft") throw new Error("Solo se pueden modificar facturas en borrador");
+      if (!input.lines?.length) throw new Error("La factura debe tener al menos una línea");
+      const [companyRows, customerRows, profileRows] = await Promise.all([
+        sql`SELECT * FROM companies WHERE id=${companyId}`,
+        input.customer_id ? sql`SELECT * FROM customers WHERE id=${input.customer_id} AND company_id=${companyId}` : Promise.resolve([]),
+        sql`SELECT * FROM fiscal_profiles WHERE company_id=${companyId}`,
+      ]);
+      const company = companyRows[0];
+      if (!company) throw new Error("Empresa no encontrada");
+      const customer = customerRows[0] ? { id: customerRows[0].id, company_id: companyId, name: customerRows[0].name, email: customerRows[0].email ?? "", phone: customerRows[0].phone ?? "", nif: customerRows[0].nif ?? "", notes: customerRows[0].notes ?? "", created_at: toIso(customerRows[0].created_at) } : (input.customer_name || input.customer_nif || input.customer_email ? { id: 0, company_id: companyId, name: input.customer_name?.trim() || "Cliente contado", email: input.customer_email?.trim() || "", phone: "", nif: input.customer_nif?.trim() || "", notes: "", created_at: new Date().toISOString() } : null);
+      const invoice = buildManualInvoice({ id: draft.id, company: { id: company.id, code: company.code, legal_name: company.legal_name, trade_name: company.trade_name, nif: company.nif, kind: company.kind, active: company.active, created_at: toIso(company.created_at) }, customer, lines: input.lines, invoice: { ...input, status: input.status ?? "issued" }, created_by: draft.created_by, number: draft.number, issued_at: (input.status ?? "issued") === "issued" ? new Date().toISOString() : draft.issued_at, profile: profileRows[0] ? formatFiscalProfile(profileRows[0]) : null });
+      const rows = await sql`UPDATE invoices SET kind=${invoice.kind},status=${invoice.status},issued_at=${invoice.issued_at},operation_date=${invoice.operation_date},due_at=${invoice.due_at},customer_id=${invoice.customer_id},customer_name=${invoice.customer_name},customer_nif=${invoice.customer_nif},customer_email=${invoice.customer_email},lines=${sql.json(invoice.lines as any)},base_cents=${invoice.base_cents},vat_cents=${invoice.vat_cents},irpf_rate=${invoice.irpf_rate},irpf_cents=${invoice.irpf_cents},total_cents=${invoice.total_cents},notes=${invoice.notes},updated_at=NOW() WHERE id=${draft.id} AND company_id=${companyId} RETURNING *`;
+      const saved = formatInvoice(rows[0]);
+      if (saved.status === "issued") await this.appendVerifactuRecord(saved, profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "alta");
+      return saved;
+    }
     if (input.rectifies_invoice_id) {
       const baseRows = await sql`SELECT * FROM invoices WHERE id=${input.rectifies_invoice_id} AND company_id=${companyId}`;
       if (!baseRows.length) throw new Error("Factura original no encontrada");
@@ -2637,7 +2657,7 @@ export const postgresApi = {
       const rows = await sql`INSERT INTO invoices (company_id,sale_id,series,number,kind,status,issued_at,operation_date,due_at,seller_legal_name,seller_nif,seller_trade_name,customer_id,customer_name,customer_nif,customer_email,lines,base_cents,vat_cents,irpf_rate,irpf_cents,total_cents,paid_cents,payment_status,notes,created_by) VALUES (${companyId},${invoice.sale_id},${invoice.series},${invoice.number},${invoice.kind},${invoice.status},${invoice.issued_at},${invoice.operation_date},${invoice.due_at},${invoice.seller_legal_name},${invoice.seller_nif},${invoice.seller_trade_name},${invoice.customer_id},${invoice.customer_name},${invoice.customer_nif},${invoice.customer_email},${sql.json(invoice.lines as any)},${invoice.base_cents},${invoice.vat_cents},${invoice.irpf_rate},${invoice.irpf_cents},${invoice.total_cents},0,'pending',${invoice.notes},${user.id}) RETURNING *`;
       const saved = formatInvoice(rows[0]);
       const profileRows = await sql`SELECT * FROM fiscal_profiles WHERE company_id=${companyId}`;
-      await this.appendVerifactuRecord(saved, profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "alta");
+      if (saved.status === "issued") await this.appendVerifactuRecord(saved, profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "alta");
       return saved;
     }
     if (!input.sale_id && input.lines?.length) {
@@ -2657,7 +2677,7 @@ export const postgresApi = {
       const invoice = buildManualInvoice({ id: 0, company: { id: company.id, code: company.code, legal_name: company.legal_name, trade_name: company.trade_name, nif: company.nif, kind: company.kind, active: company.active, created_at: toIso(company.created_at) }, customer, lines: input.lines, invoice: input, created_by: user.id, number, issued_at: issuedAt, profile: profileRows[0] ? formatFiscalProfile(profileRows[0]) : null });
       const rows = await sql`INSERT INTO invoices (company_id,sale_id,series,number,kind,status,issued_at,operation_date,due_at,seller_legal_name,seller_nif,seller_trade_name,customer_id,customer_name,customer_nif,customer_email,lines,base_cents,vat_cents,irpf_rate,irpf_cents,total_cents,paid_cents,payment_status,notes,created_by) VALUES (${companyId},NULL,${invoice.series},${invoice.number},${invoice.kind},${invoice.status},${invoice.issued_at},${invoice.operation_date},${invoice.due_at},${invoice.seller_legal_name},${invoice.seller_nif},${invoice.seller_trade_name},${invoice.customer_id},${invoice.customer_name},${invoice.customer_nif},${invoice.customer_email},${sql.json(invoice.lines as any)},${invoice.base_cents},${invoice.vat_cents},${invoice.irpf_rate},${invoice.irpf_cents},${invoice.total_cents},0,'pending',${invoice.notes},${user.id}) RETURNING *`;
       const saved = formatInvoice(rows[0]);
-      await this.appendVerifactuRecord(saved, profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "alta");
+      if (saved.status === "issued") await this.appendVerifactuRecord(saved, profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "alta");
       return saved;
     }
     if (!input.sale_id) throw new Error("La venta o las líneas de la factura son obligatorias");
@@ -2685,17 +2705,19 @@ export const postgresApi = {
     });
     const rows = await sql`INSERT INTO invoices (company_id,sale_id,series,number,kind,status,issued_at,operation_date,due_at,seller_legal_name,seller_nif,seller_trade_name,customer_id,customer_name,customer_nif,customer_email,lines,base_cents,vat_cents,irpf_rate,irpf_cents,total_cents,paid_cents,payment_status,notes,created_by) VALUES (${companyId},${invoice.sale_id},${invoice.series},${invoice.number},${invoice.kind},${invoice.status},${invoice.issued_at},${invoice.operation_date},${invoice.due_at},${invoice.seller_legal_name},${invoice.seller_nif},${invoice.seller_trade_name},${invoice.customer_id},${invoice.customer_name},${invoice.customer_nif},${invoice.customer_email},${sql.json(invoice.lines as any)},${invoice.base_cents},${invoice.vat_cents},${invoice.irpf_rate},${invoice.irpf_cents},${invoice.total_cents},0,'pending',${invoice.notes},${user.id}) RETURNING *`;
     const saved = formatInvoice(rows[0]);
-    await this.appendVerifactuRecord(saved, profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "alta");
+    if (saved.status === "issued") await this.appendVerifactuRecord(saved, profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "alta");
     return saved;
   },
 
   async cancelInvoice(id: number, token: string | null): Promise<Invoice> {
     const user = await requireSession(token);
     const companyId = await resolveActiveCompanyId(token, user.id);
+    const existing = await sql`SELECT status FROM invoices WHERE id=${id} AND company_id=${companyId}`;
+    if (!existing.length) throw new Error("Factura no encontrada");
     const rows = await sql`UPDATE invoices SET status='cancelled', updated_at=NOW() WHERE id=${id} AND company_id=${companyId} RETURNING *`;
     if (!rows.length) throw new Error("Factura no encontrada");
     const profileRows = await sql`SELECT * FROM fiscal_profiles WHERE company_id=${companyId}`;
-    await this.appendVerifactuRecord(formatInvoice(rows[0]), profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "anulacion");
+    if (existing[0].status === "issued") await this.appendVerifactuRecord(formatInvoice(rows[0]), profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "anulacion");
     void user;
     return formatInvoice(rows[0]);
   },

@@ -15,6 +15,8 @@
   import { showToast } from "$lib/stores/ui";
   import { buildDailyCloseReport } from "$lib/reports/daily-close";
   import { planCashReconcile, type CashReconcileResult } from "$lib/reports/cash-reconcile";
+  import SortableHeader from "$lib/components/SortableHeader.svelte";
+  import { sortedCopy, type SortDirection } from "$lib/list-sort";
 
   let movements = $state<CashMovement[]>([]);
   let balance = $state(0);
@@ -34,6 +36,19 @@
   /** Physical count for arqueo (€ string). */
   let countedStr = $state("");
   let reconcileBusy = $state(false);
+  let movementSortKey = $state<"date" | "type" | "category" | "description" | "amount">("date");
+  let movementSortDirection = $state<SortDirection>("desc");
+  const displayedMovements = $derived(sortedCopy(movements, (movement) => {
+    if (movementSortKey === "date") return movement.occurred_at;
+    if (movementSortKey === "type") return label(movement.kind);
+    if (movementSortKey === "category") return movement.category;
+    if (movementSortKey === "description") return movement.description;
+    return movement.kind === "expense" ? -movement.amount_cents : movement.amount_cents;
+  }, movementSortDirection));
+  function sortMovements(key: typeof movementSortKey) {
+    if (movementSortKey === key) movementSortDirection = movementSortDirection === "asc" ? "desc" : "asc";
+    else { movementSortKey = key; movementSortDirection = key === "date" ? "desc" : "asc"; }
+  }
 
   const categories = [
     "ventas",
@@ -332,15 +347,15 @@
             class="border-b border-white/10 text-xs uppercase text-[var(--color-muted-dim)]"
           >
             <tr>
-              <th class="px-4 py-3">Fecha</th>
-              <th class="px-4 py-3">Tipo</th>
-              <th class="px-4 py-3">Categoría</th>
-              <th class="px-4 py-3">Descripción</th>
-              <th class="px-4 py-3 text-right">Importe</th>
+              <SortableHeader label="Fecha" active={movementSortKey === "date"} direction={movementSortDirection} onclick={() => sortMovements("date")} />
+              <SortableHeader label="Tipo" active={movementSortKey === "type"} direction={movementSortDirection} onclick={() => sortMovements("type")} />
+              <SortableHeader label="Categoría" active={movementSortKey === "category"} direction={movementSortDirection} onclick={() => sortMovements("category")} />
+              <SortableHeader label="Descripción" active={movementSortKey === "description"} direction={movementSortDirection} onclick={() => sortMovements("description")} />
+              <SortableHeader label="Importe" align="right" active={movementSortKey === "amount"} direction={movementSortDirection} onclick={() => sortMovements("amount")} />
             </tr>
           </thead>
           <tbody>
-            {#each movements as m}
+            {#each displayedMovements as m}
               <tr class="border-b border-white/5 hover:bg-white/[0.03]">
                 <td class="px-4 py-3 text-[var(--color-muted)]">
                   {new Date(m.occurred_at).toLocaleString("es-ES")}

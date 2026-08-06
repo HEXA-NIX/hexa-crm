@@ -2104,6 +2104,20 @@ export const browserApi = {
     const user = requireSession(s, token);
     ensureCompanies(s);
     const cid = sessionCompanyId(s, token);
+    if (input.draft_id) {
+      const draft = s.invoices.find((item) => item.id === input.draft_id && item.company_id === cid);
+      if (!draft) throw new Error("Borrador no encontrado");
+      if (draft.status !== "draft") throw new Error("Solo se pueden modificar facturas en borrador");
+      if (!input.lines?.length) throw new Error("La factura debe tener al menos una línea");
+      const company = s.companies.find((item) => item.id === cid);
+      if (!company) throw new Error("Empresa no encontrada");
+      const customer = input.customer_id ? s.customers.find((item) => item.id === input.customer_id && (item.company_id ?? 1) === cid) ?? null : (input.customer_name || input.customer_nif || input.customer_email ? { id: 0, company_id: cid, name: input.customer_name?.trim() || "Cliente contado", email: input.customer_email?.trim() || "", phone: "", nif: input.customer_nif?.trim() || "", notes: "", created_at: now() } : null);
+      const next = buildManualInvoice({ id: draft.id, company, customer, lines: input.lines, invoice: { ...input, status: input.status ?? "issued" }, created_by: draft.created_by, number: draft.number, issued_at: (input.status ?? "issued") === "issued" ? now() : draft.issued_at, profile: s.fiscalProfiles.find((item) => item.company_id === cid) ?? null });
+      s.invoices = s.invoices.map((item) => item.id === draft.id ? next : item);
+      if (next.status === "issued") appendVerifactuRecord(s, next, "alta");
+      save(s);
+      return { ...next };
+    }
     if (input.rectifies_invoice_id) {
       const base = s.invoices.find((item) => item.id === input.rectifies_invoice_id && item.company_id === cid);
       if (!base) throw new Error("Factura original no encontrada");
@@ -2132,7 +2146,7 @@ export const browserApi = {
       s.seq.invoice += 1;
       const invoice = buildManualInvoice({ id: s.seq.invoice, company, customer, lines: input.lines, invoice: input, created_by: user.id, number: `${year}-${String(count).padStart(5, "0")}`, profile: s.fiscalProfiles.find((item) => item.company_id === cid) ?? null });
       s.invoices.push(invoice);
-      appendVerifactuRecord(s, invoice, "alta");
+      if (invoice.status === "issued") appendVerifactuRecord(s, invoice, "alta");
       save(s);
       return { ...invoice };
     }
@@ -2150,7 +2164,7 @@ export const browserApi = {
     s.seq.invoice += 1;
     const invoice = buildInvoiceFromSale({ id: s.seq.invoice, company, customer, sale, lines: s.saleLines.filter((line) => line.sale_id === sale.id), invoice: input, created_by: user.id, number: `${year}-${String(count).padStart(5, "0")}`, profile: s.fiscalProfiles.find((item) => item.company_id === cid) ?? null });
     s.invoices.push(invoice);
-    appendVerifactuRecord(s, invoice, "alta");
+    if (invoice.status === "issued") appendVerifactuRecord(s, invoice, "alta");
     save(s);
     return { ...invoice };
   },
@@ -2162,9 +2176,10 @@ export const browserApi = {
     const invoice = s.invoices.find((item) => item.id === id && item.company_id === cid);
     if (!invoice) throw new Error("Factura no encontrada");
     if (invoice.status === "cancelled") return { ...invoice };
+    const wasIssued = invoice.status === "issued";
     invoice.status = "cancelled";
     invoice.updated_at = now();
-    appendVerifactuRecord(s, invoice, "anulacion");
+    if (wasIssued) appendVerifactuRecord(s, invoice, "anulacion");
     save(s);
     return { ...invoice };
   },
