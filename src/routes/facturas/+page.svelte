@@ -30,6 +30,7 @@
   let paymentFilter = $state<"all" | "pending" | "partial" | "paid">("all");
   let customerFilter = $state("");
   let seriesFilter = $state("");
+  let datePreset = $state<"all" | "month" | "quarter" | "previous_quarter" | "year" | "previous_year" | "custom">("all");
   let fromFilter = $state("");
   let toFilter = $state("");
   let customers = $state<Customer[]>([]);
@@ -59,7 +60,23 @@
   }));
 
   function clearInvoiceFilters() {
-    invoiceSearch = ""; invoiceStatusFilter = "all"; paymentFilter = "all"; customerFilter = ""; seriesFilter = ""; fromFilter = ""; toFilter = "";
+    invoiceSearch = ""; invoiceStatusFilter = "all"; paymentFilter = "all"; customerFilter = ""; seriesFilter = ""; datePreset = "all"; fromFilter = ""; toFilter = "";
+  }
+
+  function setDatePreset(value: typeof datePreset) {
+    datePreset = value;
+    if (value === "all") { fromFilter = ""; toFilter = ""; return; }
+    if (value === "custom") return;
+    const today = new Date();
+    let from = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    let to = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    if (value === "month") { from = new Date(today.getFullYear(), today.getMonth(), 1); to = new Date(today.getFullYear(), today.getMonth() + 1, 0); }
+    if (value === "quarter") { const quarterMonth = Math.floor(today.getMonth() / 3) * 3; from = new Date(today.getFullYear(), quarterMonth, 1); to = new Date(today.getFullYear(), quarterMonth + 3, 0); }
+    if (value === "previous_quarter") { const quarterMonth = Math.floor(today.getMonth() / 3) * 3 - 3; from = new Date(today.getFullYear(), quarterMonth, 1); to = new Date(today.getFullYear(), quarterMonth + 3, 0); }
+    if (value === "year") { from = new Date(today.getFullYear(), 0, 1); to = new Date(today.getFullYear(), 11, 31); }
+    if (value === "previous_year") { from = new Date(today.getFullYear() - 1, 0, 1); to = new Date(today.getFullYear() - 1, 11, 31); }
+    const iso = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    fromFilter = iso(from); toFilter = iso(to);
   }
 
   function isOverdue(invoice: Invoice) {
@@ -190,7 +207,8 @@
       <select class="field" bind:value={paymentFilter}><option value="all">Cobro: todos</option><option value="pending">Pendientes</option><option value="partial">Parciales</option><option value="paid">Pagadas</option></select>
       <select class="field" bind:value={customerFilter}><option value="">Cliente: todos</option>{#each customers as customer}<option value={customer.id}>{customer.name}</option>{/each}</select>
       <select class="field" bind:value={seriesFilter}><option value="">Serie: todas</option>{#each invoiceSeriesOptions as invoiceSeriesOption}<option value={invoiceSeriesOption}>{invoiceSeriesOption}</option>{/each}</select>
-      <div class="flex gap-2"><input type="date" class="field min-w-0" aria-label="Desde" bind:value={fromFilter} /><input type="date" class="field min-w-0" aria-label="Hasta" bind:value={toFilter} /></div>
+      <select class="field" value={datePreset} onchange={(event) => setDatePreset(event.currentTarget.value as typeof datePreset)}><option value="all">Fecha: todas</option><option value="month">Este mes</option><option value="quarter">Trimestre actual</option><option value="previous_quarter">Trimestre anterior</option><option value="year">Este año</option><option value="previous_year">Año anterior</option><option value="custom">Personalizado</option></select>
+      <div class="flex gap-2"><input type="date" class="field min-w-0" aria-label="Desde" bind:value={fromFilter} onchange={() => (datePreset = "custom")} /><input type="date" class="field min-w-0" aria-label="Hasta" bind:value={toFilter} onchange={() => (datePreset = "custom")} /></div>
     </div>
   </Card>
 
@@ -201,7 +219,7 @@
   {#if selectedInvoice}<Card lift={false} class="mt-5 border border-emerald-400/30 p-4"><div class="flex flex-wrap items-end gap-3"><div><p class="font-semibold">Registrar cobro · {selectedInvoice.series}-{selectedInvoice.number}</p><p class="text-xs text-slate-400">Pendiente: {formatEUR(selectedInvoice.total_cents - selectedInvoice.paid_cents)}</p></div><label class="text-sm"><span class="mb-1 block text-slate-400">Importe (€)</span><input class="field w-32" type="number" min="0.01" step="0.01" bind:value={paymentAmount} /></label><label class="text-sm"><span class="mb-1 block text-slate-400">Método</span><select class="field" bind:value={paymentMethod}><option value="bank_transfer">Transferencia</option><option value="card">Tarjeta</option><option value="cash">Efectivo</option><option value="other">Otro</option></select></label><Button disabled={paying} onclick={addPayment}>{paying ? "Guardando…" : "Guardar cobro"}</Button><Button variant="ghost" onclick={() => (selectedInvoice = null)}>Cancelar</Button></div></Card>{/if}
 </section>
 
-<Modal open={manualOpen} title="Nueva factura emitida" size="xl" onclose={() => (manualOpen = false)}>
+<Modal open={manualOpen} title="Nueva factura emitida" size="full" onclose={() => (manualOpen = false)}>
   <div class="space-y-5">
     <div class="grid gap-3 sm:grid-cols-3">
       <label class="text-sm"><span class="mb-1 block text-slate-400">Tipo</span><select class="field w-full" bind:value={manualForm.kind}><option value="complete">Completa</option><option value="simplified">Simplificada</option></select></label>
