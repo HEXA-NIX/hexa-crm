@@ -14,6 +14,8 @@ import type {
   CreateUserResult,
   Customer,
   CustomerInput,
+  ExpenseDocument,
+  ExpenseDocumentInput,
   DashboardStats,
   InventoryMovement,
   InventoryMovementType,
@@ -153,6 +155,7 @@ type Store = {
   sales: Sale[];
   saleLines: NonNullable<Sale["lines"]>;
   cash: CashMovement[];
+  expenses: ExpenseDocument[];
   stockMovements: {
     id: number;
     product_id: number;
@@ -178,6 +181,7 @@ type Store = {
     sale: number;
     line: number;
     cash: number;
+    expense: number;
     stock: number;
     user: number;
     company: number;
@@ -345,6 +349,7 @@ function seed(): Store {
     sales: [],
     saleLines: [],
     cash: [],
+    expenses: [],
     stockMovements: [],
     warehouses: [],
     stockLocations: [],
@@ -364,6 +369,7 @@ function seed(): Store {
       sale: 0,
       line: 0,
       cash: 0,
+      expense: 0,
       stock: 0,
       user: 0,
       company: 2,
@@ -470,6 +476,7 @@ function load(): Store {
     else parsed.workItems = parsed.workItems.map((item) => ({ ...item, parent_id: item.parent_id ?? null }));
     if (!parsed.tenantPlugins) parsed.tenantPlugins = [];
     if (!parsed.pluginAuditLogs) parsed.pluginAuditLogs = [];
+    if (!parsed.expenses) parsed.expenses = [];
     if (!parsed.seq) {
       parsed.seq = {
         product: 0,
@@ -477,6 +484,7 @@ function load(): Store {
         sale: 0,
         line: 0,
         cash: 0,
+        expense: 0,
         stock: 0,
         user: 0,
         company: 0,
@@ -490,6 +498,7 @@ function load(): Store {
       };
     }
     if (parsed.seq.user == null) parsed.seq.user = parsed.users.length;
+    if (parsed.seq.expense == null) parsed.seq.expense = parsed.expenses.length;
     if (parsed.seq.company == null) parsed.seq.company = parsed.companies?.length ?? 0;
     if (parsed.seq.warehouse == null) parsed.seq.warehouse = parsed.warehouses.length;
     if (parsed.seq.stockLocation == null) parsed.seq.stockLocation = parsed.stockLocations.length;
@@ -1939,6 +1948,55 @@ export const browserApi = {
     );
   },
 
+  list_expense_documents(token?: string | null): ExpenseDocument[] {
+    const s = load();
+    const cid = sessionCompanyId(s, token);
+    return filterByCompanyId(s.expenses, cid).sort((a, b) => b.created_at.localeCompare(a.created_at));
+  },
+
+  upsert_expense_document(input: ExpenseDocumentInput, token?: string | null): ExpenseDocument {
+    const s = load();
+    const user = requireSession(s, token);
+    const cid = sessionCompanyId(s, token);
+    if (!input.title?.trim()) throw new Error("El título del gasto es obligatorio.");
+    if ((input.total_cents ?? 0) < 0 || (input.base_cents ?? 0) < 0 || (input.vat_cents ?? 0) < 0) throw new Error("Los importes del gasto no pueden ser negativos.");
+    const nowTs = now();
+    const existing = input.id ? s.expenses.find((item) => item.id === input.id && item.company_id === cid) : undefined;
+    const saved: ExpenseDocument = {
+      id: existing?.id ?? ++s.seq.expense, company_id: cid,
+      status: input.status ?? existing?.status ?? "review", kind: input.kind ?? existing?.kind ?? "invoice",
+      title: input.title.trim(), supplier_name: input.supplier_name ?? existing?.supplier_name ?? "",
+      supplier_tax_id: input.supplier_tax_id ?? existing?.supplier_tax_id ?? "", invoice_number: input.invoice_number ?? existing?.invoice_number ?? "",
+      issued_at: input.issued_at !== undefined ? input.issued_at : existing?.issued_at ?? null, due_at: input.due_at !== undefined ? input.due_at : existing?.due_at ?? null,
+      project_id: input.project_id !== undefined ? input.project_id : existing?.project_id ?? null, category: input.category ?? existing?.category ?? "otros",
+      base_cents: input.base_cents ?? existing?.base_cents ?? 0, vat_rate: input.vat_rate ?? existing?.vat_rate ?? 21,
+      vat_cents: input.vat_cents ?? existing?.vat_cents ?? 0, withholding_cents: input.withholding_cents ?? existing?.withholding_cents ?? 0,
+      total_cents: input.total_cents ?? existing?.total_cents ?? 0, currency: input.currency ?? existing?.currency ?? "EUR", notes: input.notes ?? existing?.notes ?? "",
+      attachments: input.attachments ?? existing?.attachments ?? [], source: input.source ?? existing?.source ?? "manual", source_phone: input.source_phone ?? existing?.source_phone ?? null,
+      ocr_confidence: input.ocr_confidence !== undefined ? input.ocr_confidence : existing?.ocr_confidence ?? null, created_by: existing?.created_by ?? user.id,
+      created_at: existing?.created_at ?? nowTs, updated_at: nowTs, approved_at: input.status === "approved" || input.status === "paid" ? (existing?.approved_at ?? nowTs) : existing?.approved_at ?? null,
+    };
+    if (existing) Object.assign(existing, saved); else s.expenses.push(saved);
+    save(s);
+    return { ...saved };
+  },
+
+  approve_expense_document(id: number, token?: string | null): ExpenseDocument {
+    const s = load();
+    const user = requireSession(s, token);
+    const cid = sessionCompanyId(s, token);
+    const expense = s.expenses.find((item) => item.id === id && item.company_id === cid);
+    if (!expense) throw new Error("Gasto no encontrado.");
+    expense.status = "approved";
+    expense.approved_at = now();
+    expense.updated_at = expense.approved_at;
+    s.seq.cash += 1;
+    s.cash.push({ id: s.seq.cash, company_id: cid, project_id: expense.project_id, kind: "expense", amount_cents: expense.total_cents, category: expense.category, description: `${expense.title}${expense.supplier_name ? ` · ${expense.supplier_name}` : ""}`, sale_id: null, occurred_at: expense.approved_at });
+    void user;
+    save(s);
+    return { ...expense };
+  },
+
   create_cash_movement(input: CashInput, token?: string | null): CashMovement {
     const s = load();
     ensureCompanies(s);
@@ -2252,12 +2310,14 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       ? payload.workProjects.map(normalizeWorkProject)
       : [];
     const workItems = Array.isArray(payload.workItems) ? payload.workItems : [];
+    const expenses = Array.isArray(payload.expenses) ? payload.expenses : [];
     const seq = {
       product: payload.seq?.product ?? 0,
       customer: payload.seq?.customer ?? 0,
       sale: payload.seq?.sale ?? 0,
       line: payload.seq?.line ?? 0,
       cash: payload.seq?.cash ?? 0,
+      expense: payload.seq?.expense ?? expenses.length,
       stock: payload.seq?.stock ?? 0,
       user: payload.seq?.user ?? 0,
       company: payload.seq?.company ?? 0,
@@ -2279,6 +2339,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       workCategories,
       workProjects,
       workItems,
+      expenses,
       seq,
       sessions: {},
     });

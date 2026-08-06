@@ -10,6 +10,8 @@ import type {
   CreateUserResult,
   Customer,
   CustomerInput,
+  ExpenseDocument,
+  ExpenseDocumentInput,
   DashboardStats,
   InventoryMovement,
   LoginResult,
@@ -158,6 +160,9 @@ async function callLocal<T>(cmd: string, args: Record<string, any>, token: strin
     case "restore_backup": return browserApi.restore_backup(args.raw, token) as Promise<T>;
     case "list_work_items": return browserApi.listWorkItems(args.filters, token) as Promise<T>;
     case "upsert_work_item": return browserApi.upsertWorkItem(args.input, token) as Promise<T>;
+    case "list_expense_documents": return browserApi.list_expense_documents(token) as T;
+    case "upsert_expense_document": return browserApi.upsert_expense_document(args.input, token) as T;
+    case "approve_expense_document": return browserApi.approve_expense_document(args.id, token) as T;
     case "archive_work_item": return browserApi.archiveWorkItem(args.id, token) as Promise<T>;
     case "list_work_projects": return browserApi.listWorkProjects(args.status_filter, token) as Promise<T>;
     case "get_work_project": return browserApi.getWorkProject(args.reference ?? args.id, token) as Promise<T>;
@@ -307,6 +312,9 @@ export const api = {
     remoteOperatorConfig ? remoteWriteUnavailable() : call<Sale>("return_sale_lines", { id, lines }),
   listCashMovements: () => remoteOperatorConfig ? remoteWriteUnavailable() : call<CashMovement[]>("list_cash_movements"),
   createCashMovement: (input: CashInput) => remoteOperatorConfig ? remoteWriteUnavailable() : call<CashMovement>("create_cash_movement", { input }),
+  listExpenseDocuments: () => call<ExpenseDocument[]>("list_expense_documents"),
+  upsertExpenseDocument: (input: ExpenseDocumentInput) => call<ExpenseDocument>("upsert_expense_document", { input }),
+  approveExpenseDocument: (id: number) => call<ExpenseDocument>("approve_expense_document", { id }),
   getCashBalance: () => remoteOperatorConfig ? remoteWriteUnavailable() : call<number>("get_cash_balance"),
   vatSummary: (from: string, to: string) => remoteOperatorConfig ? remoteWriteUnavailable() : call<VatSummary>("vat_summary", { from, to }),
   dashboardStats: () => remoteOperatorConfig ? remoteOperatorApi.dashboard(requireRemoteConfig(), getToken() ?? "") : call<DashboardStats>("dashboard_stats"),

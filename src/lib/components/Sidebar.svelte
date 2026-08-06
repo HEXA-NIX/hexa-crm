@@ -42,6 +42,7 @@
       label: "FINANZAS",
       links: [
         { href: "/caja", label: "Caja", icon: "€" },
+        { href: "/gastos", label: "Gastos y facturas", icon: "▣" },
         { href: "/impuestos", label: "Impuestos", icon: "%" },
       ],
     },

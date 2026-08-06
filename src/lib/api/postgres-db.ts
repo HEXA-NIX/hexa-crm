@@ -32,6 +32,7 @@ import type {
   CreateUserResult,
   Customer,
   CustomerInput,
+  ExpenseDocument,
   DashboardStats,
   InventoryMovement,
   LoginResult,
@@ -86,6 +87,7 @@ import { validateProjectLogo } from "../projects/project-logo";
 import { validateUserAvatar } from "../users/user-avatar";
 import { decodeBase64File, testGoogleDrive, uploadToGoogleDrive } from "../storage/google-drive";
 import { gowaDeviceId, gowaLoginQr, gowaLogout, gowaSendText, gowaStatus, normalizeWhatsAppPhone } from "../whatsapp/gowa.server";
+import { extractExpenseHints } from "../expenses/ocr";
 import {
   callStripeTool,
   listStripeTools,
@@ -387,6 +389,20 @@ export async function initDb() {
       occurred_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     );
   `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS expense_documents (
+      id SERIAL PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'review', kind TEXT NOT NULL DEFAULT 'invoice', title TEXT NOT NULL,
+      supplier_name TEXT NOT NULL DEFAULT '', supplier_tax_id TEXT NOT NULL DEFAULT '', invoice_number TEXT NOT NULL DEFAULT '',
+      issued_at DATE, due_at DATE, project_id INTEGER,
+      category TEXT NOT NULL DEFAULT 'otros', base_cents INTEGER NOT NULL DEFAULT 0, vat_rate INTEGER NOT NULL DEFAULT 21,
+      vat_cents INTEGER NOT NULL DEFAULT 0, withholding_cents INTEGER NOT NULL DEFAULT 0, total_cents INTEGER NOT NULL DEFAULT 0,
+      currency TEXT NOT NULL DEFAULT 'EUR', notes TEXT NOT NULL DEFAULT '', attachments JSONB NOT NULL DEFAULT '[]'::jsonb,
+      source TEXT NOT NULL DEFAULT 'manual', source_phone TEXT, ocr_confidence NUMERIC, created_by INTEGER NOT NULL,
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(), updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(), approved_at TIMESTAMP WITH TIME ZONE
+    );
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_expense_documents_company ON expense_documents(company_id, created_at DESC)`;
 
   await sql`
     CREATE TABLE IF NOT EXISTS settings (
@@ -1089,6 +1105,19 @@ function formatWorkItem(r: any): WorkItem {
       : null,
     assignee_name: r.assignee_name ?? null,
     assignee_avatar_data_url: r.assignee_avatar_data_url ?? null,
+  };
+}
+
+function formatExpenseDocument(r: any): ExpenseDocument {
+  return {
+    id: r.id, company_id: r.company_id, status: r.status, kind: r.kind, title: r.title,
+    supplier_name: r.supplier_name ?? "", supplier_tax_id: r.supplier_tax_id ?? "", invoice_number: r.invoice_number ?? "",
+    issued_at: toIso(r.issued_at) || null, due_at: toIso(r.due_at) || null, project_id: r.project_id ?? null,
+    category: r.category ?? "otros", base_cents: r.base_cents ?? 0, vat_rate: r.vat_rate ?? 21, vat_cents: r.vat_cents ?? 0,
+    withholding_cents: r.withholding_cents ?? 0, total_cents: r.total_cents ?? 0, currency: r.currency ?? "EUR", notes: r.notes ?? "",
+    attachments: Array.isArray(r.attachments) ? r.attachments : [], source: r.source ?? "manual", source_phone: r.source_phone ?? null,
+    ocr_confidence: r.ocr_confidence == null ? null : Number(r.ocr_confidence), created_by: r.created_by,
+    created_at: toIso(r.created_at), updated_at: toIso(r.updated_at), approved_at: toIso(r.approved_at) || null,
   };
 }
 
@@ -2441,6 +2470,58 @@ export const postgresApi = {
     }));
   },
 
+  async listExpenseDocuments(token: string | null): Promise<ExpenseDocument[]> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const rows = await sql`SELECT * FROM expense_documents WHERE company_id = ${companyId} ORDER BY created_at DESC, id DESC`;
+    return rows.map(formatExpenseDocument);
+  },
+
+  async upsertExpenseDocument(input: any, token: string | null): Promise<ExpenseDocument> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    if (!String(input.title ?? "").trim()) throw new Error("El título del gasto es obligatorio.");
+    let id = input.id ? Number(input.id) : null;
+    if (id) {
+      const existing = await sql`SELECT id FROM expense_documents WHERE id = ${id} AND company_id = ${companyId}`;
+      if (!existing.length) throw new Error("Gasto no encontrado.");
+      await sql`UPDATE expense_documents SET status=${input.status ?? "review"}, kind=${input.kind ?? "invoice"}, title=${String(input.title).trim()}, supplier_name=${input.supplier_name ?? ""}, supplier_tax_id=${input.supplier_tax_id ?? ""}, invoice_number=${input.invoice_number ?? ""}, issued_at=${input.issued_at || null}, due_at=${input.due_at || null}, project_id=${input.project_id ?? null}, category=${input.category ?? "otros"}, base_cents=${input.base_cents ?? 0}, vat_rate=${input.vat_rate ?? 21}, vat_cents=${input.vat_cents ?? 0}, withholding_cents=${input.withholding_cents ?? 0}, total_cents=${input.total_cents ?? 0}, currency=${input.currency ?? "EUR"}, notes=${input.notes ?? ""}, attachments=${sql.json(input.attachments ?? [])}, source=${input.source ?? "manual"}, source_phone=${input.source_phone ?? null}, ocr_confidence=${input.ocr_confidence ?? null}, updated_at=NOW() WHERE id=${id} AND company_id=${companyId}`;
+    } else {
+      const result = await sql`INSERT INTO expense_documents (company_id,status,kind,title,supplier_name,supplier_tax_id,invoice_number,issued_at,due_at,project_id,category,base_cents,vat_rate,vat_cents,withholding_cents,total_cents,currency,notes,attachments,source,source_phone,ocr_confidence,created_by) VALUES (${companyId},${input.status ?? "review"},${input.kind ?? "invoice"},${String(input.title).trim()},${input.supplier_name ?? ""},${input.supplier_tax_id ?? ""},${input.invoice_number ?? ""},${input.issued_at || null},${input.due_at || null},${input.project_id ?? null},${input.category ?? "otros"},${input.base_cents ?? 0},${input.vat_rate ?? 21},${input.vat_cents ?? 0},${input.withholding_cents ?? 0},${input.total_cents ?? 0},${input.currency ?? "EUR"},${input.notes ?? ""},${sql.json(input.attachments ?? [])},${input.source ?? "manual"},${input.source_phone ?? null},${input.ocr_confidence ?? null},${user.id}) RETURNING id`;
+      id = result[0].id;
+    }
+    const rows = await sql`SELECT * FROM expense_documents WHERE id=${id} AND company_id=${companyId}`;
+    return formatExpenseDocument(rows[0]);
+  },
+
+  async approveExpenseDocument(id: number, token: string | null): Promise<ExpenseDocument> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const current = await sql`SELECT * FROM expense_documents WHERE id=${id} AND company_id=${companyId}`;
+    if (!current.length) throw new Error("Gasto no encontrado.");
+    if (current[0].status === "approved" || current[0].status === "paid") return formatExpenseDocument(current[0]);
+    const rows = await sql`UPDATE expense_documents SET status='approved', approved_at=NOW(), updated_at=NOW() WHERE id=${id} AND company_id=${companyId} RETURNING *`;
+    if (!rows.length) throw new Error("Gasto no encontrado.");
+    const expense = formatExpenseDocument(rows[0]);
+    await sql`INSERT INTO cash_movements (company_id,project_id,kind,amount_cents,category,description,occurred_at) VALUES (${companyId},${expense.project_id},'expense',${expense.total_cents},${expense.category},${expense.title},COALESCE(${expense.issued_at}::timestamptz,NOW()))`;
+    return expense;
+  },
+
+  async ingestWhatsAppExpense(deviceId: string, payload: any): Promise<ExpenseDocument> {
+    const match = /^hexa-(\d+)-(\d+)$/.exec(deviceId);
+    if (!match) throw new Error("Dispositivo de WhatsApp no asociado a una empresa.");
+    const companyId = Number(match[1]);
+    const userId = Number(match[2]);
+    const users = await sql`SELECT id FROM users WHERE id=${userId} AND company_id=${companyId} LIMIT 1`;
+    if (!users.length) throw new Error("Dispositivo de WhatsApp no asociado a un usuario válido.");
+    const body = String(payload.body ?? payload.caption ?? "");
+    const hints = extractExpenseHints(body);
+    const media = payload.image ?? payload.document ?? payload.media;
+    const attachment = media ? [{ id: `wa-${Date.now()}`, name: typeof media === "string" ? media.split("/").pop() || "whatsapp-documento" : "whatsapp-documento", mime_type: String(payload.mimetype ?? "application/octet-stream"), size: 0, href: typeof media === "string" ? media : undefined }] : [];
+    const result = await sql`INSERT INTO expense_documents (company_id,status,kind,title,notes,attachments,source,source_phone,ocr_confidence,total_cents,issued_at,created_by) VALUES (${companyId},'review','invoice',${hints.title ?? "Factura recibida por WhatsApp"},${hints.notes ?? ""},${sql.json(attachment as any)},'whatsapp',${String(payload.from ?? payload.chat_id ?? "")},${hints.ocr_confidence ?? null},${hints.total_cents ?? 0},${hints.issued_at ?? null},${userId}) RETURNING *`;
+    return formatExpenseDocument(result[0]);
+  },
+
   async create_cash_movement(input: CashInput, token: string | null): Promise<CashMovement> {
     const user = await requireSession(token);
     const companyId = await resolveActiveCompanyId(token, user.id);
@@ -3703,6 +3784,10 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   list_work_items(filters?: WorkItemFilters, token?: string | null) { return this.listWorkItems(filters, token); },
   upsert_work_item(input: WorkItemInput, token?: string | null) { return this.upsertWorkItem(input, token); },
   archive_work_item(id: number, token?: string | null) { return this.archiveWorkItem(id, token); },
+  list_expense_documents(token?: string | null) { return this.listExpenseDocuments(token ?? null); },
+  upsert_expense_document(input: any, token?: string | null) { return this.upsertExpenseDocument(input, token ?? null); },
+  approve_expense_document(id: number, token?: string | null) { return this.approveExpenseDocument(id, token ?? null); },
+  ingest_whatsapp_expense(deviceId: string, payload: any) { return this.ingestWhatsAppExpense(deviceId, payload); },
   capture_dashboard_alert(input: any, token?: string | null) { return this.captureDashboardAlert(input, token); },
 
   async list_warehouses(token?: string | null): Promise<Warehouse[]> {

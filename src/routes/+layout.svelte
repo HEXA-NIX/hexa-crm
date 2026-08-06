@@ -74,6 +74,10 @@
       title: "Caja y presupuesto",
       subtitle: "Saldo, ingresos y gastos",
     },
+    "/gastos": {
+      title: "Gastos y facturas",
+      subtitle: "Facturas recibidas, adjuntos y revisión de gastos",
+    },
     "/clientes": {
       title: "Clientes",
       subtitle: "Relaciones y datos de contacto",

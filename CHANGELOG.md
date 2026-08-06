@@ -9,6 +9,11 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+### Added
+
+- Primera base de la bandeja de gastos y facturas recibidas: adjuntos PDF/imagen, revisión, proyecto asociado y aprobación que genera el movimiento de Caja.
+- Webhook firmado de WhatsApp para convertir mensajes con documentos en borradores de gastos por empresa y usuario.
+
 ### Fixed
 
 - La página Trabajo selecciona inicialmente al usuario conectado en el filtro de responsable, sin impedir cambiar después a otro usuario o a todos.

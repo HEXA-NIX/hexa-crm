@@ -184,6 +184,47 @@ export type CashInput = {
   occurred_at?: string | null;
 };
 
+export type ExpenseStatus = "draft" | "review" | "approved" | "paid" | "rejected";
+export type ExpenseSource = "manual" | "whatsapp" | "upload";
+export type ExpenseAttachment = {
+  id: string;
+  name: string;
+  mime_type: string;
+  size: number;
+  data_url?: string;
+  href?: string;
+};
+export type ExpenseDocument = {
+  id: number;
+  company_id: number;
+  status: ExpenseStatus;
+  kind: "ticket" | "invoice" | "simplified_invoice" | "credit_note" | "receipt";
+  title: string;
+  supplier_name: string;
+  supplier_tax_id: string;
+  invoice_number: string;
+  issued_at: string | null;
+  due_at: string | null;
+  project_id: number | null;
+  category: string;
+  base_cents: number;
+  vat_rate: VatRate;
+  vat_cents: number;
+  withholding_cents: number;
+  total_cents: number;
+  currency: string;
+  notes: string;
+  attachments: ExpenseAttachment[];
+  source: ExpenseSource;
+  source_phone: string | null;
+  ocr_confidence: number | null;
+  created_by: number;
+  created_at: string;
+  updated_at: string;
+  approved_at: string | null;
+};
+export type ExpenseDocumentInput = Partial<Omit<ExpenseDocument, "id" | "company_id" | "created_by" | "created_at" | "updated_at">> & { id?: number | null };
+
 export type VatBucket = {
   vat_rate: VatRate;
   base_cents: number;
