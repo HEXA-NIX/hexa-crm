@@ -315,12 +315,12 @@ export const api = {
   listExpenseDocuments: () => call<ExpenseDocument[]>("list_expense_documents"),
   upsertExpenseDocument: (input: ExpenseDocumentInput) => call<ExpenseDocument>("upsert_expense_document", { input }),
   approveExpenseDocument: (id: number) => call<ExpenseDocument>("approve_expense_document", { id }),
-  syncWhatsAppExpense: async () => {
+  syncWhatsAppExpense: async (kind: ExpenseDocument["kind"] = "invoice") => {
     if (WEB_DATA_MODE === "local" && !isTauri()) {
-      const input = await localWhatsApp<ExpenseDocumentInput & { status?: ExpenseDocument["status"] }>("sync_expense");
+      const input = await localWhatsApp<ExpenseDocumentInput & { status?: ExpenseDocument["status"] }>("sync_expense", { kind });
       return browserApi.upsert_expense_document(input, getToken());
     }
-    return call<ExpenseDocument>("sync_whatsapp_expense");
+    return call<ExpenseDocument>("sync_whatsapp_expense", { kind });
   },
   getCashBalance: () => remoteOperatorConfig ? remoteWriteUnavailable() : call<number>("get_cash_balance"),
   vatSummary: (from: string, to: string) => remoteOperatorConfig ? remoteWriteUnavailable() : call<VatSummary>("vat_summary", { from, to }),

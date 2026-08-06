@@ -17,6 +17,8 @@
   let modalOpen = $state(false);
   let saving = $state(false);
   let syncingWhatsApp = $state(false);
+  let syncKindOpen = $state(false);
+  let syncKind = $state<ExpenseDocument["kind"]>("invoice");
   let dropActive = $state(false);
   let fileInput = $state<HTMLInputElement | null>(null);
   let editing = $state<ExpenseDocument | null>(null);
@@ -33,7 +35,8 @@
   async function selectFile(file?: File) { if (!file) return; if (file.size > 20 * 1024 * 1024) { showToast("El archivo supera el límite de 20 MB", "err"); return; } if (!file.type.startsWith("image/") && file.type !== "application/pdf") { showToast("Solo se admiten imágenes o PDF", "err"); return; } attachment = { id: crypto.randomUUID(), name: file.name, mime_type: file.type || "application/octet-stream", size: file.size, data_url: await readFile(file) }; if (!form.title) form.title = file.name.replace(/\.[^.]+$/, ""); }
   async function save() { if (!form.title.trim() || saving) return; saving = true; try { await api.upsertExpenseDocument({ id: editing?.id, title: form.title.trim(), supplier_name: form.supplier_name, supplier_tax_id: form.supplier_tax_id, invoice_number: form.invoice_number, issued_at: form.issued_at || null, category: form.category, base_cents: Math.round(Number(form.base || 0) * 100), vat_cents: Math.round(Number(form.vat || 0) * 100), total_cents: Math.round(Number(form.total || 0) * 100), project_id: form.project_id ? Number(form.project_id) : null, kind: form.kind, notes: form.notes, attachments: attachment ? [attachment] : [], source: "upload" }); modalOpen = false; showToast("Factura guardada para revisión"); await load(); } catch (error) { showToast(error instanceof Error ? error.message : "No se pudo guardar la factura", "err"); } finally { saving = false; } }
   async function approve(item: ExpenseDocument) { try { await api.approveExpenseDocument(item.id); showToast("Gasto aprobado y añadido a Caja"); await load(); } catch (error) { showToast(error instanceof Error ? error.message : "No se pudo aprobar el gasto", "err"); } }
-  async function syncWhatsApp() { if (syncingWhatsApp) return; syncingWhatsApp = true; try { await api.syncWhatsAppExpense(); showToast("Factura leída desde WhatsApp y añadida a revisión"); await load(); } catch (error) { showToast(error instanceof Error ? error.message : "No se pudo leer WhatsApp", "err"); } finally { syncingWhatsApp = false; } }
+  async function syncWhatsApp() { if (syncingWhatsApp) return; syncKindOpen = true; }
+  async function confirmSyncWhatsApp() { syncKindOpen = false; syncingWhatsApp = true; try { await api.syncWhatsAppExpense(syncKind); showToast("Documento leído desde WhatsApp y añadido a revisión"); await load(); } catch (error) { showToast(error instanceof Error ? error.message : "No se pudo leer WhatsApp", "err"); } finally { syncingWhatsApp = false; } }
   function statusTone(status: ExpenseDocument["status"]): "neutral" | "ok" | "warn" | "danger" { return status === "approved" || status === "paid" ? "ok" : status === "rejected" ? "danger" : status === "review" ? "warn" : "neutral"; }
 </script>
 
@@ -52,4 +55,12 @@
     <label class="block text-sm"><span class="mb-1 block text-[var(--color-muted)]">Notas</span><textarea class="field min-h-20 w-full" bind:value={form.notes} placeholder="Contexto, pago, proyecto…"></textarea></label>
     <div class="flex justify-end gap-2 border-t border-[var(--color-border)] pt-4"><Button type="button" variant="ghost" onclick={() => (modalOpen = false)}>Cancelar</Button><Button type="submit" disabled={saving}>{saving ? "Guardando…" : "Guardar para revisión"}</Button></div>
   </form>
+</Modal>
+
+<Modal open={syncKindOpen} title="¿Qué documento has enviado?" size="sm" onclose={() => !syncingWhatsApp && (syncKindOpen = false)}>
+  <div class="space-y-3">
+    <p class="text-sm text-[var(--color-muted)]">Elegir el tipo antes de leer la imagen ayuda a interpretar correctamente el documento.</p>
+    <Select label="Tipo de documento" options={kindOptions} bind:value={syncKind} />
+    <div class="flex justify-end gap-2 border-t border-[var(--color-border)] pt-4"><Button variant="ghost" onclick={() => (syncKindOpen = false)}>Cancelar</Button><Button variant="primary" onclick={confirmSyncWhatsApp}>Leer imagen</Button></div>
+  </div>
 </Modal>

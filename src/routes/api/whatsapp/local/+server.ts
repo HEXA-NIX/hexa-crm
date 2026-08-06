@@ -34,7 +34,7 @@ export const POST: RequestHandler = async ({ request }) => {
       return json({
         id: undefined,
         status: "review",
-        kind: "invoice",
+        kind: ["ticket", "invoice", "simplified_invoice", "credit_note", "receipt"].includes(String(input.kind)) ? String(input.kind) : "invoice",
         title: hints.title || latest.media.name,
         supplier_name: hints.supplier_name || "",
         supplier_tax_id: hints.supplier_tax_id || "",
