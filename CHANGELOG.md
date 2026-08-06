@@ -17,6 +17,7 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 - Primera fase fiscal: perfil fiscal por empresa, IVA repercutido y soportado, retenciones y borrador revisable del modelo 303 con exportación CSV. No realiza presentación ante la AEAT.
 - Facturación emitida separada de las facturas recibidas: series y numeración por empresa, conversión de ventas a factura o simplificada, IVA/IRPF, estados de emisión/anulación e impresión del documento.
 - El ciclo de factura incorpora fecha de operación y vencimiento, cobros parciales por método, estado pendiente/parcial/pagada y emisión de rectificativas/abonos vinculados.
+- Las facturas recibidas admiten pagos parciales por método, estados pendiente/parcial/pagada y un movimiento de Caja por cada pago registrado.
 
 ### Fixed
 

@@ -16,6 +16,8 @@ import type {
   CustomerInput,
   ExpenseDocument,
   ExpenseDocumentInput,
+  ExpensePayment,
+  ExpensePaymentInput,
   FiscalProfile,
   Invoice,
   InvoiceInput,
@@ -166,6 +168,7 @@ type Store = {
   expenses: ExpenseDocument[];
   invoices: Invoice[];
   invoicePayments: InvoicePayment[];
+  expensePayments: ExpensePayment[];
   fiscalProfiles: FiscalProfile[];
   stockMovements: {
     id: number;
@@ -195,6 +198,7 @@ type Store = {
     expense: number;
     invoice: number;
     invoicePayment: number;
+    expensePayment: number;
     stock: number;
     user: number;
     company: number;
@@ -365,6 +369,7 @@ function seed(): Store {
     expenses: [],
     invoices: [],
     invoicePayments: [],
+    expensePayments: [],
     fiscalProfiles: [],
     stockMovements: [],
     warehouses: [],
@@ -388,6 +393,7 @@ function seed(): Store {
       expense: 0,
       invoice: 0,
       invoicePayment: 0,
+      expensePayment: 0,
       stock: 0,
       user: 0,
       company: 2,
@@ -452,6 +458,8 @@ function load(): Store {
     if (!memoryStore.fiscalProfiles) memoryStore.fiscalProfiles = [];
     if (!memoryStore.invoices) memoryStore.invoices = [];
     if (!memoryStore.invoicePayments) memoryStore.invoicePayments = [];
+    if (!memoryStore.expensePayments) memoryStore.expensePayments = [];
+    if (memoryStore.seq.expensePayment == null) memoryStore.seq.expensePayment = memoryStore.expensePayments.length;
     if (memoryStore.seq.invoicePayment == null) memoryStore.seq.invoicePayment = memoryStore.invoicePayments.length;
     if (memoryStore.seq.warehouse == null) memoryStore.seq.warehouse = 0;
     if (memoryStore.seq.stockLocation == null) memoryStore.seq.stockLocation = 0;
@@ -503,6 +511,7 @@ function load(): Store {
     if (!parsed.fiscalProfiles) parsed.fiscalProfiles = [];
     if (!parsed.invoices) parsed.invoices = [];
     if (!parsed.invoicePayments) parsed.invoicePayments = [];
+    if (!parsed.expensePayments) parsed.expensePayments = [];
     if (!parsed.seq) {
       parsed.seq = {
         product: 0,
@@ -513,6 +522,7 @@ function load(): Store {
         expense: 0,
         invoice: 0,
         invoicePayment: 0,
+        expensePayment: 0,
         stock: 0,
         user: 0,
         company: 0,
@@ -529,6 +539,7 @@ function load(): Store {
     if (parsed.seq.expense == null) parsed.seq.expense = parsed.expenses.length;
     if (parsed.seq.invoice == null) parsed.seq.invoice = parsed.invoices.length;
     if (parsed.seq.invoicePayment == null) parsed.seq.invoicePayment = parsed.invoicePayments.length;
+    if (parsed.seq.expensePayment == null) parsed.seq.expensePayment = parsed.expensePayments.length;
     if (parsed.seq.company == null) parsed.seq.company = parsed.companies?.length ?? 0;
     if (parsed.seq.warehouse == null) parsed.seq.warehouse = parsed.warehouses.length;
     if (parsed.seq.stockLocation == null) parsed.seq.stockLocation = parsed.stockLocations.length;
@@ -2001,7 +2012,7 @@ export const browserApi = {
       project_id: input.project_id !== undefined ? input.project_id : existing?.project_id ?? null, category: input.category ?? existing?.category ?? "otros",
       base_cents: input.base_cents ?? existing?.base_cents ?? 0, vat_rate: input.vat_rate ?? existing?.vat_rate ?? 21,
       vat_cents: input.vat_cents ?? existing?.vat_cents ?? 0, withholding_cents: input.withholding_cents ?? existing?.withholding_cents ?? 0,
-      total_cents: input.total_cents ?? existing?.total_cents ?? 0, currency: input.currency ?? existing?.currency ?? "EUR", notes: input.notes ?? existing?.notes ?? "",
+      total_cents: input.total_cents ?? existing?.total_cents ?? 0, paid_cents: existing?.paid_cents ?? 0, payment_status: existing?.payment_status ?? "pending", currency: input.currency ?? existing?.currency ?? "EUR", notes: input.notes ?? existing?.notes ?? "",
       attachments: input.attachments ?? existing?.attachments ?? [], source: input.source ?? existing?.source ?? "manual", source_phone: input.source_phone ?? existing?.source_phone ?? null,
       ocr_confidence: input.ocr_confidence !== undefined ? input.ocr_confidence : existing?.ocr_confidence ?? null, created_by: existing?.created_by ?? user.id,
       created_at: existing?.created_at ?? nowTs, updated_at: nowTs, approved_at: input.status === "approved" || input.status === "paid" ? (existing?.approved_at ?? nowTs) : existing?.approved_at ?? null,
@@ -2025,6 +2036,37 @@ export const browserApi = {
     void user;
     save(s);
     return { ...expense };
+  },
+
+  list_expense_payments(expenseId: number, token?: string | null): ExpensePayment[] {
+    const s = load();
+    const cid = sessionCompanyId(s, token);
+    return s.expensePayments.filter((payment) => payment.expense_id === expenseId && payment.company_id === cid).sort((a, b) => b.paid_at.localeCompare(a.paid_at));
+  },
+
+  add_expense_payment(input: ExpensePaymentInput, token?: string | null): ExpensePayment {
+    const s = load();
+    const user = requireSession(s, token);
+    const cid = sessionCompanyId(s, token);
+    const expense = s.expenses.find((item) => item.id === input.expense_id && item.company_id === cid);
+    if (!expense) throw new Error("Factura recibida no encontrada");
+    if (expense.status === "rejected") throw new Error("No se puede pagar un documento rechazado");
+    const amount = Math.round(Number(input.amount_cents));
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error("El importe debe ser mayor que cero");
+    const paid = expense.paid_cents ?? 0;
+    if (amount > expense.total_cents - paid) throw new Error("El pago supera el importe pendiente");
+    s.seq.expensePayment += 1;
+    const paid_at = input.paid_at || now();
+    const payment: ExpensePayment = { id: s.seq.expensePayment, expense_id: expense.id, company_id: cid, amount_cents: amount, paid_at, method: input.method ?? "bank_transfer", notes: input.notes?.trim() ?? "", created_by: user.id };
+    s.expensePayments.push(payment);
+    expense.paid_cents = paid + amount;
+    expense.payment_status = expense.paid_cents >= expense.total_cents ? "paid" : "partial";
+    if (expense.payment_status === "paid") expense.status = "paid";
+    expense.updated_at = now();
+    s.seq.cash += 1;
+    s.cash.push({ id: s.seq.cash, company_id: cid, project_id: expense.project_id, kind: "expense", amount_cents: amount, category: "pago_factura_recibida", description: `Pago ${expense.title}`, sale_id: null, occurred_at: paid_at });
+    save(s);
+    return payment;
   },
 
   list_invoices(token?: string | null): Invoice[] {
@@ -2481,6 +2523,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     const expenses = Array.isArray(payload.expenses) ? payload.expenses : [];
     const invoices = Array.isArray(payload.invoices) ? payload.invoices : [];
     const invoicePayments = Array.isArray(payload.invoicePayments) ? payload.invoicePayments : [];
+    const expensePayments = Array.isArray(payload.expensePayments) ? payload.expensePayments : [];
     const seq = {
       product: payload.seq?.product ?? 0,
       customer: payload.seq?.customer ?? 0,
@@ -2490,6 +2533,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       expense: payload.seq?.expense ?? expenses.length,
       invoice: payload.seq?.invoice ?? invoices.length,
       invoicePayment: payload.seq?.invoicePayment ?? invoicePayments.length,
+      expensePayment: payload.seq?.expensePayment ?? expensePayments.length,
       stock: payload.seq?.stock ?? 0,
       user: payload.seq?.user ?? 0,
       company: payload.seq?.company ?? 0,
@@ -2514,6 +2558,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       expenses,
       invoices,
       invoicePayments,
+      expensePayments,
       seq,
       sessions: {},
     });

@@ -38,6 +38,8 @@ import type {
   InvoiceInput,
   InvoicePayment,
   InvoicePaymentInput,
+  ExpensePayment,
+  ExpensePaymentInput,
   Model303Draft,
   DashboardStats,
   InventoryMovement,
@@ -418,7 +420,7 @@ export async function initDb() {
       category TEXT NOT NULL DEFAULT 'otros', base_cents INTEGER NOT NULL DEFAULT 0, vat_rate INTEGER NOT NULL DEFAULT 21,
       vat_cents INTEGER NOT NULL DEFAULT 0, withholding_cents INTEGER NOT NULL DEFAULT 0, total_cents INTEGER NOT NULL DEFAULT 0,
       currency TEXT NOT NULL DEFAULT 'EUR', notes TEXT NOT NULL DEFAULT '', attachments JSONB NOT NULL DEFAULT '[]'::jsonb,
-      source TEXT NOT NULL DEFAULT 'manual', source_phone TEXT, ocr_confidence NUMERIC, created_by INTEGER NOT NULL,
+      paid_cents INTEGER NOT NULL DEFAULT 0, payment_status TEXT NOT NULL DEFAULT 'pending', source TEXT NOT NULL DEFAULT 'manual', source_phone TEXT, ocr_confidence NUMERIC, created_by INTEGER NOT NULL,
       created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(), updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(), approved_at TIMESTAMP WITH TIME ZONE
     );
   `;
@@ -426,6 +428,16 @@ export async function initDb() {
   await sql`ALTER TABLE expense_documents ADD COLUMN IF NOT EXISTS accounting_date DATE`;
   await sql`ALTER TABLE expense_documents ADD COLUMN IF NOT EXISTS deductible BOOLEAN NOT NULL DEFAULT TRUE`;
   await sql`ALTER TABLE expense_documents ADD COLUMN IF NOT EXISTS deduction_period TEXT`;
+  await sql`ALTER TABLE expense_documents ADD COLUMN IF NOT EXISTS paid_cents INTEGER NOT NULL DEFAULT 0`;
+  await sql`ALTER TABLE expense_documents ADD COLUMN IF NOT EXISTS payment_status TEXT NOT NULL DEFAULT 'pending'`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS expense_payments (
+      id SERIAL PRIMARY KEY, expense_id INTEGER NOT NULL REFERENCES expense_documents(id) ON DELETE CASCADE,
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE, amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+      paid_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(), method TEXT NOT NULL DEFAULT 'bank_transfer', notes TEXT NOT NULL DEFAULT '', created_by INTEGER NOT NULL
+    );
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_expense_payments_expense ON expense_payments(expense_id, paid_at DESC)`;
   await sql`
     CREATE TABLE IF NOT EXISTS invoices (
       id SERIAL PRIMARY KEY,
@@ -1175,7 +1187,7 @@ function formatExpenseDocument(r: any): ExpenseDocument {
     supplier_name: r.supplier_name ?? "", supplier_tax_id: r.supplier_tax_id ?? "", invoice_number: r.invoice_number ?? "",
     issued_at: toIso(r.issued_at) || null, accounting_date: toIso(r.accounting_date) || null, deductible: r.deductible !== false, deduction_period: r.deduction_period ?? null, due_at: toIso(r.due_at) || null, project_id: r.project_id ?? null,
     category: r.category ?? "otros", base_cents: r.base_cents ?? 0, vat_rate: r.vat_rate ?? 21, vat_cents: r.vat_cents ?? 0,
-    withholding_cents: r.withholding_cents ?? 0, total_cents: r.total_cents ?? 0, currency: r.currency ?? "EUR", notes: r.notes ?? "",
+    withholding_cents: r.withholding_cents ?? 0, total_cents: r.total_cents ?? 0, paid_cents: Number(r.paid_cents ?? 0), payment_status: r.payment_status ?? "pending", currency: r.currency ?? "EUR", notes: r.notes ?? "",
     attachments: Array.isArray(r.attachments) ? r.attachments : [], source: r.source ?? "manual", source_phone: r.source_phone ?? null,
     ocr_confidence: r.ocr_confidence == null ? null : Number(r.ocr_confidence), created_by: r.created_by,
     created_at: toIso(r.created_at), updated_at: toIso(r.updated_at), approved_at: toIso(r.approved_at) || null,
@@ -2680,6 +2692,32 @@ export const postgresApi = {
     return expense;
   },
 
+  async listExpensePayments(expenseId: number, token: string | null): Promise<ExpensePayment[]> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const rows = await sql`SELECT * FROM expense_payments WHERE expense_id=${expenseId} AND company_id=${companyId} ORDER BY paid_at DESC, id DESC`;
+    return rows.map((row: any) => ({ id: Number(row.id), expense_id: Number(row.expense_id), company_id: Number(row.company_id), amount_cents: Number(row.amount_cents), paid_at: toIso(row.paid_at), method: row.method, notes: row.notes ?? "", created_by: Number(row.created_by) }));
+  },
+
+  async addExpensePayment(input: ExpensePaymentInput, token: string | null): Promise<ExpensePayment> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const amount = Math.round(Number(input.amount_cents));
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error("El importe debe ser mayor que cero");
+    const expenseRows = await sql`SELECT * FROM expense_documents WHERE id=${input.expense_id} AND company_id=${companyId}`;
+    if (!expenseRows.length) throw new Error("Factura recibida no encontrada");
+    const expense = formatExpenseDocument(expenseRows[0]);
+    if (expense.status === "rejected") throw new Error("No se puede pagar un documento rechazado");
+    if (amount > expense.total_cents - (expense.paid_cents ?? 0)) throw new Error("El pago supera el importe pendiente");
+    const paidAt = input.paid_at || new Date().toISOString();
+    const rows = await sql`INSERT INTO expense_payments (expense_id,company_id,amount_cents,paid_at,method,notes,created_by) VALUES (${expense.id},${companyId},${amount},${paidAt},${input.method ?? "bank_transfer"},${input.notes ?? ""},${user.id}) RETURNING *`;
+    const paidCents = (expense.paid_cents ?? 0) + amount;
+    await sql`UPDATE expense_documents SET paid_cents=${paidCents}, payment_status=${paidCents >= expense.total_cents ? "paid" : "partial"}, status=${paidCents >= expense.total_cents ? "paid" : expense.status}, updated_at=NOW() WHERE id=${expense.id} AND company_id=${companyId}`;
+    await sql`INSERT INTO cash_movements (company_id,project_id,kind,amount_cents,category,description,occurred_at) VALUES (${companyId},${expense.project_id},'expense',${amount},'pago_factura_recibida',${`Pago ${expense.title}`},${paidAt})`;
+    const row = rows[0];
+    return { id: Number(row.id), expense_id: Number(row.expense_id), company_id: Number(row.company_id), amount_cents: Number(row.amount_cents), paid_at: toIso(row.paid_at), method: row.method, notes: row.notes ?? "", created_by: Number(row.created_by) };
+  },
+
   async ingestWhatsAppExpense(deviceId: string, payload: any): Promise<ExpenseDocument> {
     const match = /^hexa-(\d+)-(\d+)$/.exec(deviceId);
     if (!match) throw new Error("Dispositivo de WhatsApp no asociado a una empresa.");
@@ -4069,6 +4107,8 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   cancel_invoice(id: number, token?: string | null) { return this.cancelInvoice(id, token ?? null); },
   list_invoice_payments(invoiceId: number, token?: string | null) { return this.listInvoicePayments(invoiceId, token ?? null); },
   add_invoice_payment(input: InvoicePaymentInput, token?: string | null) { return this.addInvoicePayment(input, token ?? null); },
+  list_expense_payments(expenseId: number, token?: string | null) { return this.listExpensePayments(expenseId, token ?? null); },
+  add_expense_payment(input: ExpensePaymentInput, token?: string | null) { return this.addExpensePayment(input, token ?? null); },
   list_fiscal_profiles(token?: string | null) { return this.listFiscalProfiles(token ?? null); },
   upsert_fiscal_profile(input: any, token?: string | null) { return this.upsertFiscalProfile(input, token ?? null); },
   model303_draft(from: string, to: string, token?: string | null) { return this.model303Draft(from, to, token ?? null); },

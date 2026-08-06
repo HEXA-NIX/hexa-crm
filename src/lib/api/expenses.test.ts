@@ -12,4 +12,19 @@ describe("expense documents", () => {
     expect(approved.status).toBe("approved");
     expect((await browserApi.list_cash_movements(token))[0].amount_cents).toBe(4835);
   });
+
+  it("registra pagos parciales, actualiza el estado y concilia cada pago en Caja", async () => {
+    const { token } = await browserApi.login("admin", "1234");
+    const expense = await browserApi.upsert_expense_document({ title: "Factura de proveedor", total_cents: 10000 }, token);
+    await browserApi.approve_expense_document(expense.id, token);
+
+    const first = await browserApi.add_expense_payment({ expense_id: expense.id, amount_cents: 4000, method: "bank_transfer" }, token);
+    expect(first.amount_cents).toBe(4000);
+    expect((await browserApi.list_expense_documents(token)).find((item) => item.id === expense.id)).toMatchObject({ paid_cents: 4000, payment_status: "partial" });
+
+    await browserApi.add_expense_payment({ expense_id: expense.id, amount_cents: 6000, method: "cash" }, token);
+    expect((await browserApi.list_expense_documents(token)).find((item) => item.id === expense.id)).toMatchObject({ paid_cents: 10000, payment_status: "paid", status: "paid" });
+    expect((await browserApi.list_expense_payments(expense.id, token))).toHaveLength(2);
+    expect((await browserApi.list_cash_movements(token)).filter((movement) => movement.category === "pago_factura_recibida")).toHaveLength(2);
+  });
 });

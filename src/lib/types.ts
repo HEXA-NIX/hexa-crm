@@ -217,6 +217,8 @@ export type ExpenseDocument = {
   vat_cents: number;
   withholding_cents: number;
   total_cents: number;
+  paid_cents?: number;
+  payment_status?: "pending" | "partial" | "paid";
   currency: string;
   notes: string;
   attachments: ExpenseAttachment[];
@@ -328,6 +330,23 @@ export type InvoicePayment = {
 };
 export type InvoicePaymentInput = {
   invoice_id: number;
+  amount_cents: number;
+  paid_at?: string | null;
+  method?: InvoicePayment["method"];
+  notes?: string;
+};
+export type ExpensePayment = {
+  id: number;
+  expense_id: number;
+  company_id: number;
+  amount_cents: number;
+  paid_at: string;
+  method: InvoicePayment["method"];
+  notes: string;
+  created_by: number;
+};
+export type ExpensePaymentInput = {
+  expense_id: number;
   amount_cents: number;
   paid_at?: string | null;
   method?: InvoicePayment["method"];
