@@ -44,6 +44,11 @@ async function requestBinary(path: string, headersInit: HeadersInit = {}): Promi
     const data = await response.json() as any;
     const result = data.results || data;
     const encoded = String(result.data_base64 || result.base64 || result.content_base64 || "");
+    if (!encoded && result.file_url) {
+      const fileResponse = await fetch(String(result.file_url), { headers, signal: AbortSignal.timeout(30_000) });
+      if (!fileResponse.ok) throw new Error(`GOWA no pudo descargar el archivo (HTTP ${fileResponse.status})`);
+      return { bytes: new Uint8Array(await fileResponse.arrayBuffer()), mimeType: fileResponse.headers.get("content-type") || "application/octet-stream", fileName: result.filename || result.file_name };
+    }
     if (!encoded) throw new Error("GOWA no devolvió el contenido multimedia");
     return { bytes: new Uint8Array(Buffer.from(encoded, "base64")), mimeType: String(result.mime_type || result.mimetype || "application/octet-stream"), fileName: result.file_name || result.filename };
   }
@@ -51,7 +56,8 @@ async function requestBinary(path: string, headersInit: HeadersInit = {}): Promi
 }
 
 function unwrapResults<T = any>(data: any): T {
-  return (data?.results ?? data) as T;
+  const result = data?.results ?? data;
+  return (result?.data ?? result) as T;
 }
 
 export function normalizeWhatsAppPhone(value: string): string {
@@ -162,8 +168,11 @@ export async function gowaLatestMedia(deviceId: string): Promise<{ media: { data
     for (const message of messages) {
       const mediaType = String(message.media_type || message.type || message.message_type || "").toLowerCase();
       if (!message.id && !message.message_id) continue;
-      if (!mediaType || !["image", "document", "file", "pdf", "media"].some((kind) => mediaType.includes(kind))) continue;
-      candidates.push({ message, jid, timestamp: Number(message.timestamp || message.time || message.created_at || 0) || 0 });
+      const hasMedia = ["image", "document", "file", "pdf", "media"].some((kind) => mediaType.includes(kind)) || Boolean(message.filename || message.url);
+      if (!hasMedia) continue;
+      const rawTimestamp = message.timestamp || message.time || message.created_at || 0;
+      const timestamp = typeof rawTimestamp === "number" ? rawTimestamp : Date.parse(String(rawTimestamp)) || 0;
+      candidates.push({ message, jid: String(message.chat_jid || jid), timestamp });
     }
   }
   candidates.sort((a, b) => b.timestamp - a.timestamp);
