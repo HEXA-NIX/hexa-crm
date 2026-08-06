@@ -24,6 +24,7 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 - La serie de facturación queda configurada por empresa en el perfil fiscal; la factura toma automáticamente los datos de la empresa activa y permite crear o actualizar el cliente desde el propio formulario.
 - El listado de facturas incorpora una vista tabular con búsqueda, filtros por estado, cobro, cliente, serie y rango de fechas, además de acciones rápidas para PDF, cobro, abono y anulación.
 - Los filtros del listado incluyen periodos rápidos de mes, trimestre actual/anterior, año actual/anterior y rango personalizado; el editor de nueva factura ocupa ahora toda la pantalla.
+- El periodo personalizado del listado se selecciona mediante calendario y las líneas de factura aceptan cantidades/precios numéricos correctamente para actualizar base, IVA e importe total en tiempo real.
 
 ### Fixed
 
