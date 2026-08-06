@@ -19,6 +19,7 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 - El ciclo de factura incorpora fecha de operación y vencimiento, cobros parciales por método, estado pendiente/parcial/pagada y emisión de rectificativas/abonos vinculados.
 - Las facturas recibidas admiten pagos parciales por método, estados pendiente/parcial/pagada y un movimiento de Caja por cada pago registrado.
 - Preparación VERI*FACTU por empresa: registros de alta y anulación encadenados con SHA-256, URL del QR tributario de pruebas, exportación JSON y comprobación de integridad local. La remisión automática a la AEAT queda pendiente de certificado, firma y conexión homologada.
+- Las facturas emitidas pueden crearse directamente sin venta, con cliente, líneas, IVA, IRPF, vencimiento, notas e impresión, manteniendo la trazabilidad VERI*FACTU.
 
 ### Fixed
 

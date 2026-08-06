@@ -75,7 +75,7 @@ import type {
   WorkProjectInput,
 } from "../types";
 import { buildModel303Draft } from "../taxes/model303";
-import { buildInvoiceFromSale, buildRectifyingInvoice } from "../invoicing/invoice";
+import { buildInvoiceFromSale, buildManualInvoice, buildRectifyingInvoice } from "../invoicing/invoice";
 import {
   billingByCompany,
   canAccessCompany,
@@ -2637,7 +2637,27 @@ export const postgresApi = {
       await this.appendVerifactuRecord(saved, profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "alta");
       return saved;
     }
-    if (!input.sale_id) throw new Error("La venta es obligatoria");
+    if (!input.sale_id && input.lines?.length) {
+      const [companyRows, customerRows, profileRows] = await Promise.all([
+        sql`SELECT * FROM companies WHERE id = ${companyId}`,
+        input.customer_id ? sql`SELECT * FROM customers WHERE id = ${input.customer_id} AND company_id = ${companyId}` : Promise.resolve([]),
+        sql`SELECT * FROM fiscal_profiles WHERE company_id = ${companyId}`,
+      ]);
+      const company = companyRows[0];
+      if (!company) throw new Error("Empresa no encontrada");
+      const customer = customerRows[0] ? { id: customerRows[0].id, company_id: companyId, name: customerRows[0].name, email: customerRows[0].email ?? "", phone: customerRows[0].phone ?? "", nif: customerRows[0].nif ?? "", notes: customerRows[0].notes ?? "", created_at: toIso(customerRows[0].created_at) } : (input.customer_name || input.customer_nif || input.customer_email ? { id: 0, company_id: companyId, name: input.customer_name?.trim() || "Cliente contado", email: input.customer_email?.trim() || "", phone: "", nif: input.customer_nif?.trim() || "", notes: "", created_at: new Date().toISOString() } : null);
+      const issuedAt = new Date().toISOString();
+      const series = (input.series ?? "F").trim().toUpperCase() || "F";
+      const year = issuedAt.slice(0, 4);
+      const countRows = await sql`SELECT COUNT(*)::int AS count FROM invoices WHERE company_id = ${companyId} AND series = ${series} AND issued_at >= ${new Date(`${year}-01-01T00:00:00Z`)}`;
+      const number = `${year}-${String(Number(countRows[0]?.count ?? 0) + 1).padStart(5, "0")}`;
+      const invoice = buildManualInvoice({ id: 0, company: { id: company.id, code: company.code, legal_name: company.legal_name, trade_name: company.trade_name, nif: company.nif, kind: company.kind, active: company.active, created_at: toIso(company.created_at) }, customer, lines: input.lines, invoice: input, created_by: user.id, number, issued_at: issuedAt, profile: profileRows[0] ? formatFiscalProfile(profileRows[0]) : null });
+      const rows = await sql`INSERT INTO invoices (company_id,sale_id,series,number,kind,status,issued_at,operation_date,due_at,seller_legal_name,seller_nif,seller_trade_name,customer_id,customer_name,customer_nif,customer_email,lines,base_cents,vat_cents,irpf_rate,irpf_cents,total_cents,paid_cents,payment_status,notes,created_by) VALUES (${companyId},NULL,${invoice.series},${invoice.number},${invoice.kind},${invoice.status},${invoice.issued_at},${invoice.operation_date},${invoice.due_at},${invoice.seller_legal_name},${invoice.seller_nif},${invoice.seller_trade_name},${invoice.customer_id},${invoice.customer_name},${invoice.customer_nif},${invoice.customer_email},${sql.json(invoice.lines as any)},${invoice.base_cents},${invoice.vat_cents},${invoice.irpf_rate},${invoice.irpf_cents},${invoice.total_cents},0,'pending',${invoice.notes},${user.id}) RETURNING *`;
+      const saved = formatInvoice(rows[0]);
+      await this.appendVerifactuRecord(saved, profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "alta");
+      return saved;
+    }
+    if (!input.sale_id) throw new Error("La venta o las líneas de la factura son obligatorias");
     const saleRows = await sql`SELECT * FROM sales WHERE id = ${input.sale_id} AND company_id = ${companyId}`;
     if (!saleRows.length) throw new Error("Venta no encontrada");
     const existingRows = await sql`SELECT * FROM invoices WHERE sale_id = ${input.sale_id} AND company_id = ${companyId} AND status <> 'cancelled' LIMIT 1`;

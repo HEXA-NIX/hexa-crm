@@ -30,4 +30,14 @@ describe("ciclo de facturas emitidas", () => {
     expect(browserApi.list_verifactu_records(token)).toHaveLength(2);
     expect(browserApi.verify_verifactu_chain(token)).toEqual({ ok: true });
   });
+
+  it("permite emitir una factura manual sin venta", async () => {
+    const { token } = await browserApi.login("admin", "1234");
+    const invoice = browserApi.issue_invoice({ kind: "simplified", customer_name: "Cliente directo", lines: [{ description: "Servicio profesional", quantity: 2, unit_price_cents: 1000, vat_rate: 21 }] }, token);
+    expect(invoice.sale_id).toBeNull();
+    expect(invoice.customer_name).toBe("Cliente directo");
+    expect(invoice.base_cents).toBe(2000);
+    expect(invoice.vat_cents).toBe(420);
+    expect(invoice.total_cents).toBe(2420);
+  });
 });

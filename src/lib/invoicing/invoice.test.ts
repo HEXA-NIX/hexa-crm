@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildInvoiceFromSale } from "./invoice";
+import { buildInvoiceFromSale, buildManualInvoice } from "./invoice";
 
 describe("facturas emitidas", () => {
   it("calcula IVA, IRPF y total desde una venta", () => {
@@ -17,5 +17,22 @@ describe("facturas emitidas", () => {
     expect(invoice.vat_cents).toBe(2100);
     expect(invoice.irpf_cents).toBe(1500);
     expect(invoice.total_cents).toBe(10600);
+  });
+
+  it("calcula líneas e impuestos en una factura manual", () => {
+    const invoice = buildManualInvoice({
+      id: 2,
+      company: { id: 1, code: "SHOP", legal_name: "Empresa S.L.", trade_name: "Empresa", nif: "B12345678", kind: "generic", active: true, created_at: "2026-08-01" },
+      customer: { id: 3, company_id: 1, name: "Cliente", email: "", phone: "", nif: "12345678Z", notes: "", created_at: "2026-08-01" },
+      lines: [{ description: "Consultoría", quantity: 2, unit_price_cents: 1250, vat_rate: 21 }],
+      invoice: { kind: "complete", irpf_rate: 15 },
+      created_by: 1,
+      number: "2026-00002",
+    });
+    expect(invoice.sale_id).toBeNull();
+    expect(invoice.base_cents).toBe(2500);
+    expect(invoice.vat_cents).toBe(525);
+    expect(invoice.irpf_cents).toBe(375);
+    expect(invoice.total_cents).toBe(2650);
   });
 });

@@ -286,6 +286,12 @@ export type InvoiceLine = {
   vat_cents: number;
   total_cents: number;
 };
+export type InvoiceLineInput = {
+  description: string;
+  quantity: number;
+  unit_price_cents: number;
+  vat_rate: VatRate;
+};
 export type Invoice = {
   id: number;
   company_id: number;
@@ -319,6 +325,11 @@ export type Invoice = {
 };
 export type InvoiceInput = {
   sale_id?: number;
+  customer_id?: number | null;
+  customer_name?: string;
+  customer_nif?: string;
+  customer_email?: string;
+  lines?: InvoiceLineInput[];
   series?: string;
   kind?: InvoiceKind;
   rectifies_invoice_id?: number | null;

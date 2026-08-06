@@ -60,7 +60,7 @@ import type {
   WorkStatus,
 } from "../types";
 import { buildModel303Draft } from "../taxes/model303";
-import { buildInvoiceFromSale, buildRectifyingInvoice } from "../invoicing/invoice";
+import { buildInvoiceFromSale, buildManualInvoice, buildRectifyingInvoice } from "../invoicing/invoice";
 import { createVerifactuRecord, verifyVerifactuChain } from "../verifactu/records";
 import {
   PLUGIN_CATALOG,
@@ -2122,7 +2122,21 @@ export const browserApi = {
       save(s);
       return { ...rectifying };
     }
-    if (!input.sale_id) throw new Error("La venta es obligatoria");
+    if (!input.sale_id && input.lines?.length) {
+      const company = s.companies.find((item) => item.id === cid);
+      if (!company) throw new Error("Empresa no encontrada");
+      const customer = input.customer_id ? s.customers.find((item) => item.id === input.customer_id && (item.company_id ?? 1) === cid) ?? null : (input.customer_name || input.customer_nif || input.customer_email ? { id: 0, company_id: cid, name: input.customer_name?.trim() || "Cliente contado", email: input.customer_email?.trim() || "", phone: "", nif: input.customer_nif?.trim() || "", notes: "", created_at: now() } : null);
+      const series = (input.series ?? "F").trim().toUpperCase() || "F";
+      const year = new Date().getFullYear();
+      const count = s.invoices.filter((item) => item.company_id === cid && item.series === series && item.issued_at.startsWith(String(year))).length + 1;
+      s.seq.invoice += 1;
+      const invoice = buildManualInvoice({ id: s.seq.invoice, company, customer, lines: input.lines, invoice: input, created_by: user.id, number: `${year}-${String(count).padStart(5, "0")}`, profile: s.fiscalProfiles.find((item) => item.company_id === cid) ?? null });
+      s.invoices.push(invoice);
+      appendVerifactuRecord(s, invoice, "alta");
+      save(s);
+      return { ...invoice };
+    }
+    if (!input.sale_id) throw new Error("La venta o las líneas de la factura son obligatorias");
     const sale = s.sales.find((item) => item.id === input.sale_id && (item.company_id ?? 1) === cid);
     if (!sale) throw new Error("Venta no encontrada");
     const existing = s.invoices.find((item) => item.sale_id === sale.id && item.status !== "cancelled");
