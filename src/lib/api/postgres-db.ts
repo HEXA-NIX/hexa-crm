@@ -86,7 +86,7 @@ import { normalizeProjectBrief, normalizeProjectPrd, normalizeTechStack } from "
 import { validateProjectLogo } from "../projects/project-logo";
 import { validateUserAvatar } from "../users/user-avatar";
 import { decodeBase64File, testGoogleDrive, uploadToGoogleDrive } from "../storage/google-drive";
-import { gowaDeviceId, gowaLatestMedia, gowaLoginQr, gowaLogout, gowaSendText, gowaStatus, normalizeWhatsAppPhone } from "../whatsapp/gowa.server";
+import { gowaDeviceId, gowaDownloadMessageMedia, gowaLatestMedia, gowaLoginQr, gowaLogout, gowaSendText, gowaStatus, normalizeWhatsAppPhone } from "../whatsapp/gowa.server";
 import { extractExpenseHints } from "../expenses/ocr";
 import { extractExpenseFromImage } from "../expenses/vision.server";
 import {
@@ -404,6 +404,15 @@ export async function initDb() {
     );
   `;
   await sql`CREATE INDEX IF NOT EXISTS idx_expense_documents_company ON expense_documents(company_id, created_at DESC)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS whatsapp_expense_pending (
+      id BIGSERIAL PRIMARY KEY, company_id BIGINT NOT NULL, user_id BIGINT NOT NULL,
+      device_id TEXT NOT NULL, message_id TEXT NOT NULL, chat_jid TEXT NOT NULL,
+      from_phone TEXT NOT NULL, caption TEXT NOT NULL DEFAULT '', media_type TEXT NOT NULL DEFAULT 'image',
+      status TEXT NOT NULL DEFAULT 'awaiting_type', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE (device_id, message_id)
+    )
+  `;
 
   await sql`
     CREATE TABLE IF NOT EXISTS settings (
@@ -2523,6 +2532,45 @@ export const postgresApi = {
     return formatExpenseDocument(result[0]);
   },
 
+  async processWhatsAppExpenseMessage(deviceId: string, payload: any): Promise<{ state: string; expense?: ExpenseDocument }> {
+    const match = /^hexa-(\d+)-(\d+)$/.exec(deviceId);
+    if (!match) throw new Error("Dispositivo de WhatsApp no asociado a una empresa.");
+    const companyId = Number(match[1]);
+    const userId = Number(match[2]);
+    const users = await sql`SELECT id FROM users WHERE id=${userId} AND company_id=${companyId} LIMIT 1`;
+    if (!users.length) throw new Error("Dispositivo de WhatsApp no asociado a un usuario válido.");
+    const from = String(payload.from ?? payload.chat_jid ?? payload.sender_jid ?? "");
+    const chatJid = String(payload.chat_jid ?? from);
+    const messageId = String(payload.message_id ?? payload.id ?? payload.key?.id ?? "");
+    const mediaType = String(payload.media_type ?? payload.type ?? payload.message_type ?? "").toLowerCase();
+    const hasMedia = Boolean(payload.image || payload.document || payload.media || payload.filename || payload.url) || ["image", "document", "file", "pdf"].some((kind) => mediaType.includes(kind));
+    if (hasMedia) {
+      if (!messageId) throw new Error("El mensaje multimedia no incluye identificador para descargarlo.");
+      const caption = String(payload.caption ?? payload.body ?? payload.content ?? "");
+      await sql`INSERT INTO whatsapp_expense_pending (company_id,user_id,device_id,message_id,chat_jid,from_phone,caption,media_type,status,updated_at) VALUES (${companyId},${userId},${deviceId},${messageId},${chatJid},${from},${caption},${mediaType || "image"},'awaiting_type',NOW()) ON CONFLICT (device_id,message_id) DO UPDATE SET status='awaiting_type',updated_at=NOW()`;
+      if (from) await gowaSendText(deviceId, from, "He recibido el documento 📎. ¿Es un TICKET, una FACTURA, una FACTURA SIMPLIFICADA, un ABONO o un JUSTIFICANTE? Responde con una de esas palabras.");
+      return { state: "awaiting_type" };
+    }
+    const text = String(payload.body ?? payload.content ?? payload.text ?? "").trim().toLowerCase();
+    const kind = text.includes("simplificada") ? "simplified_invoice" : text.includes("ticket") ? "ticket" : text.includes("abono") || text.includes("rectific") ? "credit_note" : text.includes("justificante") || text.includes("recibo") ? "receipt" : text.includes("factura") ? "invoice" : null;
+    const pendingRows = from ? await sql`SELECT * FROM whatsapp_expense_pending WHERE device_id=${deviceId} AND from_phone=${from} AND status='awaiting_type' ORDER BY created_at DESC LIMIT 1` : [];
+    if (!pendingRows.length) return { state: "ignored" };
+    if (!kind) {
+      await gowaSendText(deviceId, from, "No he identificado el tipo. Responde TICKET, FACTURA, FACTURA SIMPLIFICADA, ABONO o JUSTIFICANTE.");
+      return { state: "awaiting_type" };
+    }
+    const pending = pendingRows[0];
+    const media = await gowaDownloadMessageMedia(deviceId, pending.message_id, pending.chat_jid);
+    const settingsRows = await sql`SELECT key, value FROM settings WHERE key IN ('ollama_url','ollama_model')`;
+    const settingsMap = new Map(settingsRows.map((row) => [row.key, row.value]));
+    const vision = await extractExpenseFromImage(media.data_url, pending.caption, { baseUrl: settingsMap.get("ollama_url"), model: settingsMap.get("ollama_model") });
+    const hints = { ...extractExpenseHints(pending.caption), ...vision };
+    const expense = await this.upsertExpenseDocument({ kind, title: hints.title || media.name, supplier_name: hints.supplier_name || "", supplier_tax_id: hints.supplier_tax_id || "", invoice_number: hints.invoice_number || "", issued_at: hints.issued_at || null, base_cents: hints.base_cents || 0, vat_cents: hints.vat_cents || 0, total_cents: hints.total_cents || 0, notes: hints.notes || pending.caption, ocr_confidence: hints.ocr_confidence ?? 0.8, attachments: [{ id: `wa-${pending.message_id}`, name: media.name, mime_type: media.mime_type, size: Math.floor((media.data_url.length * 3) / 4), data_url: media.data_url }], source: "whatsapp", source_phone: pending.from_phone }, null);
+    await sql`UPDATE whatsapp_expense_pending SET status='processed',updated_at=NOW() WHERE id=${pending.id}`;
+    await gowaSendText(deviceId, from, `Documento recibido como ${kind === "ticket" ? "ticket" : kind === "credit_note" ? "abono" : "factura"}. Lo he dejado en Gastos y facturas para revisión.`);
+    return { state: "processed", expense };
+  },
+
   async syncWhatsAppExpense(token: string | null, kind: ExpenseDocument["kind"] = "invoice"): Promise<ExpenseDocument> {
     const user = await requireSession(token);
     const companyId = await resolveActiveCompanyId(token, user.id);
@@ -3801,6 +3849,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   upsert_expense_document(input: any, token?: string | null) { return this.upsertExpenseDocument(input, token ?? null); },
   approve_expense_document(id: number, token?: string | null) { return this.approveExpenseDocument(id, token ?? null); },
   ingest_whatsapp_expense(deviceId: string, payload: any) { return this.ingestWhatsAppExpense(deviceId, payload); },
+  process_whatsapp_expense_message(deviceId: string, payload: any) { return this.processWhatsAppExpenseMessage(deviceId, payload); },
   sync_whatsapp_expense(token?: string | null, kind?: ExpenseDocument["kind"]) { return this.syncWhatsAppExpense(token ?? null, kind); },
   capture_dashboard_alert(input: any, token?: string | null) { return this.captureDashboardAlert(input, token); },
 

@@ -150,7 +150,9 @@ export async function gowaSendText(deviceId: string, phone: string, message: str
   const text = message.trim();
   if (!text) throw new Error("El mensaje no puede estar vacío");
   if (text.length > 4000) throw new Error("El mensaje supera los 4.000 caracteres");
-  const destination = `${normalizeWhatsAppPhone(phone).slice(1)}@s.whatsapp.net`;
+  const destination = phone.includes("@g.us") || phone.includes("@s.whatsapp.net")
+    ? phone
+    : `${normalizeWhatsAppPhone(phone).slice(1)}@s.whatsapp.net`;
   const data = await request("/send/message", {
     method: "POST",
     headers: { "X-Device-Id": deviceId },

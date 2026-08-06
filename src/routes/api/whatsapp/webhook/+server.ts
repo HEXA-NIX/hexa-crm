@@ -18,8 +18,8 @@ export const POST: RequestHandler = async ({ request }) => {
     const event = JSON.parse(raw) as { event?: string; device_id?: string; payload?: Record<string, unknown> };
     if (event.event?.toLowerCase() !== "message" || !event.device_id || !event.payload) return json({ ok: true, ignored: true });
     await initDb();
-    const expense = await postgresApi.ingest_whatsapp_expense(event.device_id, event.payload);
-    return json({ ok: true, expense_id: expense.id, status: expense.status });
+    const result = await postgresApi.process_whatsapp_expense_message(event.device_id, event.payload);
+    return json({ ok: true, state: result.state, expense_id: result.expense?.id, status: result.expense?.status });
   } catch (error) {
     return json({ error: error instanceof Error ? error.message : "No se pudo registrar la factura recibida" }, { status: 400 });
   }
