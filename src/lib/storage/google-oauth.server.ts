@@ -1,5 +1,4 @@
 import crypto from "node:crypto";
-import { env } from "$env/dynamic/private";
 import { decryptSecret, encryptSecret } from "../plugins/secret-vault";
 
 export const GOOGLE_DRIVE_COOKIE = "hexa_google_drive_oauth";
@@ -16,8 +15,8 @@ export type GoogleOAuthCredential = {
 };
 
 function oauthConfig() {
-  const clientId = (env.GOOGLE_DRIVE_CLIENT_ID || process.env.GOOGLE_DRIVE_CLIENT_ID)?.trim();
-  const clientSecret = (env.GOOGLE_DRIVE_CLIENT_SECRET || process.env.GOOGLE_DRIVE_CLIENT_SECRET)?.trim();
+  const clientId = process.env.GOOGLE_DRIVE_CLIENT_ID?.trim();
+  const clientSecret = process.env.GOOGLE_DRIVE_CLIENT_SECRET?.trim();
   if (!clientId || !clientSecret) {
     throw new Error("Google Drive no está habilitado por el administrador de Hexa");
   }
@@ -25,7 +24,7 @@ function oauthConfig() {
 }
 
 export function googleRedirectUri(requestUrl: URL): string {
-  return (env.GOOGLE_DRIVE_REDIRECT_URI || process.env.GOOGLE_DRIVE_REDIRECT_URI)?.trim() || `${requestUrl.origin}/api/storage/google-drive/callback`;
+  return process.env.GOOGLE_DRIVE_REDIRECT_URI?.trim() || `${requestUrl.origin}/api/storage/google-drive/callback`;
 }
 
 export function createGoogleAuthorization(requestUrl: URL) {

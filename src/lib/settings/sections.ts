@@ -30,6 +30,8 @@ export type AjustesSectionDef = {
   danger?: boolean;
   /** Show primary «Guardar ajustes» in this panel */
   hasSave?: boolean;
+  /** Legacy section retained for old deep-links, but hidden from the rail. */
+  hidden?: boolean;
 };
 
 /** Canonical catalog — single source for nav + tests. */
@@ -44,15 +46,16 @@ export const AJUSTES_SECTIONS: readonly AjustesSectionDef[] = [
   {
     id: "whatsapp",
     label: "WhatsApp",
-    title: "Mi WhatsApp",
-    hint: "Vincula tu teléfono mediante QR y envía avisos individuales con confirmación.",
+    title: "WhatsApp de la empresa",
+    hint: "Vincula el teléfono de la empresa mediante QR y recibe documentos o envía avisos con confirmación.",
     adminOnly: false,
+    hidden: true,
   },
   {
     id: "tienda",
-    label: "Tienda",
-    title: "Comercio",
-    hint: "Nombre visible en login y asistente, e IVA por defecto en ventas. Solo administradores.",
+    label: "Empresa",
+    title: "Empresa y datos fiscales",
+    hint: "Identidad, datos fiscales, contacto y marca de la empresa activa. Solo administradores.",
     adminOnly: true,
     hasSave: true,
   },
@@ -82,7 +85,7 @@ export const AJUSTES_SECTIONS: readonly AjustesSectionDef[] = [
     id: "plugins",
     label: "Plugins",
     title: "Integraciones",
-    hint: "Activa y configura capacidades independientes para la tienda seleccionada.",
+    hint: "Activa y configura capacidades independientes para la empresa seleccionada.",
     adminOnly: true,
   },
   {
@@ -108,7 +111,7 @@ export const AJUSTES_SECTION_STORAGE_KEY = "hexa-crm-ajustes-section";
 
 /** Sections visible for this role (order preserved). */
 export function visibleAjustesSections(isAdmin: boolean): AjustesSectionDef[] {
-  return AJUSTES_SECTIONS.filter((s) => !s.adminOnly || isAdmin);
+  return AJUSTES_SECTIONS.filter((s) => !s.hidden && (!s.adminOnly || isAdmin));
 }
 
 export function isAjustesSectionId(value: unknown): value is AjustesSectionId {

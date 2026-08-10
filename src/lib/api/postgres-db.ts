@@ -1,5 +1,6 @@
 import postgres from "postgres";
-import { hashPin, verifyCredential } from "../auth/pin";
+import { createHash, randomBytes } from "node:crypto";
+import { hashCredential, hashPin, verifyCredential } from "../auth/pin";
 import { browserApi } from "./browser-store";
 import {
   clearTempCredentialFields,
@@ -8,7 +9,7 @@ import {
   shouldRejectExpiredTemp,
   validatePermanentPassword,
 } from "../auth/password-policy";
-import { validatePin } from "../auth/pin";
+import { sha256HexSync, validatePin } from "../auth/pin";
 import { createVerifactuRecord, verifyVerifactuChain } from "../verifactu/records";
 import { extractOllamaReply, ollamaChatBody } from "../ai/ollama-reply";
 import { isVatRate, lineBreakdown, type VatRate } from "../vat";
@@ -25,15 +26,20 @@ import {
 import type {
   AiChatResult,
   AiMessage,
+  Budget,
+  BudgetInput,
+  BudgetStatus,
   AuthUser,
   CashInput,
   CashMovement,
   Company,
+  CompanyInput,
   CreateInventoryMovementInput,
   CreateUserResult,
   Customer,
   CustomerInput,
   ExpenseDocument,
+  ExpenseDocumentInput,
   FiscalProfile,
   Invoice,
   InvoiceInput,
@@ -110,6 +116,7 @@ import {
 } from "../plugins/runtime.server";
 import {
   validateProductPublicationInvariants,
+  validateProductFields,
   resolveDefaultsForNewProduct,
 } from "../inventory/publication-rules";
 
@@ -123,8 +130,78 @@ function resolveDatabaseUrl(): string {
 }
 
 const DATABASE_URL = resolveDatabaseUrl();
-export const CENTRAL_MODE = typeof process !== "undefined" && process.env?.HEXA_CENTRAL_MODE === "1";
+// systemd's EnvironmentFile does not strip inline comments the same way
+// dotenv does. Normalize the value so `HEXA_CENTRAL_MODE=1 # comment` cannot
+// accidentally disable the central safety rails in production.
+export const CENTRAL_MODE = typeof process !== "undefined" &&
+  String(process.env?.HEXA_CENTRAL_MODE ?? "").trim().split(/\s+#/, 1)[0] === "1";
 export const CENTRAL_SCHEMA_VERSION = "0014_master_profile";
+
+// Settings predates the multi-company model and used a single key namespace.
+// Keep those legacy keys as read-only fallbacks, but write all tenant-owned
+// values under a company prefix so changing one company cannot alter another.
+function companySettingKey(companyId: number, key: string): string {
+  return `company:${companyId}:${key}`;
+}
+
+function settingValue(rows: readonly any[], companyId: number, key: string, fallback = ""): string {
+  return rows.find((row) => row.key === companySettingKey(companyId, key))?.value
+    ?? rows.find((row) => row.key === key)?.value
+    ?? fallback;
+}
+
+const EXPENSE_TYPE_TEXT_FALLBACK = "He recibido el documento 📎. Responde con una opción:\n1. TICKET\n2. FACTURA\n3. FACTURA SIMPLIFICADA\n4. ABONO\n5. JUSTIFICANTE";
+
+async function sendExpenseTypePrompt(deviceId: string, phone: string): Promise<void> {
+  try {
+    await gowaSendExpenseTypePoll(deviceId, phone);
+  } catch (error) {
+    // Keep ingestion usable with an older/unpatched GOWA installation.
+    console.warn("WhatsApp poll unavailable; using text fallback", error);
+    await gowaSendText(deviceId, phone, EXPENSE_TYPE_TEXT_FALLBACK);
+  }
+}
+
+const WHATSAPP_UPLOAD_LINK_TTL_MINUTES = 30;
+
+function publicAppUrl(): string {
+  // Deliberately do not fall back to VITE_PUBLIC_APP_URL: older installations
+  // often contain localhost/private addresses that would create dead links.
+  const configured = String(process.env.HEXA_PUBLIC_APP_URL || "").trim();
+  if (!configured) throw new Error("Falta configurar HEXA_PUBLIC_APP_URL para los enlaces públicos de WhatsApp.");
+  let parsed: URL;
+  try { parsed = new URL(configured); } catch { throw new Error("HEXA_PUBLIC_APP_URL no es una URL válida."); }
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error("HEXA_PUBLIC_APP_URL debe usar HTTP o HTTPS.");
+  return parsed.toString().replace(/\/+$/, "");
+}
+
+async function createWhatsAppUploadLink(pendingId: number): Promise<string> {
+  const token = randomBytes(32).toString("base64url");
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  await sql`
+    INSERT INTO whatsapp_expense_links (token_hash,pending_id,expires_at)
+    VALUES (${tokenHash},${pendingId},NOW() + (${WHATSAPP_UPLOAD_LINK_TTL_MINUTES} || ' minutes')::interval)
+    ON CONFLICT (pending_id) DO UPDATE SET token_hash=EXCLUDED.token_hash,expires_at=EXCLUDED.expires_at,used_at=NULL
+  `;
+  return `${publicAppUrl()}/recibir/${token}`;
+}
+
+async function resolveWhatsAppUploadLink(token: string) {
+  const normalized = String(token || "").trim();
+  if (!/^[A-Za-z0-9_-]{40,}$/.test(normalized)) throw new Error("Enlace de documento no válido.");
+  const tokenHash = createHash("sha256").update(normalized).digest("hex");
+  const rows = await sql`
+    SELECT l.token_hash,l.pending_id,l.expires_at,l.used_at,p.*
+    FROM whatsapp_expense_links l
+    INNER JOIN whatsapp_expense_pending p ON p.id=l.pending_id
+    WHERE l.token_hash=${tokenHash}
+    LIMIT 1
+  `;
+  if (!rows.length) throw new Error("Enlace de documento no válido o caducado.");
+  const row = rows[0];
+  if (row.used_at || new Date(row.expires_at).getTime() <= Date.now()) throw new Error("Este enlace ya no está disponible.");
+  return row;
+}
 
 let sql: postgres.Sql;
 
@@ -169,10 +246,30 @@ export async function initDb() {
       trade_name TEXT NOT NULL,
       nif TEXT NOT NULL DEFAULT '',
       kind TEXT NOT NULL DEFAULT 'generic',
+      entity_type TEXT NOT NULL DEFAULT 'otra',
+      address TEXT NOT NULL DEFAULT '',
+      postal_code TEXT NOT NULL DEFAULT '',
+      city TEXT NOT NULL DEFAULT '',
+      province TEXT NOT NULL DEFAULT '',
+      country TEXT NOT NULL DEFAULT 'España',
+      email TEXT NOT NULL DEFAULT '',
+      phone TEXT NOT NULL DEFAULT '',
+      logo_data_url TEXT NOT NULL DEFAULT '',
       active BOOLEAN NOT NULL DEFAULT TRUE,
       created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     );
   `;
+  // Backward-compatible migration for databases created before company
+  // branding was introduced.
+  await sql`ALTER TABLE companies ADD COLUMN IF NOT EXISTS logo_data_url TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE companies ADD COLUMN IF NOT EXISTS entity_type TEXT NOT NULL DEFAULT 'otra'`;
+  await sql`ALTER TABLE companies ADD COLUMN IF NOT EXISTS address TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE companies ADD COLUMN IF NOT EXISTS postal_code TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE companies ADD COLUMN IF NOT EXISTS city TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE companies ADD COLUMN IF NOT EXISTS province TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE companies ADD COLUMN IF NOT EXISTS country TEXT NOT NULL DEFAULT 'España'`;
+  await sql`ALTER TABLE companies ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE companies ADD COLUMN IF NOT EXISTS phone TEXT NOT NULL DEFAULT ''`;
   await sql`
     CREATE TABLE IF NOT EXISTS service_request_replays (
       key_id TEXT NOT NULL,
@@ -484,6 +581,29 @@ export async function initDb() {
   `;
   await sql`CREATE INDEX IF NOT EXISTS idx_invoice_payments_invoice ON invoice_payments(invoice_id, paid_at DESC)`;
   await sql`
+    CREATE TABLE IF NOT EXISTS budgets (
+      id SERIAL PRIMARY KEY,
+      company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      series TEXT NOT NULL DEFAULT 'E', number TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','sent','accepted','rejected','expired','invoiced','cancelled')),
+      operation_date DATE NOT NULL DEFAULT CURRENT_DATE, due_at DATE,
+      customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL,
+      customer_name TEXT NOT NULL DEFAULT '', customer_nif TEXT NOT NULL DEFAULT '', customer_email TEXT NOT NULL DEFAULT '',
+      project_explanation TEXT NOT NULL DEFAULT '', lines JSONB NOT NULL DEFAULT '[]'::jsonb,
+      base_cents INTEGER NOT NULL DEFAULT 0, vat_cents INTEGER NOT NULL DEFAULT 0,
+      irpf_rate NUMERIC(5,2) NOT NULL DEFAULT 0, irpf_cents INTEGER NOT NULL DEFAULT 0, total_cents INTEGER NOT NULL DEFAULT 0,
+      payment_method TEXT NOT NULL DEFAULT '', account TEXT NOT NULL DEFAULT '', tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+      notes TEXT NOT NULL DEFAULT '', invoice_id INTEGER REFERENCES invoices(id) ON DELETE SET NULL,
+      created_by INTEGER NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      accepted_at TIMESTAMPTZ, rejected_at TIMESTAMPTZ, converted_at TIMESTAMPTZ,
+      UNIQUE(company_id, series, number)
+    );
+  `;
+  await sql`ALTER TABLE budgets ADD COLUMN IF NOT EXISTS project_explanation TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE budgets ADD COLUMN IF NOT EXISTS invoice_id INTEGER REFERENCES invoices(id) ON DELETE SET NULL`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_budgets_company ON budgets(company_id, operation_date DESC, id DESC)`;
+  await sql`
     CREATE TABLE IF NOT EXISTS verifactu_records (
       id BIGSERIAL PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
       invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE, record_type TEXT NOT NULL,
@@ -498,13 +618,33 @@ export async function initDb() {
   await sql`CREATE INDEX IF NOT EXISTS idx_verifactu_records_company ON verifactu_records(company_id, id)`;
   await sql`
     CREATE TABLE IF NOT EXISTS whatsapp_expense_pending (
-      id BIGSERIAL PRIMARY KEY, company_id BIGINT NOT NULL, user_id BIGINT NOT NULL,
+      id BIGSERIAL PRIMARY KEY, company_id BIGINT, user_id BIGINT NOT NULL,
       device_id TEXT NOT NULL, message_id TEXT NOT NULL, chat_jid TEXT NOT NULL,
       from_phone TEXT NOT NULL, caption TEXT NOT NULL DEFAULT '', media_type TEXT NOT NULL DEFAULT 'image',
       status TEXT NOT NULL DEFAULT 'awaiting_type', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE (device_id, message_id)
     )
   `;
+  await sql`ALTER TABLE whatsapp_expense_pending ALTER COLUMN company_id DROP NOT NULL`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS whatsapp_expense_links (
+      token_hash TEXT PRIMARY KEY,
+      pending_id BIGINT NOT NULL REFERENCES whatsapp_expense_pending(id) ON DELETE CASCADE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (pending_id)
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_whatsapp_expense_links_expiry ON whatsapp_expense_links(expires_at)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS company_whatsapp_links (
+      company_id BIGINT PRIMARY KEY, phone TEXT NOT NULL, device_id TEXT NOT NULL,
+      linked_by BIGINT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_company_whatsapp_links_phone ON company_whatsapp_links(phone)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_company_whatsapp_links_device ON company_whatsapp_links(device_id)`;
 
   await sql`
     CREATE TABLE IF NOT EXISTS settings (
@@ -599,6 +739,12 @@ export async function initDb() {
   await sql`ALTER TABLE stock_movements ADD COLUMN IF NOT EXISTS ref_key TEXT`;
   await sql`ALTER TABLE order_lines ADD COLUMN IF NOT EXISTS vat_rate INTEGER NOT NULL DEFAULT 21`;
   await sql`ALTER TABLE sales ADD COLUMN IF NOT EXISTS order_id UUID UNIQUE REFERENCES orders(id) ON DELETE SET NULL`;
+  // Sale numbers are generated per tenant.  A global UNIQUE(number) made a
+  // perfectly valid number in one company collide with another company's
+  // sequence after the multi-company migration.
+  await sql`ALTER TABLE sales DROP CONSTRAINT IF EXISTS sales_number_key`;
+  await sql`ALTER TABLE sales DROP CONSTRAINT IF EXISTS sales_company_number_key`;
+  await sql`ALTER TABLE sales ADD CONSTRAINT sales_company_number_key UNIQUE (company_id, number)`;
   await sql`ALTER TABLE products DROP CONSTRAINT IF EXISTS products_publication_status_check`;
   await sql`ALTER TABLE products ADD CONSTRAINT products_publication_status_check CHECK (publication_status IN ('draft', 'ready_for_review', 'published', 'paused', 'archived'))`;
   await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS sales_policy TEXT NOT NULL DEFAULT 'own_stock'`;
@@ -666,6 +812,9 @@ export async function initDb() {
       id SERIAL PRIMARY KEY,
       uid UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
       company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      project_type TEXT NOT NULL DEFAULT 'own' CHECK (project_type IN ('own', 'client', 'internal')),
+      client_company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,
+      task_company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,
       customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL,
       value_cents INTEGER NOT NULL DEFAULT 0 CHECK (value_cents >= 0),
       monthly_estimate_cents INTEGER NOT NULL DEFAULT 0 CHECK (monthly_estimate_cents >= 0),
@@ -691,6 +840,24 @@ export async function initDb() {
   await sql`ALTER TABLE work_projects ALTER COLUMN uid SET NOT NULL`;
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_work_projects_uid ON work_projects(uid)`;
   await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS project_type TEXT NOT NULL DEFAULT 'own'`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS client_company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS task_company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL`;
+  // Projects created before the explicit classification used customer_id to
+  // distinguish client work from Hexa-owned products. Preserve that meaning
+  // when adding the new column instead of silently turning every legacy row
+  // into an own project.
+  await sql`
+    UPDATE work_projects
+    SET project_type = CASE WHEN customer_id IS NULL THEN 'own' ELSE 'client' END
+    WHERE project_type = 'own' AND customer_id IS NOT NULL
+  `;
+  await sql`
+    UPDATE work_projects
+    SET task_company_id = CASE WHEN project_type = 'internal' AND client_company_id IS NOT NULL THEN client_company_id ELSE company_id END
+    WHERE task_company_id IS NULL
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_work_projects_client_company ON work_projects(client_company_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_work_projects_customer ON work_projects(company_id, customer_id)`;
   await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS value_cents INTEGER NOT NULL DEFAULT 0`;
   await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS monthly_estimate_cents INTEGER NOT NULL DEFAULT 0`;
@@ -759,9 +926,12 @@ export async function initDb() {
 
   for (const table of ["work_categories", "work_projects", "work_items"] as const) {
     const policy = `${table}_tenant_isolation`;
+    const tenantCondition = table === "work_projects"
+      ? "(company_id = NULLIF(current_setting('app.company_id', true), '')::integer OR task_company_id = NULLIF(current_setting('app.company_id', true), '')::integer)"
+      : "company_id = NULLIF(current_setting('app.company_id', true), '')::integer";
     await sql.unsafe(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
     await sql.unsafe(`DROP POLICY IF EXISTS ${policy} ON ${table}`);
-    await sql.unsafe(`CREATE POLICY ${policy} ON ${table} USING (company_id = NULLIF(current_setting('app.company_id', true), '')::integer) WITH CHECK (company_id = NULLIF(current_setting('app.company_id', true), '')::integer)`);
+    await sql.unsafe(`CREATE POLICY ${policy} ON ${table} USING (${tenantCondition}) WITH CHECK (${tenantCondition})`);
   }
 
   // --- Inventory Foundation (Phase 1) ---
@@ -857,6 +1027,18 @@ export async function initDb() {
     await seedProductsAndCustomers();
   }
 
+  // Every active tenant needs a fiscal profile, even before the owner opens
+  // Ajustes → Impuestos.  Without this idempotent default, newly-created
+  // companies silently fall back to an in-memory invoice series and the tax
+  // page appears empty in a fresh browser.
+  await sql`
+    INSERT INTO fiscal_profiles (company_id)
+    SELECT id FROM companies WHERE active = TRUE
+    ON CONFLICT (company_id) DO NOTHING
+  `;
+  await ensureTenantSettings();
+  await ensureLegacyForeignKeys();
+
   await seedInventoryFoundation();
 
   await sql`INSERT INTO schema_migrations (version) VALUES (${CENTRAL_SCHEMA_VERSION}) ON CONFLICT (version) DO NOTHING`;
@@ -866,6 +1048,9 @@ export async function initDb() {
   await sql`INSERT INTO schema_migrations (version) VALUES ('0018_integration_events') ON CONFLICT (version) DO NOTHING`;
   await sql`INSERT INTO schema_migrations (version) VALUES ('0019_publication_and_sales_policy') ON CONFLICT (version) DO NOTHING`;
   await sql`INSERT INTO schema_migrations (version) VALUES ('0020_supply_status') ON CONFLICT (version) DO NOTHING`;
+  await sql`INSERT INTO schema_migrations (version) VALUES ('0021_fiscal_profile_defaults') ON CONFLICT (version) DO NOTHING`;
+  await sql`INSERT INTO schema_migrations (version) VALUES ('0022_tenant_settings') ON CONFLICT (version) DO NOTHING`;
+  await sql`INSERT INTO schema_migrations (version) VALUES ('0023_budgets') ON CONFLICT (version) DO NOTHING`;
 }
 
 async function seedInventoryFoundation() {
@@ -973,6 +1158,15 @@ async function loadCompanies(): Promise<Company[]> {
     trade_name: r.trade_name,
     nif: r.nif,
     kind: r.kind,
+    entity_type: r.entity_type ?? "otra",
+    address: String(r.address ?? ""),
+    postal_code: String(r.postal_code ?? ""),
+    city: String(r.city ?? ""),
+    province: String(r.province ?? ""),
+    country: String(r.country ?? "España"),
+    email: String(r.email ?? ""),
+    phone: String(r.phone ?? ""),
+    logo_data_url: String(r.logo_data_url ?? ""),
     active: !!r.active,
     created_at: toIso(r.created_at),
   }));
@@ -1007,6 +1201,168 @@ async function resolveActiveCompanyId(token: string | null, userId: number): Pro
   return id;
 }
 
+type WhatsAppDeviceBinding = {
+  deviceId: string;
+  phone: string;
+  sharedFromCompanyId: number | null;
+  sharedFromCompanyName: string | null;
+};
+
+/** Resolve the device used by the active company. A company may explicitly
+ * reuse a device linked by another company the user can access. */
+async function resolveWhatsAppDevice(companyId: number, userId: number): Promise<WhatsAppDeviceBinding> {
+  const rows = await sql`
+    SELECT wl.device_id, wl.phone, source.id AS source_company_id, source.trade_name AS source_company_name
+    FROM company_whatsapp_links wl
+    INNER JOIN companies source ON source.id = wl.company_id AND source.active = TRUE
+    WHERE wl.company_id = ${companyId}
+    LIMIT 1
+  `;
+  if (rows.length) {
+    const sharedRows = await sql`
+      SELECT c.id, c.trade_name
+      FROM company_whatsapp_links wl
+      INNER JOIN companies c ON c.id = wl.company_id AND c.active = TRUE
+      WHERE wl.device_id = ${String(rows[0].device_id)} AND wl.company_id <> ${companyId}
+      ORDER BY c.trade_name, c.id
+      LIMIT 1
+    `;
+    return {
+      deviceId: String(rows[0].device_id),
+      phone: String(rows[0].phone ?? ""),
+      sharedFromCompanyId: sharedRows.length ? Number(sharedRows[0].id) : null,
+      // There is no canonical owner for a deliberately shared device. Do not
+      // pick an arbitrary company name (for example MeigaMarket while viewing
+      // HEXA Studio); the UI should describe it as a shared number instead.
+      sharedFromCompanyName: null,
+    };
+  }
+  return {
+    deviceId: gowaDeviceId(companyId, userId),
+    phone: "",
+    sharedFromCompanyId: null,
+    sharedFromCompanyName: null,
+  };
+}
+
+/** Importa una copia del store local sin borrar datos del tenant central. */
+async function importLocalBackup(payload: any, companyId: number, userId: number) {
+  const products = Array.isArray(payload?.products) ? payload.products : [];
+  const customers = Array.isArray(payload?.customers) ? payload.customers : [];
+  const sales = Array.isArray(payload?.sales) ? payload.sales : [];
+  const saleLines = Array.isArray(payload?.saleLines) ? payload.saleLines : (Array.isArray(payload?.sale_lines) ? payload.sale_lines : []);
+  const cash = Array.isArray(payload?.cash) ? payload.cash : (Array.isArray(payload?.cash_movements) ? payload.cash_movements : []);
+  const invoices = Array.isArray(payload?.invoices) ? payload.invoices : [];
+  const expenses = Array.isArray(payload?.expenses) ? payload.expenses : [];
+  const projects = Array.isArray(payload?.workProjects) ? payload.workProjects : [];
+  const items = Array.isArray(payload?.workItems) ? payload.workItems : [];
+  const customerIds = new Map<number, number>();
+  const productIds = new Map<number, number>();
+  const saleIds = new Map<number, number>();
+  const projectIds = new Map<number, number>();
+  let imported = { products: 0, customers: 0, sales: 0, sale_lines: 0, invoices: 0, expenses: 0, cash: 0, projects: 0, items: 0 };
+
+  await sql.begin(async (tx) => {
+    for (const c of customers) {
+      const name = String(c?.name ?? "").trim();
+      if (!name) continue;
+      const existing = await tx`SELECT id FROM customers WHERE company_id = ${companyId} AND name = ${name} AND email = ${String(c?.email ?? "")} LIMIT 1`;
+      const row = existing[0] ?? (await tx`
+        INSERT INTO customers (company_id, name, email, phone, nif, notes)
+        VALUES (${companyId}, ${name}, ${String(c?.email ?? "")}, ${String(c?.phone ?? "")}, ${String(c?.nif ?? "")}, ${String(c?.notes ?? "")})
+        RETURNING id
+      `)[0];
+      if (c?.id != null) customerIds.set(Number(c.id), Number(row.id));
+      if (!existing[0]) imported.customers++;
+    }
+    for (const p of products) {
+      const sku = String(p?.sku ?? `IMPORT-${p?.id ?? crypto.randomUUID()}`).trim();
+      const existing = await tx`SELECT id FROM products WHERE company_id = ${companyId} AND sku = ${sku} LIMIT 1`;
+      const row = existing[0] ?? (await tx`
+        INSERT INTO products (company_id, sku, name, description, category, stock, min_stock, cost_cents, price_cents, vat_rate, active, condition_code, publication_status, sales_policy)
+        VALUES (${companyId}, ${sku}, ${String(p?.name ?? sku)}, ${String(p?.description ?? "")}, ${String(p?.category ?? "")}, ${Number(p?.stock ?? 0)}, ${Number(p?.min_stock ?? 0)}, ${Number(p?.cost_cents ?? 0)}, ${Number(p?.price_cents ?? 0)}, ${Number(p?.vat_rate ?? 21)}, ${p?.active !== false}, ${String(p?.condition_code ?? "preowned")}, ${String(p?.publication_status ?? "published")}, ${String(p?.sales_policy ?? "own_stock")})
+        RETURNING id
+      `)[0];
+      if (p?.id != null) productIds.set(Number(p.id), Number(row.id));
+      if (!existing[0]) imported.products++;
+    }
+    for (const s of sales) {
+      const baseNumber = String(s?.number ?? `IMPORT-${s?.id ?? crypto.randomUUID()}`);
+      const number = (await tx`SELECT id FROM sales WHERE number = ${baseNumber}`).length ? `${baseNumber}-IMP-${Date.now()}-${imported.sales}` : baseNumber;
+      const customerId = s?.customer_id == null ? null : (customerIds.get(Number(s.customer_id)) ?? null);
+      const row = (await tx`
+        INSERT INTO sales (company_id, customer_id, number, sold_at, subtotal_cents, vat_cents, total_cents, notes, status)
+        VALUES (${companyId}, ${customerId}, ${number}, ${s?.sold_at ? new Date(s.sold_at) : new Date()}, ${Number(s?.subtotal_cents ?? 0)}, ${Number(s?.vat_cents ?? 0)}, ${Number(s?.total_cents ?? 0)}, ${String(s?.notes ?? "")}, ${String(s?.status ?? "completed")})
+        RETURNING id
+      `)[0];
+      if (s?.id != null) saleIds.set(Number(s.id), Number(row.id));
+      imported.sales++;
+    }
+    for (const line of saleLines) {
+      const saleId = saleIds.get(Number(line?.sale_id ?? line?.saleId));
+      const productId = productIds.get(Number(line?.product_id ?? line?.productId));
+      if (!saleId || !productId) continue;
+      await tx`
+        INSERT INTO sale_lines (sale_id, product_id, qty, unit_price_cents, vat_rate, line_base_cents, line_vat_cents, line_total_cents)
+        VALUES (${saleId}, ${productId}, ${Number(line?.qty ?? 0)}, ${Number(line?.unit_price_cents ?? 0)}, ${Number(line?.vat_rate ?? 21)}, ${Number(line?.line_base_cents ?? 0)}, ${Number(line?.line_vat_cents ?? 0)}, ${Number(line?.line_total_cents ?? 0)})
+      `;
+      imported.sale_lines++;
+    }
+    for (const invoice of invoices) {
+      const series = String(invoice?.series ?? "F");
+      const baseNumber = String(invoice?.number ?? `IMP-${crypto.randomUUID()}`);
+      const number = (await tx`SELECT id FROM invoices WHERE company_id = ${companyId} AND series = ${series} AND number = ${baseNumber}`).length
+        ? `${baseNumber}-IMP-${Date.now()}-${imported.invoices}` : baseNumber;
+      await tx`
+        INSERT INTO invoices (company_id, sale_id, series, number, kind, status, issued_at, operation_date, due_at, seller_legal_name, seller_nif, seller_trade_name, customer_id, customer_name, customer_nif, customer_email, lines, base_cents, vat_cents, irpf_rate, irpf_cents, total_cents, paid_cents, payment_status, notes, created_by)
+        VALUES (${companyId}, NULL, ${series}, ${number}, ${String(invoice?.kind ?? "complete")}, ${String(invoice?.status ?? "issued")}, ${invoice?.issued_at ? new Date(invoice.issued_at) : new Date()}, ${invoice?.operation_date || new Date().toISOString().slice(0, 10)}, ${invoice?.due_at || null}, ${String(invoice?.seller_legal_name ?? "")}, ${String(invoice?.seller_nif ?? "")}, ${String(invoice?.seller_trade_name ?? "")}, ${invoice?.customer_id != null ? (customerIds.get(Number(invoice.customer_id)) ?? null) : null}, ${String(invoice?.customer_name ?? "")}, ${String(invoice?.customer_nif ?? "")}, ${String(invoice?.customer_email ?? "")}, ${tx.json(Array.isArray(invoice?.lines) ? invoice.lines : [])}, ${Number(invoice?.base_cents ?? 0)}, ${Number(invoice?.vat_cents ?? 0)}, ${Number(invoice?.irpf_rate ?? 0)}, ${Number(invoice?.irpf_cents ?? 0)}, ${Number(invoice?.total_cents ?? 0)}, ${Number(invoice?.paid_cents ?? 0)}, ${String(invoice?.payment_status ?? "pending")}, ${String(invoice?.notes ?? "")}, ${userId})
+      `;
+      imported.invoices++;
+    }
+    for (const expense of expenses) {
+      const title = String(expense?.title ?? expense?.supplier_name ?? "Gasto importado");
+      await tx`
+        INSERT INTO expense_documents (company_id, status, kind, title, supplier_name, supplier_tax_id, invoice_number, issued_at, accounting_date, due_at, deductible, category, base_cents, vat_rate, vat_cents, withholding_cents, total_cents, currency, notes, paid_cents, payment_status, source, created_by)
+        VALUES (${companyId}, ${String(expense?.status ?? "review")}, ${String(expense?.kind ?? "invoice")}, ${title}, ${String(expense?.supplier_name ?? "")}, ${String(expense?.supplier_tax_id ?? "")}, ${String(expense?.invoice_number ?? "")}, ${expense?.issued_at || null}, ${expense?.accounting_date || null}, ${expense?.due_at || null}, ${expense?.deductible !== false}, ${String(expense?.category ?? "otros")}, ${Number(expense?.base_cents ?? 0)}, ${Number(expense?.vat_rate ?? 21)}, ${Number(expense?.vat_cents ?? 0)}, ${Number(expense?.withholding_cents ?? 0)}, ${Number(expense?.total_cents ?? 0)}, ${String(expense?.currency ?? "EUR")}, ${String(expense?.notes ?? "")}, ${Number(expense?.paid_cents ?? 0)}, ${String(expense?.payment_status ?? "pending")}, 'local_backup', ${userId})
+      `;
+      imported.expenses++;
+    }
+    for (const m of cash) {
+      await tx`
+        INSERT INTO cash_movements (company_id, kind, amount_cents, category, description, occurred_at)
+        VALUES (${companyId}, ${String(m?.kind ?? "income")}, ${Number(m?.amount_cents ?? 0)}, ${String(m?.category ?? "otros")}, ${String(m?.description ?? "Importado desde copia local")}, ${m?.occurred_at ? new Date(m.occurred_at) : new Date()})
+      `;
+      imported.cash++;
+    }
+    for (const p of projects) {
+      const legacyProjectType = p?.project_type === "client" || p?.project_type === "internal"
+        ? p.project_type
+        : (p?.customer_id != null ? "client" : "own");
+      const requestedClientCompanyId = p?.client_company_id == null ? null : Number(p.client_company_id);
+      const clientCompanyRows = requestedClientCompanyId == null
+        ? []
+        : await tx`SELECT id FROM companies WHERE id = ${requestedClientCompanyId} AND active = TRUE`;
+      const clientCompanyId = clientCompanyRows.length ? requestedClientCompanyId : null;
+      const taskCompanyId = legacyProjectType === "internal" && clientCompanyId != null ? clientCompanyId : companyId;
+      const row = (await tx`
+        INSERT INTO work_projects (company_id, project_type, client_company_id, task_company_id, name, description, status, customer_id, value_cents, monthly_estimate_cents, start_date, target_date, created_by)
+        VALUES (${companyId}, ${legacyProjectType}, ${clientCompanyId}, ${taskCompanyId}, ${String(p?.name ?? "Proyecto importado")}, ${String(p?.description ?? "")}, ${String(p?.status ?? "planned")}, ${p?.customer_id != null ? (customerIds.get(Number(p.customer_id)) ?? null) : null}, ${Number(p?.value_cents ?? 0)}, ${Number(p?.monthly_estimate_cents ?? 0)}, ${p?.start_date || null}, ${p?.target_date || null}, ${userId})
+        RETURNING id
+      `)[0];
+      if (p?.id != null) projectIds.set(Number(p.id), Number(row.id));
+      imported.projects++;
+    }
+    for (const item of items) {
+      await tx`
+        INSERT INTO work_items (company_id, project_id, title, description, type, status, priority, assignee_id, created_by)
+        VALUES (${companyId}, ${item?.project_id != null ? (projectIds.get(Number(item.project_id)) ?? null) : null}, ${String(item?.title ?? "Tarea importada")}, ${String(item?.description ?? "")}, ${String(item?.type ?? "task")}, ${String(item?.status ?? "inbox")}, ${String(item?.priority ?? "normal")}, NULL, ${userId})
+      `;
+      imported.items++;
+    }
+  });
+  return imported;
+}
+
 async function seedSettings() {
   const defaults = [
     { key: "shop_name", value: "Mi Tienda" },
@@ -1022,6 +1378,57 @@ async function seedSettings() {
       VALUES (${key}, ${value})
       ON CONFLICT (key) DO NOTHING
     `;
+  }
+}
+
+async function ensureTenantSettings() {
+  const companies = await sql<{ id: number; trade_name: string }[]>`SELECT id, trade_name FROM companies WHERE active = TRUE ORDER BY id`;
+  const legacyRows = await sql<{ key: string; value: string }[]>`SELECT key, value FROM settings WHERE key IN ('ollama_model','ollama_url','default_vat','idle_timeout_minutes','last_backup_at','monthly_economic_goals')`;
+  const legacy = new Map(legacyRows.map((row) => [row.key, row.value]));
+  for (const company of companies) {
+    const defaults: Record<string, string> = {
+      shop_name: String(company.trade_name || "Mi Tienda"),
+      ollama_model: legacy.get("ollama_model") || "qwen3.5:4b",
+      ollama_url: legacy.get("ollama_url") || "http://127.0.0.1:11434",
+      default_vat: legacy.get("default_vat") || "21",
+      idle_timeout_minutes: legacy.get("idle_timeout_minutes") || "15",
+      last_backup_at: legacy.get("last_backup_at") || "",
+      monthly_economic_goals: legacy.get("monthly_economic_goals") || "{}",
+    };
+    for (const [key, value] of Object.entries(defaults)) {
+      await sql`
+        INSERT INTO settings (key, value)
+        VALUES (${companySettingKey(company.id, key)}, ${value})
+        ON CONFLICT (key) DO NOTHING
+      `;
+    }
+  }
+}
+
+async function ensureLegacyForeignKeys() {
+  // Several tables were created before multi-company support and originally
+  // relied only on application checks.  Add the missing database-level links
+  // once the full schema exists; the explicit existence guard keeps startup
+  // idempotent across every request/restart.
+  const constraints = [
+    ["company_members", "company_members_user_id_fkey", "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"],
+    ["products", "products_company_id_fkey", "FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE"],
+    ["customers", "customers_company_id_fkey", "FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE"],
+    ["sales", "sales_company_id_fkey", "FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE"],
+    ["cash_movements", "cash_movements_company_id_fkey", "FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE"],
+    ["cash_movements", "cash_movements_project_id_fkey", "FOREIGN KEY (project_id) REFERENCES work_projects(id) ON DELETE SET NULL"],
+    ["expense_documents", "expense_documents_created_by_fkey", "FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT"],
+    ["expense_documents", "expense_documents_project_id_fkey", "FOREIGN KEY (project_id) REFERENCES work_projects(id) ON DELETE SET NULL"],
+    ["expense_payments", "expense_payments_created_by_fkey", "FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT"],
+    ["invoices", "invoices_created_by_fkey", "FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT"],
+    ["invoice_payments", "invoice_payments_created_by_fkey", "FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT"],
+    ["budgets", "budgets_company_id_fkey", "FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE"],
+    ["budgets", "budgets_customer_id_fkey", "FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL"],
+    ["budgets", "budgets_created_by_fkey", "FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT"],
+    ["sessions", "sessions_active_company_id_fkey", "FOREIGN KEY (active_company_id) REFERENCES companies(id) ON DELETE SET NULL"],
+  ] as const;
+  for (const [table, name, definition] of constraints) {
+    await sql.unsafe(`DO $constraint$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '${name}') THEN ALTER TABLE ${table} ADD CONSTRAINT ${name} ${definition}; END IF; END $constraint$;`);
   }
 }
 
@@ -1119,6 +1526,9 @@ function formatWorkProject(r: any): WorkProject {
     id: r.id,
     uid: String(r.uid),
     company_id: r.company_id,
+    project_type: ["own", "client", "internal"].includes(r.project_type) ? r.project_type : (r.customer_id == null ? "own" : "client"),
+    client_company_id: r.client_company_id ?? null,
+    task_company_id: r.task_company_id ?? r.company_id,
     customer_id: r.customer_id ?? null,
     value_cents: r.value_cents ?? 0,
     monthly_estimate_cents: r.monthly_estimate_cents ?? 0,
@@ -1146,10 +1556,11 @@ async function attachProjectRevenueMilestones(
   companyId: number,
 ): Promise<WorkProject[]> {
   if (projects.length === 0) return projects;
+  const ownerCompanyIds = Array.from(new Set(projects.map((project) => project.company_id)));
   const rows = await sql`
     SELECT id, project_id, amount_cents, target_month
     FROM work_project_revenue_milestones
-    WHERE company_id = ${companyId}
+    WHERE company_id = ANY(${ownerCompanyIds}::int[])
     ORDER BY target_month, id
   `;
   const byProject = new Map<number, WorkProject["revenue_milestones"]>();
@@ -1255,6 +1666,35 @@ function formatInvoice(r: any): Invoice {
   };
 }
 
+function formatBudget(r: any): Budget {
+  return {
+    id: Number(r.id), company_id: Number(r.company_id), series: String(r.series ?? "E"), number: String(r.number ?? ""),
+    status: r.status as BudgetStatus, operation_date: toIso(r.operation_date).slice(0, 10), due_at: r.due_at ? toIso(r.due_at).slice(0, 10) : null,
+    customer_id: r.customer_id == null ? null : Number(r.customer_id), customer_name: r.customer_name ?? "", customer_nif: r.customer_nif ?? "", customer_email: r.customer_email ?? "",
+    project_explanation: r.project_explanation ?? "", lines: Array.isArray(r.lines) ? r.lines : [],
+    base_cents: Number(r.base_cents ?? 0), vat_cents: Number(r.vat_cents ?? 0), irpf_rate: Number(r.irpf_rate ?? 0), irpf_cents: Number(r.irpf_cents ?? 0), total_cents: Number(r.total_cents ?? 0),
+    payment_method: r.payment_method ?? "", account: r.account ?? "", tags: Array.isArray(r.tags) ? r.tags : [], notes: r.notes ?? "",
+    invoice_id: r.invoice_id == null ? null : Number(r.invoice_id), created_by: Number(r.created_by), created_at: toIso(r.created_at), updated_at: toIso(r.updated_at),
+    accepted_at: toIso(r.accepted_at) || null, rejected_at: toIso(r.rejected_at) || null, converted_at: toIso(r.converted_at) || null,
+  };
+}
+
+function normalizeBudgetLines(lines: BudgetInput["lines"]): Budget["lines"] {
+  if (!Array.isArray(lines) || !lines.length) throw new Error("El presupuesto debe tener al menos una línea");
+  return lines.map((raw) => {
+    const description = String(raw?.description ?? "").trim();
+    const quantity = Number(raw?.quantity);
+    const unit_price_cents = Math.round(Number(raw?.unit_price_cents));
+    const vat_rate = Number(raw?.vat_rate);
+    if (!description || !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(unit_price_cents) || unit_price_cents < 0 || !isVatRate(vat_rate)) {
+      throw new Error("Revisa las líneas, cantidades, importes e IVA del presupuesto");
+    }
+    const base_cents = Math.round(quantity * unit_price_cents);
+    const vat_cents = Math.round(base_cents * vat_rate / 100);
+    return { description, quantity, unit_price_cents, vat_rate, base_cents, vat_cents, total_cents: base_cents + vat_cents };
+  });
+}
+
 async function tenantPluginRow(companyId: number, key: PluginKey) {
   const rows = await sql`
     SELECT enabled, config, encrypted_secret, last_error, updated_at
@@ -1320,6 +1760,8 @@ async function pluginAudit(
 // -------------------------------------------------------------
 export const postgresApi = {
   async public_meta(): Promise<{ shop_name: string }> {
+    const companies = await sql`SELECT trade_name FROM companies WHERE active = TRUE ORDER BY id LIMIT 1`;
+    if (companies[0]?.trade_name) return { shop_name: String(companies[0].trade_name) };
     const res = await sql`SELECT value FROM settings WHERE key = 'shop_name'`;
     return { shop_name: res[0]?.value || "hexa-crm" };
   },
@@ -1410,28 +1852,107 @@ export const postgresApi = {
   async whatsapp_status(token: string | null) {
     const user = await requireSession(token);
     const companyId = await resolveActiveCompanyId(token, user.id);
-    return { ...(await gowaStatus(gowaDeviceId(companyId, user.id))), user_phone: user.phone };
+    const binding = await resolveWhatsAppDevice(companyId, user.id);
+    const deviceId = binding.deviceId;
+    const status = await gowaStatus(deviceId);
+    // The number belongs to the WhatsApp session, not to the admin profile.
+    // Never surface the profile's legacy phone while the device is offline.
+    const connected = status.connected || status.logged_in;
+    // The device session is the source of truth. Do not fall back to the
+    // profile/binding phone: those values can belong to a previous number.
+    const linkedPhone = connected ? String(status.phone || "").replace(/\D/g, "") : "";
+    if ((status.connected || status.logged_in) && linkedPhone) {
+      await sql`INSERT INTO company_whatsapp_links (company_id,phone,device_id,linked_by,updated_at) VALUES (${companyId},${linkedPhone},${deviceId},${user.id},NOW()) ON CONFLICT (company_id) DO UPDATE SET phone=EXCLUDED.phone,device_id=EXCLUDED.device_id,linked_by=EXCLUDED.linked_by,updated_at=NOW()`;
+    }
+    const traceRows = await sql`SELECT value FROM settings WHERE key='whatsapp_webhook_trace' LIMIT 1`;
+    let webhook_trace = null;
+    try { webhook_trace = traceRows[0]?.value ? JSON.parse(traceRows[0].value) : null; } catch { webhook_trace = null; }
+    const configuredPhone = String(binding.phone || "").replace(/\D/g, "");
+    return { ...status, user_phone: linkedPhone, configured_phone: configuredPhone, shared_from_company_id: binding.sharedFromCompanyId, shared_from_company_name: binding.sharedFromCompanyName, webhook_trace };
+  },
+
+  async whatsapp_available_links(token: string | null) {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const rows = await sql`
+      SELECT wl.company_id, c.trade_name, wl.phone, wl.device_id
+      FROM company_whatsapp_links wl
+      INNER JOIN companies c ON c.id = wl.company_id AND c.active = TRUE
+      INNER JOIN company_members cm ON cm.company_id = wl.company_id AND cm.user_id = ${user.id}
+      WHERE wl.company_id <> ${companyId}
+      ORDER BY c.trade_name, c.id
+    `;
+    const available: { company_id: number; trade_name: string; phone: string }[] = [];
+    for (const row of rows) {
+      const status = await gowaStatus(String(row.device_id)).catch(() => ({ connected: false, logged_in: false, phone: undefined }));
+      if (!status.connected && !status.logged_in) continue;
+      available.push({
+        company_id: Number(row.company_id),
+        trade_name: String(row.trade_name),
+        // Never expose a stale number stored in the binding when GOWA does not
+        // report a phone for the current session.
+        phone: String(status.phone || "").replace(/\D/g, ""),
+      });
+    }
+    return available;
+  },
+
+  async whatsapp_use_shared_link(sourceCompanyId: number, token: string | null) {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const sourceId = Number(sourceCompanyId);
+    if (!Number.isInteger(sourceId) || sourceId === companyId) throw new Error("Selecciona otra empresa con WhatsApp vinculado");
+    const rows = await sql`
+      SELECT wl.phone, wl.device_id, source.trade_name
+      FROM company_whatsapp_links wl
+      INNER JOIN companies source ON source.id = wl.company_id AND source.active = TRUE
+      INNER JOIN company_members cm ON cm.company_id = wl.company_id AND cm.user_id = ${user.id}
+      WHERE wl.company_id = ${sourceId}
+      LIMIT 1
+    `;
+    if (!rows.length) throw new Error("La empresa seleccionada no tiene un WhatsApp vinculado");
+    await sql`
+      INSERT INTO company_whatsapp_links (company_id, phone, device_id, linked_by, updated_at)
+      VALUES (${companyId}, ${String(rows[0].phone)}, ${String(rows[0].device_id)}, ${user.id}, NOW())
+      ON CONFLICT (company_id) DO UPDATE SET phone=EXCLUDED.phone, device_id=EXCLUDED.device_id, linked_by=EXCLUDED.linked_by, updated_at=NOW()
+    `;
+    return { company_id: companyId, source_company_id: sourceId, source_company_name: String(rows[0].trade_name), phone: String(rows[0].phone) };
   },
 
   async whatsapp_login_qr(token: string | null) {
     const user = await requireSession(token);
-    if (!user.phone) throw new Error("Añade primero tu teléfono de WhatsApp en el perfil de usuario");
-    normalizeWhatsAppPhone(user.phone);
     const companyId = await resolveActiveCompanyId(token, user.id);
-    return gowaLoginQr(gowaDeviceId(companyId, user.id));
+    const binding = await resolveWhatsAppDevice(companyId, user.id);
+    const status = await gowaStatus(binding.deviceId);
+    // A shared binding is still the same WhatsApp session. It is safe to
+    // reconnect that existing device when it is offline; only block attempts
+    // to replace a session that is currently online from another company.
+    if (binding.sharedFromCompanyId != null && (status.connected || status.logged_in)) {
+      throw new Error("Este número de WhatsApp compartido ya está conectado en otra empresa.");
+    }
+    return gowaLoginQr(binding.deviceId);
   },
 
   async whatsapp_logout(token: string | null) {
     const user = await requireSession(token);
     const companyId = await resolveActiveCompanyId(token, user.id);
-    await gowaLogout(gowaDeviceId(companyId, user.id));
+    const binding = await resolveWhatsAppDevice(companyId, user.id);
+    const ownDeviceId = gowaDeviceId(companyId, user.id);
+    const sharedCount = await sql`SELECT COUNT(*)::int AS count FROM company_whatsapp_links WHERE device_id=${binding.deviceId}`;
+    const wasLastLink = Number(sharedCount[0]?.count ?? 0) <= 1;
+    if (binding.deviceId === ownDeviceId && wasLastLink) await gowaLogout(binding.deviceId);
+    await sql`DELETE FROM company_whatsapp_links WHERE company_id=${companyId}`;
+    const remaining = await sql`SELECT COUNT(*)::int AS count FROM company_whatsapp_links WHERE device_id=${binding.deviceId}`;
+    if (Number(remaining[0]?.count ?? 0) === 0 && !(binding.deviceId === ownDeviceId && wasLastLink)) {
+      await gowaLogout(binding.deviceId);
+    }
   },
 
   async whatsapp_send(phone: string, message: string, confirmed: boolean, token: string | null) {
     const user = await requireSession(token);
     if (!confirmed) throw new Error("Confirma el envío de WhatsApp antes de continuar");
     const companyId = await resolveActiveCompanyId(token, user.id);
-    const deviceId = gowaDeviceId(companyId, user.id);
+    const deviceId = (await resolveWhatsAppDevice(companyId, user.id)).deviceId;
     const status = await gowaStatus(deviceId);
     if (!status.connected && !status.logged_in) throw new Error("Conecta tu WhatsApp antes de enviar mensajes");
     try {
@@ -1440,6 +1961,99 @@ export const postgresApi = {
       return { ok: true, ...result };
     } catch (error) {
       await pluginAudit(companyId, user.id, "whatsapp_gowa", "whatsapp_failed", "send_text", "error", error instanceof Error ? error.message : "Error de WhatsApp");
+      throw error;
+    }
+  },
+
+  /**
+   * Public, bearer-token view used by the WhatsApp document link.  The token
+   * is never returned to the client database/API and only its SHA-256 digest
+   * is persisted.  This endpoint deliberately exposes only the media preview
+   * and the choices needed to finish the upload.
+   */
+  async whatsapp_upload_preview(token: string) {
+    const pending = await resolveWhatsAppUploadLink(token);
+    const linkedCompanies = await sql`
+      SELECT c.id, c.trade_name, c.legal_name, c.logo_data_url
+      FROM companies c
+      INNER JOIN company_whatsapp_links wl ON wl.company_id = c.id
+      WHERE wl.device_id = ${pending.device_id} AND c.active = TRUE
+      ORDER BY c.trade_name, c.id
+    `;
+    const companies = linkedCompanies.length
+      ? linkedCompanies
+      : pending.company_id
+        ? await sql`SELECT id, trade_name, legal_name, logo_data_url FROM companies WHERE id = ${pending.company_id} AND active = TRUE`
+        : [];
+    const media = await gowaDownloadMessageMedia(String(pending.device_id), String(pending.message_id), String(pending.chat_jid));
+    return {
+      title: "Revisar documento",
+      description: "Confirma el tipo para guardarlo en Gastos y facturas.",
+      expires_at: toIso(pending.expires_at),
+      caption: String(pending.caption ?? ""),
+      preview: { data_url: media.data_url, mime_type: media.mime_type, name: media.name },
+      companies: companies.map((company: any) => ({ id: Number(company.id), name: String(company.trade_name || company.legal_name || "Empresa"), logo_data_url: String(company.logo_data_url ?? "") })),
+      selected_company_id: pending.company_id == null ? null : Number(pending.company_id),
+      kind_options: [
+        { value: "ticket", label: "Ticket" },
+        { value: "invoice", label: "Factura" },
+        { value: "simplified_invoice", label: "Factura simplificada" },
+        { value: "credit_note", label: "Abono / rectificativa" },
+        { value: "receipt", label: "Justificante" },
+      ],
+    };
+  },
+
+  /** Complete a public WhatsApp upload after the user confirms its type. */
+  async whatsapp_upload_confirm(token: string, kind: string, companyId?: number | null) {
+    const allowed = new Set(["ticket", "invoice", "simplified_invoice", "credit_note", "receipt"]);
+    if (!allowed.has(kind)) throw new Error("Tipo de documento no válido.");
+    const pending = await resolveWhatsAppUploadLink(token);
+    const linkedCompanies = await sql`
+      SELECT c.id, c.trade_name, c.legal_name, c.logo_data_url
+      FROM companies c
+      INNER JOIN company_whatsapp_links wl ON wl.company_id = c.id
+      WHERE wl.device_id = ${pending.device_id} AND c.active = TRUE
+      ORDER BY c.trade_name, c.id
+    `;
+    const companies = linkedCompanies.length
+      ? linkedCompanies
+      : pending.company_id
+        ? await sql`SELECT id, trade_name, legal_name, logo_data_url FROM companies WHERE id = ${pending.company_id} AND active = TRUE`
+        : [];
+    const requestedCompany = companyId == null ? null : companies.find((company: any) => Number(company.id) === Number(companyId));
+    const selectedCompanyId = pending.company_id == null ? requestedCompany?.id : pending.company_id;
+    if (!selectedCompanyId) {
+      if (companies.length > 1) throw new Error("Selecciona la empresa para este documento.");
+      if (companies.length === 1) {
+        // The device currently maps to exactly one active company.
+        await sql`UPDATE whatsapp_expense_pending SET company_id = ${companies[0].id}, status = 'awaiting_type', updated_at = NOW() WHERE id = ${pending.pending_id} AND status = 'awaiting_company'`;
+      } else {
+        throw new Error("La empresa de este documento ya no está disponible.");
+      }
+    } else if (pending.company_id == null) {
+      await sql`UPDATE whatsapp_expense_pending SET company_id = ${selectedCompanyId}, status = 'awaiting_type', updated_at = NOW() WHERE id = ${pending.pending_id} AND status = 'awaiting_company'`;
+    }
+
+    // Claim before processing so two browser tabs cannot create two expenses.
+    const claimed = await sql`
+      UPDATE whatsapp_expense_links
+      SET used_at = NOW()
+      WHERE token_hash = ${pending.token_hash} AND used_at IS NULL AND expires_at > NOW()
+      RETURNING token_hash
+    `;
+    if (!claimed.length) throw new Error("Este enlace ya no está disponible.");
+    try {
+      const result = await this.processWhatsAppExpenseMessage(String(pending.device_id), {
+        from: String(pending.from_phone),
+        chat_jid: String(pending.chat_jid),
+        body: kind,
+        id: `public-upload-${pending.message_id}`,
+      });
+      return { ...result, selected_company_id: Number(selectedCompanyId ?? pending.company_id) };
+    } catch (error) {
+      // Let the user retry if GOWA is temporarily unavailable.
+      await sql`UPDATE whatsapp_expense_links SET used_at = NULL WHERE token_hash = ${pending.token_hash}`.catch(() => undefined);
       throw error;
     }
   },
@@ -1486,11 +2100,91 @@ export const postgresApi = {
     return c;
   },
 
+  async update_company_profile(input: Partial<Pick<Company, "logo_data_url" | "legal_name" | "trade_name" | "nif" | "kind" | "entity_type" | "address" | "postal_code" | "city" | "province" | "country" | "email" | "phone">>, token: string | null): Promise<Company> {
+    const user = await requireSession(token);
+    if (!token) throw new Error("Sesión no iniciada");
+    if (user.role !== "admin" && !user.is_master) throw new Error("Se requieren permisos de administrador");
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const currentRows = await sql`SELECT id, legal_name, trade_name, nif, kind, entity_type, address, postal_code, city, province, country, email, phone, logo_data_url FROM companies WHERE id = ${companyId} AND active = TRUE`;
+    const current = currentRows[0];
+    if (!current) throw new Error("Empresa no encontrada");
+    const logo = input.logo_data_url === undefined ? String(current.logo_data_url ?? "") : String(input.logo_data_url ?? "");
+    const logoError = validateProjectLogo(logo);
+    if (logoError) throw new Error(logoError);
+    const legalName = input.legal_name === undefined ? String(current.legal_name ?? "") : String(input.legal_name ?? "").trim();
+    const tradeName = input.trade_name === undefined ? String(current.trade_name ?? "") : String(input.trade_name ?? "").trim();
+    const nif = input.nif === undefined ? String(current.nif ?? "") : String(input.nif ?? "").trim();
+    const kind = input.kind === undefined ? String(current.kind ?? "generic") : String(input.kind ?? "generic");
+    const entityType = input.entity_type === undefined ? String(current.entity_type ?? "otra") : String(input.entity_type ?? "otra");
+    const address = input.address === undefined ? String(current.address ?? "") : String(input.address ?? "").trim();
+    const postalCode = input.postal_code === undefined ? String(current.postal_code ?? "") : String(input.postal_code ?? "").trim();
+    const city = input.city === undefined ? String(current.city ?? "") : String(input.city ?? "").trim();
+    const province = input.province === undefined ? String(current.province ?? "") : String(input.province ?? "").trim();
+    const country = input.country === undefined ? String(current.country ?? "España") : String(input.country ?? "España").trim();
+    const email = input.email === undefined ? String(current.email ?? "") : String(input.email ?? "").trim();
+    const phone = input.phone === undefined ? String(current.phone ?? "") : String(input.phone ?? "").trim();
+    if (!["autonomo", "sl", "sa", "cooperativa", "otra"].includes(entityType)) throw new Error("Tipo de entidad no válido");
+    if (!["retail_secondhand", "software_studio", "generic"].includes(kind)) throw new Error("Tipo de empresa no válido");
+    if (!legalName || !tradeName) throw new Error("El nombre legal y el nombre comercial son obligatorios");
+    const rows = await sql`
+      UPDATE companies
+      SET legal_name = ${legalName}, trade_name = ${tradeName}, nif = ${nif}, kind = ${kind}, entity_type = ${entityType}, address = ${address}, postal_code = ${postalCode}, city = ${city}, province = ${province}, country = ${country}, email = ${email}, phone = ${phone}, logo_data_url = ${logo}
+      WHERE id = ${companyId} AND active = TRUE
+      RETURNING *
+    `;
+    const r: any = rows[0];
+    return { id: r.id, code: r.code, legal_name: r.legal_name, trade_name: r.trade_name, nif: r.nif, kind: r.kind, entity_type: r.entity_type ?? "otra", address: String(r.address ?? ""), postal_code: String(r.postal_code ?? ""), city: String(r.city ?? ""), province: String(r.province ?? ""), country: String(r.country ?? "España"), email: String(r.email ?? ""), phone: String(r.phone ?? ""), logo_data_url: String(r.logo_data_url ?? ""), active: !!r.active, created_at: toIso(r.created_at) };
+  },
+
+  async create_company(input: CompanyInput, token: string | null): Promise<Company> {
+    const user = await requireSession(token);
+    if (user.role !== "admin" && !user.is_master) throw new Error("Se requieren permisos de administrador");
+    const legalName = String(input.legal_name ?? "").trim();
+    const tradeName = String(input.trade_name ?? legalName).trim();
+    if (!legalName || !tradeName) throw new Error("El nombre legal y el nombre comercial son obligatorios");
+    const entityType = String(input.entity_type ?? "otra");
+    if (!["autonomo", "sl", "sa", "cooperativa", "otra"].includes(entityType)) throw new Error("Tipo de entidad no válido");
+    const kind = input.kind ?? "generic";
+    if (!["retail_secondhand", "software_studio", "generic"].includes(kind)) throw new Error("Tipo de negocio no válido");
+    const logo = String(input.logo_data_url ?? "");
+    const logoError = validateProjectLogo(logo);
+    if (logoError) throw new Error(logoError);
+    const requestedCode = String(input.code ?? tradeName).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 12);
+    const baseCode = requestedCode || `EMPRESA-${Date.now().toString().slice(-6)}`;
+    let code = baseCode;
+    let suffix = 2;
+    while ((await sql`SELECT id FROM companies WHERE code = ${code} LIMIT 1`).length) {
+      code = `${baseCode.slice(0, Math.max(1, 12 - String(suffix).length - 1))}-${suffix++}`;
+    }
+    const rows = await sql`
+      INSERT INTO companies (code, legal_name, trade_name, nif, kind, entity_type, address, postal_code, city, province, country, email, phone, logo_data_url)
+      VALUES (${code}, ${legalName}, ${tradeName}, ${String(input.nif ?? "").trim()}, ${kind}, ${entityType}, ${String(input.address ?? "").trim()}, ${String(input.postal_code ?? "").trim()}, ${String(input.city ?? "").trim()}, ${String(input.province ?? "").trim()}, ${String(input.country ?? "España").trim() || "España"}, ${String(input.email ?? "").trim()}, ${String(input.phone ?? "").trim()}, ${logo})
+      RETURNING *
+    `;
+    const row: any = rows[0];
+    await sql`INSERT INTO company_members (company_id, user_id, role) VALUES (${row.id}, ${user.id}, 'admin') ON CONFLICT (company_id, user_id) DO NOTHING`;
+    return {
+      id: row.id, code: row.code, legal_name: row.legal_name, trade_name: row.trade_name,
+      nif: row.nif, kind: row.kind, entity_type: row.entity_type ?? "otra",
+      address: String(row.address ?? ""), postal_code: String(row.postal_code ?? ""), city: String(row.city ?? ""), province: String(row.province ?? ""), country: String(row.country ?? "España"), email: String(row.email ?? ""), phone: String(row.phone ?? ""), logo_data_url: String(row.logo_data_url ?? ""), active: !!row.active, created_at: toIso(row.created_at),
+    };
+  },
+
   async billing_by_company(token: string | null) {
-    await requireSession(token);
+    const user = await requireSession(token);
     const companies = await loadCompanies();
+    const members = await loadMembers();
+    const visible = companiesVisibleToUser(
+      user.id,
+      members as { company_id: number; user_id: number; role: "admin" | "cajero" }[],
+      companies,
+      { isMaster: !!user.is_master, includeAll: false },
+    );
+    const visibleIds = visible.map((company) => company.id);
+    if (!visibleIds.length) return [];
     const sales = await sql`
       SELECT company_id, total_cents, status FROM sales
+      WHERE company_id IN ${sql(visibleIds)}
     `;
     return billingByCompany(
       sales.map((s) => ({
@@ -1498,8 +2192,44 @@ export const postgresApi = {
         total_cents: s.total_cents,
         status: s.status,
       })),
-      companies,
+      visible,
     );
+  },
+
+  /** Consulta de solo lectura para ver el grupo sin cambiar de empresa activa. */
+  async group_financial_summary(token: string | null) {
+    const user = await requireSession(token);
+    if (!token) throw new Error("Sesión no iniciada");
+    const companies = await loadCompanies();
+    const members = await loadMembers();
+    const visible = companiesVisibleToUser(
+      user.id,
+      members as { company_id: number; user_id: number; role: "admin" | "cajero" }[],
+      companies,
+      { isMaster: !!user.is_master, includeAll: false },
+    );
+    return Promise.all(visible.map(async (company) => {
+      const [invoices, expenses, payments, cash] = await Promise.all([
+        sql`SELECT COALESCE(SUM(total_cents) FILTER (WHERE status = 'issued'), 0)::int AS issued_total, COALESCE(SUM(paid_cents) FILTER (WHERE status = 'issued'), 0)::int AS issued_paid FROM invoices WHERE company_id = ${company.id}`,
+        sql`SELECT COALESCE(SUM(total_cents) FILTER (WHERE status IN ('review','approved','paid')), 0)::int AS received_total FROM expense_documents WHERE company_id = ${company.id}`,
+        sql`SELECT COALESCE(SUM(amount_cents), 0)::int AS received_paid FROM expense_payments WHERE company_id = ${company.id}`,
+        sql`SELECT COALESCE(SUM(amount_cents) FILTER (WHERE kind = 'income'), 0)::int AS cash_income, COALESCE(SUM(amount_cents) FILTER (WHERE kind = 'expense'), 0)::int AS cash_expense FROM cash_movements WHERE company_id = ${company.id}`,
+      ]);
+      const issuedTotal = Number(invoices[0]?.issued_total ?? 0);
+      const issuedPaid = Number(invoices[0]?.issued_paid ?? 0);
+      return {
+        company_id: company.id,
+        code: company.code,
+        trade_name: company.trade_name,
+        issued_total_cents: issuedTotal,
+        issued_paid_cents: issuedPaid,
+        issued_pending_cents: Math.max(0, issuedTotal - issuedPaid),
+        received_total_cents: Number(expenses[0]?.received_total ?? 0),
+        received_paid_cents: Number(payments[0]?.received_paid ?? 0),
+        cash_income_cents: Number(cash[0]?.cash_income ?? 0),
+        cash_expense_cents: Number(cash[0]?.cash_expense ?? 0),
+      };
+    }));
   },
 
   async list_plugins(token: string | null): Promise<TenantPlugin[]> {
@@ -1640,7 +2370,7 @@ export const postgresApi = {
     if (!token) throw new Error("Sesión no iniciada");
     const companyId = await resolveActiveCompanyId(token, user.id);
     if (input.provider !== "google_drive") throw new Error("Proveedor de almacenamiento no soportado");
-    const projects = await sql`SELECT id FROM work_projects WHERE id = ${input.project_id} AND company_id = ${companyId}`;
+    const projects = await sql`SELECT id FROM work_projects WHERE id = ${input.project_id} AND (company_id = ${companyId} OR task_company_id = ${companyId})`;
     if (!projects[0]) throw new Error("Proyecto no encontrado");
     const plugin = await tenantPlugin(companyId, "google_drive");
     const row = await tenantPluginRow(companyId, "google_drive");
@@ -1792,12 +2522,23 @@ export const postgresApi = {
   },
 
   async list_users(token: string | null): Promise<AuthUser[]> {
-    await requireAdmin(token);
-    const users = await sql`
-      SELECT id, username, display_name, phone, avatar_data_url, role, active, created_at, must_change_password, temp_password_issued_at, is_master
-      FROM users
-      ORDER BY id ASC
-    `;
+    const actor = await requireAdmin(token);
+    const companyId = await resolveActiveCompanyId(token, actor.id);
+    // User management is tenant-scoped. A normal company administrator must
+    // never see or mutate accounts that only belong to another company. The
+    // master account is the sole exception and can administer all tenants.
+    const users = actor.is_master
+      ? await sql`
+          SELECT id, username, display_name, phone, avatar_data_url, role, active, created_at, must_change_password, temp_password_issued_at, is_master
+          FROM users
+          ORDER BY id ASC
+        `
+      : await sql`
+          SELECT u.id, u.username, u.display_name, u.phone, u.avatar_data_url, u.role, u.active, u.created_at, u.must_change_password, u.temp_password_issued_at, u.is_master
+          FROM users u
+          INNER JOIN company_members cm ON cm.user_id = u.id AND cm.company_id = ${companyId}
+          ORDER BY u.id ASC
+        `;
     return users.map((u) => ({
       id: u.id,
       username: u.username,
@@ -1814,7 +2555,13 @@ export const postgresApi = {
   },
 
   async upsert_user(input: UserInput, token: string | null): Promise<CreateUserResult> {
-    await requireAdmin(token);
+    const actor = await requireAdmin(token);
+    // Users are created from the active company context.  Previously the
+    // account was inserted in `users` only, leaving it without a
+    // `company_members` row.  Such a user could authenticate but received no
+    // active company, which made the Dev workspace (and its project sections)
+    // disappear on a fresh browser/session.
+    const activeCompanyId = await resolveActiveCompanyId(token, actor.id);
     const now = new Date();
     const role = input.role === "cajero" ? "cajero" : "admin";
     const username = input.username.trim().toLowerCase();
@@ -1823,6 +2570,14 @@ export const postgresApi = {
     if (avatarError) throw new Error(avatarError);
 
     if (input.id) {
+      if (!actor.is_master) {
+        const member = await sql`
+          SELECT 1 FROM company_members
+          WHERE company_id = ${activeCompanyId} AND user_id = ${input.id}
+          LIMIT 1
+        `;
+        if (!member.length) throw new Error("El usuario no pertenece a la empresa activa");
+      }
       const updateData: Record<string, unknown> = {
         username,
         display_name: input.display_name.trim() || username,
@@ -1836,7 +2591,7 @@ export const postgresApi = {
       if (input.pin === "__regen_temp__") {
         temporary_password = generateTempPassword();
         const fields = issueTempCredentialFields();
-        updateData.pin_hash = await hashPin(temporary_password);
+        updateData.pin_hash = await hashCredential(temporary_password);
         updateData.must_change_password = fields.must_change_password;
         updateData.temp_password_issued_at = fields.temp_password_issued_at
           ? new Date(fields.temp_password_issued_at)
@@ -1847,7 +2602,7 @@ export const postgresApi = {
         if (!pinOk && !pwOk) {
           throw new Error(validatePermanentPassword(input.pin) || "Credencial no válida");
         }
-        updateData.pin_hash = await hashPin(input.pin);
+        updateData.pin_hash = await hashCredential(input.pin);
         const cleared = clearTempCredentialFields();
         updateData.must_change_password = cleared.must_change_password;
         updateData.temp_password_issued_at = null;
@@ -1861,6 +2616,11 @@ export const postgresApi = {
       `;
       if (res.length === 0) throw new Error("Usuario no encontrado");
       const u = res[0];
+      await sql`
+        INSERT INTO company_members (company_id, user_id, role)
+        VALUES (${activeCompanyId}, ${u.id}, ${role})
+        ON CONFLICT (company_id, user_id) DO UPDATE SET role = EXCLUDED.role
+      `;
       return {
         user: {
           id: u.id,
@@ -1881,7 +2641,7 @@ export const postgresApi = {
 
     const temporary_password = generateTempPassword();
     const fields = issueTempCredentialFields();
-    const hash = await hashPin(temporary_password);
+    const hash = await hashCredential(temporary_password);
 
     const res = await sql`
       INSERT INTO users (username, display_name, phone, avatar_data_url, role, pin_hash, active, must_change_password, temp_password_issued_at)
@@ -1899,6 +2659,11 @@ export const postgresApi = {
       RETURNING id, username, display_name, phone, avatar_data_url, role, active, created_at, must_change_password, temp_password_issued_at, is_master
     `;
     const u = res[0];
+    await sql`
+      INSERT INTO company_members (company_id, user_id, role)
+      VALUES (${activeCompanyId}, ${u.id}, ${role})
+      ON CONFLICT (company_id, user_id) DO UPDATE SET role = EXCLUDED.role
+    `;
     return {
       user: {
         id: u.id,
@@ -1924,7 +2689,7 @@ export const postgresApi = {
     const ok = await verifyCredential(current_pin, user.pin_hash);
     if (!ok) throw new Error("PIN actual incorrecto");
 
-    const newHash = await hashPin(new_pin);
+    const newHash = await hashCredential(new_pin);
     await sql`
       UPDATE users
       SET pin_hash = ${newHash}, must_change_password = FALSE, temp_password_issued_at = NULL
@@ -1939,7 +2704,7 @@ export const postgresApi = {
     const ok = await verifyCredential(current_password, user.pin_hash);
     if (!ok) throw new Error("Contraseña actual incorrecta");
 
-    const newHash = await hashPin(new_password);
+    const newHash = await hashCredential(new_password);
     const res = await sql`
       UPDATE users
       SET pin_hash = ${newHash}, must_change_password = FALSE, temp_password_issued_at = NULL
@@ -2012,6 +2777,8 @@ export const postgresApi = {
       const existingRes = await sql`SELECT * FROM products WHERE id = ${input.id} AND company_id = ${cid}`;
       if (existingRes.length === 0) throw new Error("Producto no encontrado");
       const existing = existingRes[0];
+      const fieldCheck = validateProductFields(input, existing);
+      if (!fieldCheck.valid) throw new Error(fieldCheck.error);
 
       const publication_status = input.publication_status ?? existing.publication_status ?? "published";
       const sales_policy = input.sales_policy ?? existing.sales_policy ?? "own_stock";
@@ -2065,6 +2832,21 @@ export const postgresApi = {
       `;
       if (res.length === 0) throw new Error("Producto no encontrado");
       const p = res[0];
+      const defaultLocation = await sql`SELECT id FROM stock_locations WHERE company_id=${cid} AND is_default=TRUE LIMIT 1`;
+      if (defaultLocation[0]) {
+        const previousStock = Number(existing.stock ?? 0);
+        const stockDelta = Number(p.stock ?? 0) - previousStock;
+        await sql`
+          INSERT INTO stock_balances (company_id, product_id, location_id, on_hand, reserved, blocked, incoming, available, updated_at)
+          VALUES (${cid}, ${p.id}, ${defaultLocation[0].id}, ${previousStock}, 0, 0, 0, ${previousStock}, NOW())
+          ON CONFLICT (company_id, product_id, location_id) DO NOTHING
+        `;
+        if (stockDelta !== 0) await sql`
+          UPDATE stock_balances
+          SET on_hand=on_hand+${stockDelta}, available=available+${stockDelta}, updated_at=NOW()
+          WHERE company_id=${cid} AND product_id=${p.id} AND location_id=${defaultLocation[0].id}
+        `;
+      }
       return {
         id: p.id,
         company_id: p.company_id,
@@ -2096,6 +2878,8 @@ export const postgresApi = {
       };
     } else {
       // Create
+      const fieldCheck = validateProductFields(input);
+      if (!fieldCheck.valid) throw new Error(fieldCheck.error);
       const defaults = resolveDefaultsForNewProduct(input);
       const publication_status = defaults.publication_status;
       const sales_policy = defaults.sales_policy;
@@ -2156,6 +2940,12 @@ export const postgresApi = {
           INSERT INTO stock_movements (product_id, company_id, delta, reason)
           VALUES (${p.id}, ${cid}, ${p.stock}, 'Stock inicial')
         `;
+        const defaultLocation = await sql`SELECT id FROM stock_locations WHERE company_id=${cid} AND is_default=TRUE LIMIT 1`;
+        if (defaultLocation[0]) await sql`
+          INSERT INTO stock_balances (company_id, product_id, location_id, on_hand, reserved, blocked, incoming, available, updated_at)
+          VALUES (${cid}, ${p.id}, ${defaultLocation[0].id}, ${p.stock}, 0, 0, 0, ${p.stock}, NOW())
+          ON CONFLICT (company_id, product_id, location_id) DO UPDATE SET on_hand=${p.stock}, available=${p.stock}, updated_at=NOW()
+        `;
       }
 
       return {
@@ -2209,6 +2999,7 @@ export const postgresApi = {
   async adjust_stock(product_id: number, delta: number, reason: string, token: string | null): Promise<Product> {
     const user = await requireSession(token); if (!token) throw new Error("Sesión no iniciada");
     const cid = await resolveActiveCompanyId(token, user.id);
+    if (!Number.isInteger(delta) || !Number.isFinite(delta) || delta === 0) throw new Error("El ajuste debe ser un entero distinto de cero");
     const now = new Date();
 
     const updated = await sql.begin(async (tx) => {
@@ -2233,6 +3024,20 @@ export const postgresApi = {
         VALUES (${product_id}, ${cid}, ${delta}, ${reason})
       `;
 
+      const defaultLocation = await tx`SELECT id FROM stock_locations WHERE company_id=${cid} AND is_default=TRUE LIMIT 1`;
+      if (defaultLocation[0]) {
+        await tx`
+          INSERT INTO stock_balances (company_id, product_id, location_id, on_hand, reserved, blocked, incoming, available, updated_at)
+          VALUES (${cid}, ${product_id}, ${defaultLocation[0].id}, ${currentStock}, 0, 0, 0, ${currentStock}, NOW())
+          ON CONFLICT (company_id, product_id, location_id) DO NOTHING
+        `;
+        await tx`
+          UPDATE stock_balances
+          SET on_hand=on_hand+${delta}, available=available+${delta}, updated_at=NOW()
+          WHERE company_id=${cid} AND product_id=${product_id} AND location_id=${defaultLocation[0].id}
+        `;
+      }
+
       return res[0];
     });
 
@@ -2254,11 +3059,23 @@ export const postgresApi = {
     };
   },
 
-  async list_customers(token: string | null): Promise<Customer[]> {
-    await requireSession(token);
-    const customers = await sql`SELECT * FROM customers ORDER BY name ASC`;
+  async list_customers(token: string | null, companyId?: number | null): Promise<Customer[]> {
+    const user = await requireSession(token);
+    const requestedCompanyId = companyId == null
+      ? await resolveActiveCompanyId(token, user.id)
+      : Number(companyId);
+    const members = await loadMembers();
+    if (!canAccessCompany(user.id, requestedCompanyId, members as { company_id: number; user_id: number; role: "admin" | "cajero" }[], !!user.is_master)) {
+      throw new Error("No tienes acceso a esa empresa");
+    }
+    const customers = await sql`
+      SELECT * FROM customers
+      WHERE company_id = ${requestedCompanyId}
+      ORDER BY name ASC
+    `;
     return customers.map((c) => ({
       id: c.id,
+      company_id: c.company_id,
       name: c.name,
       email: c.email,
       phone: c.phone,
@@ -2269,7 +3086,8 @@ export const postgresApi = {
   },
 
   async upsert_customer(input: CustomerInput, token: string | null): Promise<Customer> {
-    await requireSession(token);
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
     if (input.id) {
       const res = await sql`
         UPDATE customers
@@ -2279,13 +3097,14 @@ export const postgresApi = {
           phone = ${input.phone ?? ""},
           nif = ${input.nif ?? ""},
           notes = ${input.notes ?? ""}
-        WHERE id = ${input.id}
+        WHERE id = ${input.id} AND company_id = ${companyId}
         RETURNING *
       `;
       if (res.length === 0) throw new Error("Cliente no encontrado");
       const c = res[0];
       return {
         id: c.id,
+        company_id: c.company_id,
         name: c.name,
         email: c.email,
         phone: c.phone,
@@ -2295,13 +3114,14 @@ export const postgresApi = {
       };
     } else {
       const res = await sql`
-        INSERT INTO customers (name, email, phone, nif, notes)
-        VALUES (${input.name}, ${input.email ?? ""}, ${input.phone ?? ""}, ${input.nif ?? ""}, ${input.notes ?? ""})
+        INSERT INTO customers (company_id, name, email, phone, nif, notes)
+        VALUES (${companyId}, ${input.name}, ${input.email ?? ""}, ${input.phone ?? ""}, ${input.nif ?? ""}, ${input.notes ?? ""})
         RETURNING *
       `;
       const c = res[0];
       return {
         id: c.id,
+        company_id: c.company_id,
         name: c.name,
         email: c.email,
         phone: c.phone,
@@ -2319,6 +3139,13 @@ export const postgresApi = {
     if (lines.length === 0) throw new Error("La venta debe contener al menos una línea");
 
     const sale = await sql.begin(async (tx) => {
+      const customerId = customer_id == null ? null : Number(customer_id);
+      if (customerId != null) {
+        const customerRows = await tx`
+          SELECT id FROM customers WHERE id = ${customerId} AND company_id = ${cid}
+        `;
+        if (customerRows.length === 0) throw new Error("El cliente no pertenece a la empresa activa");
+      }
       // 1. Calcular totales
       let subtotal = 0;
       let totalVat = 0;
@@ -2334,7 +3161,7 @@ export const postgresApi = {
       for (const line of lines) {
         const prod = prodMap.get(line.product_id);
         if (!prod) throw new Error(`Producto ${line.product_id} no encontrado`);
-        if (line.qty <= 0) throw new Error(`Cantidad inválida para ${prod.name}`);
+        if (!Number.isInteger(line.qty) || line.qty <= 0) throw new Error(`Cantidad inválida para ${prod.name}`);
 
         const pubStatus = prod.publication_status || "published";
         const salesPolicy = prod.sales_policy || "own_stock";
@@ -2357,6 +3184,10 @@ export const postgresApi = {
 
         // Unit price: optional override; discount_cents is tax-inclusive (same as TPV / browser-store).
         const unit = line.unit_price_cents ?? prod.price_cents;
+        if (!Number.isInteger(unit) || unit < 0) throw new Error(`Importe inválido para ${prod.name}`);
+        if (line.discount_cents !== undefined && (!Number.isInteger(line.discount_cents) || line.discount_cents < 0)) {
+          throw new Error(`Descuento inválido para ${prod.name}`);
+        }
         const maxDisc = unit * line.qty;
         const discount = Math.min(Math.max(0, line.discount_cents ?? 0), maxDisc);
         const rate: VatRate = isVatRate(Number(prod.vat_rate))
@@ -2387,14 +3218,14 @@ export const postgresApi = {
       // 2. Generar número correlativo
       const now = new Date();
       const year = now.getFullYear();
-      const countRes = await tx`SELECT COUNT(*)::int as count FROM sales WHERE sold_at >= ${new Date(year, 0, 1)}`;
+      const countRes = await tx`SELECT COUNT(*)::int as count FROM sales WHERE company_id=${cid} AND sold_at >= ${new Date(year, 0, 1)}`;
       const corr = String(countRes[0].count + 1).padStart(5, "0");
       const saleNumber = `V${year}-${corr}`;
 
       // 3. Crear venta
       const saleRes = await tx`
         INSERT INTO sales (customer_id, number, subtotal_cents, vat_cents, total_cents, notes, status, company_id)
-        VALUES (${customer_id || null}, ${saleNumber}, ${subtotal}, ${totalVat}, ${total}, ${notes ?? ""}, 'completed', ${cid})
+        VALUES (${customerId}, ${saleNumber}, ${subtotal}, ${totalVat}, ${total}, ${notes ?? ""}, 'completed', ${cid})
         RETURNING *
       `;
       const createdSale = saleRes[0];
@@ -2413,15 +3244,32 @@ export const postgresApi = {
         `;
 
         await tx`
-          INSERT INTO stock_movements (product_id, delta, reason, ref_type, ref_id)
-          VALUES (${cl.product_id}, ${-cl.qty}, 'Venta', 'sale', ${createdSale.id})
+          INSERT INTO stock_movements (product_id, company_id, delta, reason, ref_type, ref_id)
+          VALUES (${cl.product_id}, ${cid}, ${-cl.qty}, 'Venta', 'sale', ${createdSale.id})
         `;
+
+        // The legacy TPV updates products.stock and stock_movements. Bridge it
+        // to the location-aware inventory ledger so both screens agree.
+        const defaultLocation = await tx`SELECT id FROM stock_locations WHERE company_id=${cid} AND is_default=TRUE LIMIT 1`;
+        if (defaultLocation[0]) {
+          const productStock = prodMap.get(cl.product_id)?.stock ?? 0;
+          await tx`
+            INSERT INTO stock_balances (company_id, product_id, location_id, on_hand, reserved, blocked, incoming, available, updated_at)
+            VALUES (${cid}, ${cl.product_id}, ${defaultLocation[0].id}, ${productStock}, 0, 0, 0, ${productStock}, NOW())
+            ON CONFLICT (company_id, product_id, location_id) DO NOTHING
+          `;
+          await tx`
+            UPDATE stock_balances
+            SET on_hand=on_hand-${cl.qty}, available=available-${cl.qty}, updated_at=NOW()
+            WHERE company_id=${cid} AND product_id=${cl.product_id} AND location_id=${defaultLocation[0].id}
+          `;
+        }
       }
 
       // 5. Registrar movimiento de caja
       await tx`
-        INSERT INTO cash_movements (kind, amount_cents, category, description, sale_id)
-        VALUES ('income', ${total}, 'ventas', ${`Venta ${saleNumber}`}, ${createdSale.id})
+        INSERT INTO cash_movements (company_id, kind, amount_cents, category, description, sale_id)
+        VALUES (${cid}, 'income', ${total}, 'ventas', ${`Venta ${saleNumber}`}, ${createdSale.id})
       `;
 
       return createdSale;
@@ -2437,7 +3285,7 @@ export const postgresApi = {
     const sales = await sql`
       SELECT s.*, c.name as customer_name
       FROM sales s
-      LEFT JOIN customers c ON s.customer_id = c.id
+      LEFT JOIN customers c ON s.customer_id = c.id AND c.company_id = s.company_id
       WHERE s.company_id = ${cid}
       ORDER BY s.sold_at DESC
     `;
@@ -2458,12 +3306,13 @@ export const postgresApi = {
   },
 
   async get_sale(id: number, token: string | null): Promise<Sale> {
-    await requireSession(token);
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
     const saleRes = await sql`
       SELECT s.*, c.name as customer_name
       FROM sales s
-      LEFT JOIN customers c ON s.customer_id = c.id
-      WHERE s.id = ${id}
+      LEFT JOIN customers c ON s.customer_id = c.id AND c.company_id = s.company_id
+      WHERE s.id = ${id} AND s.company_id = ${companyId}
     `;
     if (saleRes.length === 0) throw new Error("Venta no encontrada");
     const s = saleRes[0];
@@ -2471,12 +3320,13 @@ export const postgresApi = {
     const lines = await sql`
       SELECT sl.*, p.name as product_name
       FROM sale_lines sl
-      JOIN products p ON sl.product_id = p.id
+      JOIN products p ON sl.product_id = p.id AND p.company_id = ${companyId}
       WHERE sl.sale_id = ${id}
     `;
 
     return {
       id: s.id,
+      company_id: s.company_id,
       customer_id: s.customer_id,
       customer_name: s.customer_name || undefined,
       number: s.number,
@@ -2508,11 +3358,12 @@ export const postgresApi = {
     requests: ReturnLineInput[],
     token: string | null,
   ): Promise<Sale> {
-    await requireSession(token);
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
     const now = new Date();
 
     await sql.begin(async (tx) => {
-      const saleRes = await tx`SELECT * FROM sales WHERE id = ${id}`;
+      const saleRes = await tx`SELECT * FROM sales WHERE id = ${id} AND company_id = ${companyId}`;
       if (saleRes.length === 0) throw new Error("Venta no encontrada");
       const s = saleRes[0];
       const lines = await tx`SELECT * FROM sale_lines WHERE sale_id = ${id}`;
@@ -2546,9 +3397,24 @@ export const postgresApi = {
           UPDATE products SET stock = stock + ${r.qty}, updated_at = ${now} WHERE id = ${r.product_id}
         `;
         await tx`
-          INSERT INTO stock_movements (product_id, delta, reason, ref_type, ref_id)
-          VALUES (${r.product_id}, ${r.qty}, ${plan.cash_description}, 'sale', ${id})
+          INSERT INTO stock_movements (product_id, company_id, delta, reason, ref_type, ref_id)
+          VALUES (${r.product_id}, ${companyId}, ${r.qty}, ${plan.cash_description}, 'sale', ${id})
         `;
+        const defaultLocation = await tx`SELECT id FROM stock_locations WHERE company_id=${companyId} AND is_default=TRUE LIMIT 1`;
+        if (defaultLocation[0]) {
+          const productRows = await tx`SELECT stock FROM products WHERE id=${r.product_id} AND company_id=${companyId}`;
+          const productStock = productRows[0]?.stock ?? 0;
+          await tx`
+            INSERT INTO stock_balances (company_id, product_id, location_id, on_hand, reserved, blocked, incoming, available, updated_at)
+            VALUES (${companyId}, ${r.product_id}, ${defaultLocation[0].id}, ${productStock}, 0, 0, 0, ${productStock}, NOW())
+            ON CONFLICT (company_id, product_id, location_id) DO NOTHING
+          `;
+          await tx`
+            UPDATE stock_balances
+            SET on_hand=on_hand+${r.qty}, available=available+${r.qty}, updated_at=NOW()
+            WHERE company_id=${companyId} AND product_id=${r.product_id} AND location_id=${defaultLocation[0].id}
+          `;
+        }
       }
       await tx`
         UPDATE sales
@@ -2556,8 +3422,8 @@ export const postgresApi = {
         WHERE id = ${id}
       `;
       await tx`
-        INSERT INTO cash_movements (kind, amount_cents, category, description, sale_id)
-        VALUES ('expense', ${plan.cash_expense_cents}, ${plan.cash_category}, ${plan.cash_description}, ${id})
+        INSERT INTO cash_movements (company_id, kind, amount_cents, category, description, sale_id)
+        VALUES (${companyId}, 'expense', ${plan.cash_expense_cents}, ${plan.cash_category}, ${plan.cash_description}, ${id})
       `;
     });
 
@@ -2565,8 +3431,9 @@ export const postgresApi = {
   },
 
   async cancel_sale(id: number, token: string | null): Promise<Sale> {
-    await requireSession(token);
-    const saleRes = await sql`SELECT * FROM sales WHERE id = ${id}`;
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const saleRes = await sql`SELECT * FROM sales WHERE id = ${id} AND company_id = ${companyId}`;
     if (saleRes.length === 0) throw new Error("Venta no encontrada");
     if (saleRes[0].status === "cancelled") throw new Error("La venta ya está cancelada");
     const lines = await sql`SELECT id, qty, returned_qty FROM sale_lines WHERE sale_id = ${id}`;
@@ -2586,7 +3453,7 @@ export const postgresApi = {
     const movements = await sql`
       SELECT cm.*, s.number as sale_number
       FROM cash_movements cm
-      LEFT JOIN sales s ON cm.sale_id = s.id
+      LEFT JOIN sales s ON cm.sale_id = s.id AND s.company_id = cm.company_id
       WHERE cm.company_id = ${companyId}
       ORDER BY cm.occurred_at DESC
     `;
@@ -2609,6 +3476,124 @@ export const postgresApi = {
     const companyId = await resolveActiveCompanyId(token, user.id);
     const rows = await sql`SELECT * FROM invoices WHERE company_id = ${companyId} ORDER BY issued_at DESC, id DESC`;
     return rows.map(formatInvoice);
+  },
+
+  async listBudgets(token: string | null): Promise<Budget[]> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const rows = await sql`SELECT * FROM budgets WHERE company_id=${companyId} ORDER BY operation_date DESC, id DESC`;
+    return rows.map(formatBudget);
+  },
+
+  async getBudget(id: number, token: string | null): Promise<Budget> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const rows = await sql`SELECT * FROM budgets WHERE id=${Number(id)} AND company_id=${companyId}`;
+    if (!rows.length) throw new Error("Presupuesto no encontrado");
+    return formatBudget(rows[0]);
+  },
+
+  async upsertBudget(input: BudgetInput, token: string | null): Promise<Budget> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const projectExplanation = String(input?.project_explanation ?? "").trim();
+    if (!projectExplanation) throw new Error("Explica el proyecto y su alcance antes de guardar el presupuesto");
+    const lines = normalizeBudgetLines(input?.lines ?? []);
+    const baseCents = lines.reduce((sum, line) => sum + line.base_cents, 0);
+    const vatCents = lines.reduce((sum, line) => sum + line.vat_cents, 0);
+    const irpfRate = Math.max(0, Math.min(100, Number(input?.irpf_rate ?? 0)));
+    if (!Number.isFinite(irpfRate)) throw new Error("La retención no es válida");
+    const irpfCents = Math.round(baseCents * irpfRate / 100);
+    const status = (input?.status ?? "draft") as BudgetStatus;
+    if (status !== "draft" && status !== "sent") throw new Error("Un presupuesto solo se guarda como borrador o enviado");
+    const operationDate = String(input?.operation_date ?? "").slice(0, 10) || new Date().toISOString().slice(0, 10);
+    const series = String(input?.series ?? "E").trim().toUpperCase() || "E";
+    const customerId = input?.customer_id == null ? null : Number(input.customer_id);
+    const customerRows = customerId == null ? [] : await sql`SELECT id,name,nif,email FROM customers WHERE id=${customerId} AND company_id=${companyId}`;
+    if (customerId != null && !customerRows.length) throw new Error("El cliente seleccionado no pertenece a la empresa activa");
+    const customer = customerRows[0];
+    const customerName = customer?.name ?? String(input?.customer_name ?? "").trim();
+    const customerNif = customer?.nif ?? String(input?.customer_nif ?? "").trim();
+    const customerEmail = customer?.email ?? String(input?.customer_email ?? "").trim();
+    const tags = Array.isArray(input?.tags) ? input.tags.map((tag) => String(tag).trim()).filter(Boolean).slice(0, 50) : [];
+    const common = {
+      series, status, operationDate, dueAt: input?.due_at ? String(input.due_at).slice(0, 10) : null, customerId, customerName, customerNif, customerEmail,
+      projectExplanation, lines, baseCents, vatCents, irpfRate, irpfCents, totalCents: baseCents + vatCents - irpfCents,
+      paymentMethod: String(input?.payment_method ?? "").trim(), account: String(input?.account ?? "").trim(), tags, notes: String(input?.notes ?? "").trim(),
+    };
+    if (input?.id != null) {
+      const currentRows = await sql`SELECT * FROM budgets WHERE id=${Number(input.id)} AND company_id=${companyId}`;
+      if (!currentRows.length) throw new Error("Presupuesto no encontrado");
+      const current = formatBudget(currentRows[0]);
+      if (!(["draft", "sent"] as string[]).includes(current.status)) throw new Error("Solo se pueden editar presupuestos en borrador o enviados");
+      const rows = await sql`UPDATE budgets SET series=${common.series},status=${common.status},operation_date=${common.operationDate},due_at=${common.dueAt},customer_id=${common.customerId},customer_name=${common.customerName},customer_nif=${common.customerNif},customer_email=${common.customerEmail},project_explanation=${common.projectExplanation},lines=${sql.json(common.lines as any)},base_cents=${common.baseCents},vat_cents=${common.vatCents},irpf_rate=${common.irpfRate},irpf_cents=${common.irpfCents},total_cents=${common.totalCents},payment_method=${common.paymentMethod},account=${common.account},tags=${sql.json(common.tags as any)},notes=${common.notes},updated_at=NOW() WHERE id=${current.id} AND company_id=${companyId} RETURNING *`;
+      return formatBudget(rows[0]);
+    }
+    let number = String(input?.number ?? "").trim().toUpperCase();
+    if (!number) {
+      const year = operationDate.slice(0, 4);
+      const countRows = await sql`SELECT COUNT(*)::int AS count FROM budgets WHERE company_id=${companyId} AND series=${series} AND operation_date >= ${`${year}-01-01`} AND operation_date < ${`${Number(year) + 1}-01-01`}`;
+      number = `${series}${year.slice(-2)}${String(Number(countRows[0]?.count ?? 0) + 1).padStart(4, "0")}`;
+    }
+    const rows = await sql`INSERT INTO budgets (company_id,series,number,status,operation_date,due_at,customer_id,customer_name,customer_nif,customer_email,project_explanation,lines,base_cents,vat_cents,irpf_rate,irpf_cents,total_cents,payment_method,account,tags,notes,created_by) VALUES (${companyId},${common.series},${number},${common.status},${common.operationDate},${common.dueAt},${common.customerId},${common.customerName},${common.customerNif},${common.customerEmail},${common.projectExplanation},${sql.json(common.lines as any)},${common.baseCents},${common.vatCents},${common.irpfRate},${common.irpfCents},${common.totalCents},${common.paymentMethod},${common.account},${sql.json(common.tags as any)},${common.notes},${user.id}) RETURNING *`;
+    return formatBudget(rows[0]);
+  },
+
+  async updateBudgetStatus(id: number, nextStatus: BudgetStatus, token: string | null): Promise<Budget> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const allowed = new Set<BudgetStatus>(["draft", "sent", "accepted", "rejected", "expired", "cancelled"]);
+    if (!allowed.has(nextStatus) || nextStatus === "invoiced") throw new Error("Estado de presupuesto no válido");
+    const currentRows = await sql`SELECT * FROM budgets WHERE id=${Number(id)} AND company_id=${companyId}`;
+    if (!currentRows.length) throw new Error("Presupuesto no encontrado");
+    const current = formatBudget(currentRows[0]);
+    const transitions: Record<string, string[]> = { draft: ["sent", "accepted", "rejected", "cancelled"], sent: ["accepted", "rejected", "expired", "cancelled"], accepted: [], rejected: [], expired: [], cancelled: [], invoiced: [] };
+    if (!transitions[current.status]?.includes(nextStatus)) throw new Error(`No se puede pasar de ${current.status} a ${nextStatus}`);
+    const rows = nextStatus === "accepted"
+      ? await sql`UPDATE budgets SET status='accepted',accepted_at=NOW(),rejected_at=NULL,updated_at=NOW() WHERE id=${current.id} AND company_id=${companyId} RETURNING *`
+      : nextStatus === "rejected"
+        ? await sql`UPDATE budgets SET status='rejected',rejected_at=NOW(),updated_at=NOW() WHERE id=${current.id} AND company_id=${companyId} RETURNING *`
+        : await sql`UPDATE budgets SET status=${nextStatus},updated_at=NOW() WHERE id=${current.id} AND company_id=${companyId} RETURNING *`;
+    return formatBudget(rows[0]);
+  },
+
+  async convertBudgetToInvoice(id: number, token: string | null): Promise<{ budget: Budget; invoice: Invoice }> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const result = await sql.begin(async (tx) => {
+      const budgetRows = await tx`SELECT * FROM budgets WHERE id=${Number(id)} AND company_id=${companyId} FOR UPDATE`;
+      if (!budgetRows.length) throw new Error("Presupuesto no encontrado");
+      const budget = formatBudget(budgetRows[0]);
+      if (budget.status !== "accepted") throw new Error("Solo se puede convertir un presupuesto aceptado");
+      if (budget.invoice_id) throw new Error("Este presupuesto ya tiene una factura");
+      const [companyRows, customerRows, profileRows] = await Promise.all([
+        tx`SELECT * FROM companies WHERE id=${companyId}`,
+        budget.customer_id ? tx`SELECT * FROM customers WHERE id=${budget.customer_id} AND company_id=${companyId}` : Promise.resolve([]),
+        tx`SELECT * FROM fiscal_profiles WHERE company_id=${companyId}`,
+      ]);
+      const company = companyRows[0];
+      if (!company) throw new Error("Empresa no encontrada");
+      const customer = customerRows[0] ? { id: customerRows[0].id, company_id: companyId, name: customerRows[0].name, email: customerRows[0].email ?? "", phone: customerRows[0].phone ?? "", nif: customerRows[0].nif ?? "", notes: "", created_at: toIso(customerRows[0].created_at) } : null;
+      const issuedAt = new Date().toISOString();
+      const invoiceSeries = profileRows[0]?.invoice_series ?? "F";
+      const countRows = await tx`SELECT COUNT(*)::int AS count FROM invoices WHERE company_id=${companyId} AND series=${invoiceSeries} AND issued_at >= ${new Date(`${issuedAt.slice(0, 4)}-01-01T00:00:00Z`)}`;
+      const invoiceNumber = `${issuedAt.slice(0, 4)}-${String(Number(countRows[0]?.count ?? 0) + 1).padStart(5, "0")}`;
+      const invoice = buildManualInvoice({ id: 0, company: { id: company.id, code: company.code, legal_name: company.legal_name, trade_name: company.trade_name, nif: company.nif, kind: company.kind, active: company.active, created_at: toIso(company.created_at) }, customer, lines: budget.lines.map((line) => ({ description: line.description, quantity: line.quantity, unit_price_cents: line.unit_price_cents, vat_rate: line.vat_rate })), invoice: { status: "issued", series: invoiceSeries, kind: customer?.nif ? "complete" : "simplified", operation_date: budget.operation_date, due_at: budget.due_at, irpf_rate: budget.irpf_rate, notes: budget.notes }, created_by: user.id, number: invoiceNumber, issued_at: issuedAt, profile: profileRows[0] ? formatFiscalProfile(profileRows[0]) : null });
+      const invoiceRows = await tx`INSERT INTO invoices (company_id,sale_id,series,number,kind,status,issued_at,operation_date,due_at,seller_legal_name,seller_nif,seller_trade_name,customer_id,customer_name,customer_nif,customer_email,lines,base_cents,vat_cents,irpf_rate,irpf_cents,total_cents,paid_cents,payment_status,notes,created_by) VALUES (${companyId},NULL,${invoice.series},${invoice.number},${invoice.kind},${invoice.status},${invoice.issued_at},${invoice.operation_date},${invoice.due_at},${invoice.seller_legal_name},${invoice.seller_nif},${invoice.seller_trade_name},${invoice.customer_id},${invoice.customer_name},${invoice.customer_nif},${invoice.customer_email},${sql.json(invoice.lines as any)},${invoice.base_cents},${invoice.vat_cents},${invoice.irpf_rate},${invoice.irpf_cents},${invoice.total_cents},0,'pending',${invoice.notes},${user.id}) RETURNING *`;
+      const budgetUpdate = await tx`UPDATE budgets SET status='invoiced',invoice_id=${invoiceRows[0].id},converted_at=NOW(),updated_at=NOW() WHERE id=${budget.id} AND company_id=${companyId} RETURNING *`;
+      return { budget: formatBudget(budgetUpdate[0]), invoice: formatInvoice(invoiceRows[0]), profile: profileRows[0] ? formatFiscalProfile(profileRows[0]) : null };
+    });
+    await this.appendVerifactuRecord(result.invoice, result.profile, "alta");
+    return { budget: result.budget, invoice: result.invoice };
+  },
+
+  async deleteBudget(id: number, token: string | null): Promise<void> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const rows = await sql`SELECT status FROM budgets WHERE id=${Number(id)} AND company_id=${companyId}`;
+    if (!rows.length) throw new Error("Presupuesto no encontrado");
+    if (rows[0].status !== "draft") throw new Error("Solo se pueden eliminar presupuestos en borrador");
+    await sql`DELETE FROM budgets WHERE id=${Number(id)} AND company_id=${companyId}`;
   },
 
   async appendVerifactuRecord(invoice: Invoice, profile: FiscalProfile | null, recordType: "alta" | "anulacion"): Promise<void> {
@@ -2751,17 +3736,19 @@ export const postgresApi = {
     const companyId = await resolveActiveCompanyId(token, user.id);
     const amount = Math.round(Number(input.amount_cents));
     if (!Number.isFinite(amount) || amount <= 0) throw new Error("El importe debe ser mayor que cero");
-    const invoiceRows = await sql`SELECT * FROM invoices WHERE id=${input.invoice_id} AND company_id=${companyId}`;
-    if (!invoiceRows.length) throw new Error("Factura no encontrada");
-    const invoice = formatInvoice(invoiceRows[0]);
-    if (invoice.status !== "issued") throw new Error("Solo se pueden cobrar facturas emitidas");
-    if (amount > invoice.total_cents - invoice.paid_cents) throw new Error("El cobro supera el importe pendiente");
     const paidAt = input.paid_at || new Date().toISOString();
-    const rows = await sql`INSERT INTO invoice_payments (invoice_id,company_id,amount_cents,paid_at,method,notes,created_by) VALUES (${invoice.id},${companyId},${amount},${paidAt},${input.method ?? "bank_transfer"},${input.notes ?? ""},${user.id}) RETURNING *`;
-    const paidCents = invoice.paid_cents + amount;
-    await sql`UPDATE invoices SET paid_cents=${paidCents}, payment_status=${paidCents >= invoice.total_cents ? "paid" : "partial"}, updated_at=NOW() WHERE id=${invoice.id} AND company_id=${companyId}`;
-    await sql`INSERT INTO cash_movements (company_id,kind,amount_cents,category,description,sale_id,occurred_at) VALUES (${companyId},'income',${amount},'cobro_factura',${`Cobro ${invoice.series}-${invoice.number}`},${invoice.sale_id},${paidAt})`;
-    const row = rows[0];
+    const row = await sql.begin(async (tx) => {
+      const invoiceRows = await tx`SELECT * FROM invoices WHERE id=${input.invoice_id} AND company_id=${companyId} FOR UPDATE`;
+      if (!invoiceRows.length) throw new Error("Factura no encontrada");
+      const invoice = formatInvoice(invoiceRows[0]);
+      if (invoice.status !== "issued") throw new Error("Solo se pueden cobrar facturas emitidas");
+      if (amount > invoice.total_cents - invoice.paid_cents) throw new Error("El cobro supera el importe pendiente");
+      const rows = await tx`INSERT INTO invoice_payments (invoice_id,company_id,amount_cents,paid_at,method,notes,created_by) VALUES (${invoice.id},${companyId},${amount},${paidAt},${input.method ?? "bank_transfer"},${input.notes ?? ""},${user.id}) RETURNING *`;
+      const paidCents = invoice.paid_cents + amount;
+      await tx`UPDATE invoices SET paid_cents=${paidCents}, payment_status=${paidCents >= invoice.total_cents ? "paid" : "partial"}, updated_at=NOW() WHERE id=${invoice.id} AND company_id=${companyId}`;
+      await tx`INSERT INTO cash_movements (company_id,kind,amount_cents,category,description,sale_id,occurred_at) VALUES (${companyId},'income',${amount},'cobro_factura',${`Cobro ${invoice.series}-${invoice.number}`},${invoice.sale_id},${paidAt})`;
+      return rows[0];
+    });
     return { id: Number(row.id), invoice_id: Number(row.invoice_id), company_id: Number(row.company_id), amount_cents: Number(row.amount_cents), paid_at: toIso(row.paid_at), method: row.method, notes: row.notes ?? "", created_by: Number(row.created_by) };
   },
 
@@ -2776,13 +3763,39 @@ export const postgresApi = {
     const user = await requireSession(token);
     const companyId = await resolveActiveCompanyId(token, user.id);
     if (!String(input.title ?? "").trim()) throw new Error("El título del gasto es obligatorio.");
+    const allowedStatuses = new Set(["draft", "review", "approved", "paid", "rejected"]);
+    const allowedKinds = new Set(["ticket", "invoice", "simplified_invoice", "credit_note", "receipt"]);
     let id = input.id ? Number(input.id) : null;
+    let existing: any = null;
     if (id) {
-      const existing = await sql`SELECT id FROM expense_documents WHERE id = ${id} AND company_id = ${companyId}`;
-      if (!existing.length) throw new Error("Gasto no encontrado.");
-      await sql`UPDATE expense_documents SET status=${input.status ?? "review"}, kind=${input.kind ?? "invoice"}, title=${String(input.title).trim()}, supplier_name=${input.supplier_name ?? ""}, supplier_tax_id=${input.supplier_tax_id ?? ""}, invoice_number=${input.invoice_number ?? ""}, issued_at=${input.issued_at || null}, accounting_date=${input.accounting_date || input.issued_at || null}, deductible=${input.deductible !== false}, deduction_period=${input.deduction_period ?? null}, due_at=${input.due_at || null}, project_id=${input.project_id ?? null}, category=${input.category ?? "otros"}, base_cents=${input.base_cents ?? 0}, vat_rate=${input.vat_rate ?? 21}, vat_cents=${input.vat_cents ?? 0}, withholding_cents=${input.withholding_cents ?? 0}, total_cents=${input.total_cents ?? 0}, currency=${input.currency ?? "EUR"}, notes=${input.notes ?? ""}, attachments=${sql.json(input.attachments ?? [])}, source=${input.source ?? "manual"}, source_phone=${input.source_phone ?? null}, ocr_confidence=${input.ocr_confidence ?? null}, updated_at=NOW() WHERE id=${id} AND company_id=${companyId}`;
+      const existingRows = await sql`SELECT * FROM expense_documents WHERE id = ${id} AND company_id = ${companyId}`;
+      if (!existingRows.length) throw new Error("Gasto no encontrado.");
+      existing = existingRows[0];
+    }
+    const kind = String(input.kind ?? existing?.kind ?? "invoice");
+    if (!allowedKinds.has(kind)) throw new Error("Tipo de documento no válido.");
+    const vatRate = Number(input.vat_rate ?? existing?.vat_rate ?? 21);
+    if (!isVatRate(vatRate)) throw new Error("El IVA debe ser 0%, 4%, 10% o 21%.");
+    if (input.ocr_confidence !== undefined && input.ocr_confidence !== null && (!Number.isFinite(Number(input.ocr_confidence)) || Number(input.ocr_confidence) < 0 || Number(input.ocr_confidence) > 1)) {
+      throw new Error("La confianza OCR debe estar entre 0 y 1.");
+    }
+    for (const [label, value] of [["base", input.base_cents], ["IVA", input.vat_cents], ["retención", input.withholding_cents], ["total", input.total_cents]] as const) {
+      if (value !== undefined && (!Number.isFinite(Number(value)) || Number(value) < 0)) throw new Error(`El importe de ${label} no puede ser negativo.`);
+    }
+    const projectId = input.project_id == null ? null : Number(input.project_id);
+    if (projectId != null) {
+      const projectRows = await sql`
+        SELECT id FROM work_projects
+        WHERE id=${projectId} AND (company_id=${companyId} OR task_company_id=${companyId})
+      `;
+      if (!projectRows.length) throw new Error("El proyecto no pertenece a la empresa activa.");
+    }
+    const status = String(input.status ?? existing?.status ?? "review");
+    if (!allowedStatuses.has(status)) throw new Error("Estado de gasto no válido.");
+    if (id) {
+      await sql`UPDATE expense_documents SET status=${status}, kind=${kind}, title=${String(input.title).trim()}, supplier_name=${input.supplier_name ?? existing.supplier_name ?? ""}, supplier_tax_id=${input.supplier_tax_id ?? existing.supplier_tax_id ?? ""}, invoice_number=${input.invoice_number ?? existing.invoice_number ?? ""}, issued_at=${input.issued_at ?? existing.issued_at ?? null}, accounting_date=${input.accounting_date ?? input.issued_at ?? existing.accounting_date ?? null}, deductible=${input.deductible ?? existing.deductible ?? true}, deduction_period=${input.deduction_period ?? existing.deduction_period ?? null}, due_at=${input.due_at ?? existing.due_at ?? null}, project_id=${projectId}, category=${input.category ?? existing.category ?? "otros"}, base_cents=${input.base_cents ?? existing.base_cents ?? 0}, vat_rate=${vatRate}, vat_cents=${input.vat_cents ?? existing.vat_cents ?? 0}, withholding_cents=${input.withholding_cents ?? existing.withholding_cents ?? 0}, total_cents=${input.total_cents ?? existing.total_cents ?? 0}, currency=${input.currency ?? existing.currency ?? "EUR"}, notes=${input.notes ?? existing.notes ?? ""}, attachments=${sql.json(input.attachments ?? existing.attachments ?? [])}, source=${input.source ?? existing.source ?? "manual"}, source_phone=${input.source_phone ?? existing.source_phone ?? null}, ocr_confidence=${input.ocr_confidence ?? existing.ocr_confidence ?? null}, updated_at=NOW() WHERE id=${id} AND company_id=${companyId}`;
     } else {
-      const result = await sql`INSERT INTO expense_documents (company_id,status,kind,title,supplier_name,supplier_tax_id,invoice_number,issued_at,accounting_date,deductible,deduction_period,due_at,project_id,category,base_cents,vat_rate,vat_cents,withholding_cents,total_cents,currency,notes,attachments,source,source_phone,ocr_confidence,created_by) VALUES (${companyId},${input.status ?? "review"},${input.kind ?? "invoice"},${String(input.title).trim()},${input.supplier_name ?? ""},${input.supplier_tax_id ?? ""},${input.invoice_number ?? ""},${input.issued_at || null},${input.accounting_date || input.issued_at || null},${input.deductible !== false},${input.deduction_period ?? null},${input.due_at || null},${input.project_id ?? null},${input.category ?? "otros"},${input.base_cents ?? 0},${input.vat_rate ?? 21},${input.vat_cents ?? 0},${input.withholding_cents ?? 0},${input.total_cents ?? 0},${input.currency ?? "EUR"},${input.notes ?? ""},${sql.json(input.attachments ?? [])},${input.source ?? "manual"},${input.source_phone ?? null},${input.ocr_confidence ?? null},${user.id}) RETURNING id`;
+      const result = await sql`INSERT INTO expense_documents (company_id,status,kind,title,supplier_name,supplier_tax_id,invoice_number,issued_at,accounting_date,deductible,deduction_period,due_at,project_id,category,base_cents,vat_rate,vat_cents,withholding_cents,total_cents,currency,notes,attachments,source,source_phone,ocr_confidence,created_by) VALUES (${companyId},${status},${kind},${String(input.title).trim()},${input.supplier_name ?? ""},${input.supplier_tax_id ?? ""},${input.invoice_number ?? ""},${input.issued_at || null},${input.accounting_date || input.issued_at || null},${input.deductible !== false},${input.deduction_period ?? null},${input.due_at || null},${projectId},${input.category ?? "otros"},${input.base_cents ?? 0},${vatRate},${input.vat_cents ?? 0},${input.withholding_cents ?? 0},${input.total_cents ?? 0},${input.currency ?? "EUR"},${input.notes ?? ""},${sql.json(input.attachments ?? [])},${input.source ?? "manual"},${input.source_phone ?? null},${input.ocr_confidence ?? null},${user.id}) RETURNING id`;
       id = result[0].id;
     }
     const rows = await sql`SELECT * FROM expense_documents WHERE id=${id} AND company_id=${companyId}`;
@@ -2792,14 +3805,17 @@ export const postgresApi = {
   async approveExpenseDocument(id: number, token: string | null): Promise<ExpenseDocument> {
     const user = await requireSession(token);
     const companyId = await resolveActiveCompanyId(token, user.id);
-    const current = await sql`SELECT * FROM expense_documents WHERE id=${id} AND company_id=${companyId}`;
-    if (!current.length) throw new Error("Gasto no encontrado.");
-    if (current[0].status === "approved" || current[0].status === "paid") return formatExpenseDocument(current[0]);
-    const rows = await sql`UPDATE expense_documents SET status='approved', approved_at=NOW(), updated_at=NOW() WHERE id=${id} AND company_id=${companyId} RETURNING *`;
-    if (!rows.length) throw new Error("Gasto no encontrado.");
-    const expense = formatExpenseDocument(rows[0]);
-    await sql`INSERT INTO cash_movements (company_id,project_id,kind,amount_cents,category,description,occurred_at) VALUES (${companyId},${expense.project_id},'expense',${expense.total_cents},${expense.category},${expense.title},COALESCE(${expense.issued_at}::timestamptz,NOW()))`;
-    return expense;
+    const result = await sql.begin(async (tx) => {
+      const current = await tx`SELECT * FROM expense_documents WHERE id=${id} AND company_id=${companyId} FOR UPDATE`;
+      if (!current.length) throw new Error("Gasto no encontrado.");
+      if (current[0].status === "approved" || current[0].status === "paid") return formatExpenseDocument(current[0]);
+      if (current[0].status === "rejected") throw new Error("No se puede aprobar un gasto rechazado.");
+      const rows = await tx`UPDATE expense_documents SET status='approved', approved_at=NOW(), updated_at=NOW() WHERE id=${id} AND company_id=${companyId} RETURNING *`;
+      const expense = formatExpenseDocument(rows[0]);
+      await tx`INSERT INTO cash_movements (company_id,project_id,kind,amount_cents,category,description,occurred_at) VALUES (${companyId},${expense.project_id},'expense',${expense.total_cents},${expense.category},${expense.title},COALESCE(${expense.issued_at}::timestamptz,NOW()))`;
+      return expense;
+    });
+    return result;
   },
 
   async listExpensePayments(expenseId: number, token: string | null): Promise<ExpensePayment[]> {
@@ -2814,17 +3830,19 @@ export const postgresApi = {
     const companyId = await resolveActiveCompanyId(token, user.id);
     const amount = Math.round(Number(input.amount_cents));
     if (!Number.isFinite(amount) || amount <= 0) throw new Error("El importe debe ser mayor que cero");
-    const expenseRows = await sql`SELECT * FROM expense_documents WHERE id=${input.expense_id} AND company_id=${companyId}`;
-    if (!expenseRows.length) throw new Error("Factura recibida no encontrada");
-    const expense = formatExpenseDocument(expenseRows[0]);
-    if (expense.status === "rejected") throw new Error("No se puede pagar un documento rechazado");
-    if (amount > expense.total_cents - (expense.paid_cents ?? 0)) throw new Error("El pago supera el importe pendiente");
     const paidAt = input.paid_at || new Date().toISOString();
-    const rows = await sql`INSERT INTO expense_payments (expense_id,company_id,amount_cents,paid_at,method,notes,created_by) VALUES (${expense.id},${companyId},${amount},${paidAt},${input.method ?? "bank_transfer"},${input.notes ?? ""},${user.id}) RETURNING *`;
-    const paidCents = (expense.paid_cents ?? 0) + amount;
-    await sql`UPDATE expense_documents SET paid_cents=${paidCents}, payment_status=${paidCents >= expense.total_cents ? "paid" : "partial"}, status=${paidCents >= expense.total_cents ? "paid" : expense.status}, updated_at=NOW() WHERE id=${expense.id} AND company_id=${companyId}`;
-    await sql`INSERT INTO cash_movements (company_id,project_id,kind,amount_cents,category,description,occurred_at) VALUES (${companyId},${expense.project_id},'expense',${amount},'pago_factura_recibida',${`Pago ${expense.title}`},${paidAt})`;
-    const row = rows[0];
+    const row = await sql.begin(async (tx) => {
+      const expenseRows = await tx`SELECT * FROM expense_documents WHERE id=${input.expense_id} AND company_id=${companyId} FOR UPDATE`;
+      if (!expenseRows.length) throw new Error("Factura recibida no encontrada");
+      const expense = formatExpenseDocument(expenseRows[0]);
+      if (expense.status === "rejected") throw new Error("No se puede pagar un documento rechazado");
+      if (amount > expense.total_cents - (expense.paid_cents ?? 0)) throw new Error("El pago supera el importe pendiente");
+      const rows = await tx`INSERT INTO expense_payments (expense_id,company_id,amount_cents,paid_at,method,notes,created_by) VALUES (${expense.id},${companyId},${amount},${paidAt},${input.method ?? "bank_transfer"},${input.notes ?? ""},${user.id}) RETURNING *`;
+      const paidCents = (expense.paid_cents ?? 0) + amount;
+      await tx`UPDATE expense_documents SET paid_cents=${paidCents}, payment_status=${paidCents >= expense.total_cents ? "paid" : "partial"}, status=${paidCents >= expense.total_cents ? "paid" : expense.status}, updated_at=NOW() WHERE id=${expense.id} AND company_id=${companyId}`;
+      await tx`INSERT INTO cash_movements (company_id,project_id,kind,amount_cents,category,description,occurred_at) VALUES (${companyId},${expense.project_id},'expense',${amount},'pago_factura_recibida',${`Pago ${expense.title}`},${paidAt})`;
+      return rows[0];
+    });
     return { id: Number(row.id), expense_id: Number(row.expense_id), company_id: Number(row.company_id), amount_cents: Number(row.amount_cents), paid_at: toIso(row.paid_at), method: row.method, notes: row.notes ?? "", created_by: Number(row.created_by) };
   },
 
@@ -2833,7 +3851,7 @@ export const postgresApi = {
     if (!match) throw new Error("Dispositivo de WhatsApp no asociado a una empresa.");
     const companyId = Number(match[1]);
     const userId = Number(match[2]);
-    const users = await sql`SELECT id FROM users WHERE id=${userId} AND company_id=${companyId} LIMIT 1`;
+    const users = await sql`SELECT u.id FROM users u INNER JOIN company_members cm ON cm.user_id = u.id WHERE u.id=${userId} AND cm.company_id=${companyId} LIMIT 1`;
     if (!users.length) throw new Error("Dispositivo de WhatsApp no asociado a un usuario válido.");
     const body = String(payload.body ?? payload.caption ?? "");
     const hints = extractExpenseHints(body);
@@ -2845,44 +3863,151 @@ export const postgresApi = {
 
   async processWhatsAppExpenseMessage(deviceId: string, payload: any): Promise<{ state: string; expense?: ExpenseDocument }> {
     const match = /^hexa-(\d+)-(\d+)$/.exec(deviceId);
-    if (!match) throw new Error("Dispositivo de WhatsApp no asociado a una empresa.");
-    const companyId = Number(match[1]);
-    const userId = Number(match[2]);
-    const users = await sql`SELECT id FROM users WHERE id=${userId} AND company_id=${companyId} LIMIT 1`;
-    if (!users.length) throw new Error("Dispositivo de WhatsApp no asociado a un usuario válido.");
+    if (!match) throw new Error("Dispositivo de WhatsApp no asociado a un usuario.");
+    const legacyUserId = Number(match[2]);
+    const linkRows = await sql`SELECT phone,linked_by FROM company_whatsapp_links WHERE device_id=${deviceId} ORDER BY updated_at DESC LIMIT 1`;
+    const userId = linkRows.length ? Number(linkRows[0].linked_by) : legacyUserId;
+    // Route by the receiving phone. If several companies share it, defer the
+    // choice to WhatsApp. The membership fallback keeps pre-migration devices
+    // working until their next status refresh records the explicit link.
+    const companyRows = linkRows.length
+      ? await sql`SELECT c.id,c.trade_name,c.legal_name FROM companies c INNER JOIN company_whatsapp_links wl ON wl.company_id=c.id WHERE wl.phone=${linkRows[0].phone} AND c.active=TRUE ORDER BY c.trade_name,c.id`
+      : await sql`SELECT c.id,c.trade_name,c.legal_name FROM companies c INNER JOIN company_members cm ON cm.company_id=c.id INNER JOIN users u ON u.id=cm.user_id WHERE u.id=${userId} AND u.active=TRUE AND c.active=TRUE ORDER BY c.trade_name,c.id`;
+    if (!companyRows.length) throw new Error("El teléfono de WhatsApp no está asociado a ninguna empresa activa.");
     const from = String(payload.from ?? payload.chat_jid ?? payload.sender_jid ?? "");
     const chatJid = String(payload.chat_jid ?? from);
     const messageId = String(payload.message_id ?? payload.id ?? payload.key?.id ?? "");
+    const senderDigits = from.replace(/\D/g, "");
+    if (!senderDigits || !companyRows.length) return { state: "ignored" };
+    const linkedCompanyIds = companyRows.map((company: any) => Number(company.id));
+    const authorizedSender = await sql`
+      SELECT DISTINCT u.id
+      FROM users u
+      INNER JOIN company_members cm ON cm.user_id = u.id
+      WHERE u.active = TRUE
+        AND regexp_replace(COALESCE(u.phone, ''), '\\D', '', 'g') = ${senderDigits}
+        AND cm.company_id IN ${sql(linkedCompanyIds)}
+      LIMIT 1
+    `;
+    // Documents are accepted only from a phone explicitly registered on an
+    // active Hexa user who belongs to the receiving company. Unknown senders
+    // are deliberately silent: no reply, no pending row and no expense.
+    if (!authorizedSender.length) return { state: "ignored" };
     const mediaType = String(payload.media_type ?? payload.type ?? payload.message_type ?? "").toLowerCase();
     const hasMedia = Boolean(payload.image || payload.document || payload.media || payload.filename || payload.url) || ["image", "document", "file", "pdf"].some((kind) => mediaType.includes(kind));
     if (hasMedia) {
       if (!messageId) throw new Error("El mensaje multimedia no incluye identificador para descargarlo.");
       const caption = String(payload.caption ?? payload.body ?? payload.content ?? "");
-      await sql`INSERT INTO whatsapp_expense_pending (company_id,user_id,device_id,message_id,chat_jid,from_phone,caption,media_type,status,updated_at) VALUES (${companyId},${userId},${deviceId},${messageId},${chatJid},${from},${caption},${mediaType || "image"},'awaiting_type',NOW()) ON CONFLICT (device_id,message_id) DO UPDATE SET status='awaiting_type',updated_at=NOW()`;
+      const companyId = companyRows.length === 1 ? Number(companyRows[0].id) : null;
+      const initialStatus = companyId == null ? "awaiting_company" : "awaiting_type";
+      const inserted = await sql`INSERT INTO whatsapp_expense_pending (company_id,user_id,device_id,message_id,chat_jid,from_phone,caption,media_type,status,updated_at) VALUES (${companyId},${userId},${deviceId},${messageId},${chatJid},${from},${caption},${mediaType || "image"},${initialStatus},NOW()) ON CONFLICT (device_id,message_id) DO NOTHING RETURNING id`;
+      // GOWA retries webhooks. Do not reopen or duplicate a document that is
+      // already waiting for classification (or has already been processed).
+      if (!inserted.length) return { state: "duplicate" };
       if (from) {
-        try { await gowaSendExpenseTypePoll(deviceId, from); }
-        catch { await gowaSendText(deviceId, from, "He recibido el documento 📎. Responde TICKET, FACTURA, FACTURA SIMPLIFICADA, ABONO o JUSTIFICANTE."); }
+        try {
+          const link = await createWhatsAppUploadLink(Number(inserted[0].id));
+          await gowaSendText(deviceId, from, `He recibido tu documento 📎\n\nClica aquí para revisarlo y elegir el tipo:\n${link}\n\nEl enlace caduca en ${WHATSAPP_UPLOAD_LINK_TTL_MINUTES} minutos.`);
+        } catch (error) {
+          console.warn("Public WhatsApp upload link unavailable; using poll fallback", error);
+          if (companyId == null) {
+            const choices = companyRows.map((company, index) => `${index + 1}. ${company.trade_name || company.legal_name}`).join("\n");
+            await gowaSendText(deviceId, from, `He recibido el documento 📎. ¿Para qué empresa es?\n${choices}\n\nResponde con el número o el nombre.`);
+          } else {
+            await sendExpenseTypePrompt(deviceId, from);
+          }
+        }
       }
+      return { state: initialStatus };
+    }
+    const pollSelection = Array.isArray(payload.selected_options)
+      ? payload.selected_options[0]
+      : payload.selected_options?.option ?? payload.selected_option ?? payload.vote ?? payload.poll_answer ?? "";
+    // Our patched GOWA exposes the decrypted WhatsApp poll vote as SHA-256
+    // option hashes. WhatsApp deliberately sends hashes, not the label text;
+    // map the fixed document-classification poll back to its visible label.
+    const selectedPollHashes = Array.isArray(payload.selected_option_hashes)
+      ? payload.selected_option_hashes.map((value: unknown) => String(value).toLowerCase())
+      : [];
+    const selectedPollLabel = [
+      ["Ticket", "ticket"],
+      ["Factura", "factura"],
+      ["Factura simplificada", "factura simplificada"],
+      ["Abono", "abono"],
+      ["Justificante", "justificante"],
+    ].find(([label]) => selectedPollHashes.includes(sha256HexSync(label).toLowerCase()))?.[1] ?? "";
+    const listSelection = payload.list_response?.row_id ?? payload.list_response?.id ?? payload.list_response?.title
+      ?? payload.selected_row_id ?? payload.row_id ?? payload.list?.row_id ?? payload.list?.title ?? "";
+    const nestedText = typeof payload.text === "object" && payload.text !== null
+      ? (payload.text as any).body ?? (payload.text as any).text ?? (payload.text as any).content ?? ""
+      : payload.text;
+    const rawTypeText = listSelection || pollSelection || selectedPollLabel || payload.body || payload.content || nestedText
+      || payload.message?.text || payload.message?.body || payload.message?.content || "";
+    const text = String(rawTypeText).normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+    const kind = text === "1" || text.includes("ticket") ? "ticket"
+      : text === "2" || text === "factura" ? "invoice"
+      : text === "3" || text.includes("simplificada") ? "simplified_invoice"
+      : text === "4" || text.includes("abono") || text.includes("rectific") ? "credit_note"
+      : text === "5" || text.includes("justificante") || text.includes("recibo") ? "receipt"
+      : text.includes("factura") ? "invoice" : null;
+    const pendingRows = from ? await sql`SELECT * FROM whatsapp_expense_pending WHERE device_id=${deviceId} AND from_phone=${from} AND status IN ('awaiting_company','awaiting_type') ORDER BY created_at DESC LIMIT 1` : [];
+    if (!pendingRows.length) return { state: "ignored" };
+    const pending = pendingRows[0];
+    if (pending.status === "awaiting_company") {
+      const selectedIndex = /^\d+$/.test(text) ? Number(text) - 1 : -1;
+      const selected = selectedIndex >= 0
+        ? companyRows[selectedIndex]
+        : companyRows.find((company) => [company.trade_name, company.legal_name].some((name) => String(name || "").trim().toLowerCase() === text));
+      if (!selected) {
+        const choices = companyRows.map((company, index) => `${index + 1}. ${company.trade_name || company.legal_name}`).join("\n");
+        await gowaSendText(deviceId, from, `No he identificado la empresa. Responde con el número o el nombre:\n${choices}`);
+        return { state: "awaiting_company" };
+      }
+      await sql`UPDATE whatsapp_expense_pending SET company_id=${selected.id},status='awaiting_type',updated_at=NOW() WHERE id=${pending.id} AND status='awaiting_company'`;
+      await sendExpenseTypePrompt(deviceId, from);
       return { state: "awaiting_type" };
     }
-    const pollSelection = Array.isArray(payload.selected_options) ? payload.selected_options[0] : payload.selected_option ?? payload.vote ?? "";
-    const text = String(pollSelection || payload.body || payload.content || payload.text || "").trim().toLowerCase();
-    const kind = text.includes("simplificada") ? "simplified_invoice" : text.includes("ticket") ? "ticket" : text.includes("abono") || text.includes("rectific") ? "credit_note" : text.includes("justificante") || text.includes("recibo") ? "receipt" : text.includes("factura") ? "invoice" : null;
-    const pendingRows = from ? await sql`SELECT * FROM whatsapp_expense_pending WHERE device_id=${deviceId} AND from_phone=${from} AND status='awaiting_type' ORDER BY created_at DESC LIMIT 1` : [];
-    if (!pendingRows.length) return { state: "ignored" };
     if (!kind) {
       await gowaSendText(deviceId, from, "No he identificado el tipo. Responde TICKET, FACTURA, FACTURA SIMPLIFICADA, ABONO o JUSTIFICANTE.");
       return { state: "awaiting_type" };
     }
-    const pending = pendingRows[0];
+    const companyId = Number(pending.company_id);
+    if (!companyId || !companyRows.some((company) => Number(company.id) === companyId)) throw new Error("La empresa seleccionada ya no está disponible para este teléfono.");
     const media = await gowaDownloadMessageMedia(deviceId, pending.message_id, pending.chat_jid);
-    const settingsRows = await sql`SELECT key, value FROM settings WHERE key IN ('ollama_url','ollama_model')`;
-    const settingsMap = new Map(settingsRows.map((row) => [row.key, row.value]));
-    const vision = await extractExpenseFromImage(media.data_url, pending.caption, { baseUrl: settingsMap.get("ollama_url"), model: settingsMap.get("ollama_model") });
+    const settingsRows = await sql`
+      SELECT key, value
+      FROM settings
+      WHERE key IN ('ollama_url','ollama_model')
+         OR key IN (${companySettingKey(companyId, "ollama_url")}, ${companySettingKey(companyId, "ollama_model")})
+    `;
+    let vision: ExpenseDocumentInput = {};
+    let visionError = "";
+    try {
+      vision = await extractExpenseFromImage(media.data_url, pending.caption, {
+        baseUrl: settingValue(settingsRows, companyId, "ollama_url") || undefined,
+        model: settingValue(settingsRows, companyId, "ollama_model") || undefined,
+      });
+    } catch (error) {
+      // A broken/missing vision model must not discard the document or make
+      // GOWA retry the same poll indefinitely. Keep the attachment in review
+      // with caption-derived hints and tell the sender what happened.
+      visionError = error instanceof Error ? error.message : "El lector automático no está disponible";
+      console.warn("WhatsApp OCR unavailable; keeping document for manual review", visionError);
+    }
     const hints = { ...extractExpenseHints(pending.caption), ...vision };
-    const expense = await this.upsertExpenseDocument({ kind, title: hints.title || media.name, supplier_name: hints.supplier_name || "", supplier_tax_id: hints.supplier_tax_id || "", invoice_number: hints.invoice_number || "", issued_at: hints.issued_at || null, base_cents: hints.base_cents || 0, vat_cents: hints.vat_cents || 0, total_cents: hints.total_cents || 0, notes: hints.notes || pending.caption, ocr_confidence: hints.ocr_confidence ?? 0.8, attachments: [{ id: `wa-${pending.message_id}`, name: media.name, mime_type: media.mime_type, size: Math.floor((media.data_url.length * 3) / 4), data_url: media.data_url }], source: "whatsapp", source_phone: pending.from_phone }, null);
-    await sql`UPDATE whatsapp_expense_pending SET status='processed',updated_at=NOW() WHERE id=${pending.id}`;
-    await gowaSendText(deviceId, from, `Documento recibido como ${kind === "ticket" ? "ticket" : kind === "credit_note" ? "abono" : "factura"}. Lo he dejado en Gastos y facturas para revisión.`);
+    // A webhook has no browser session. Persist with the company and user that
+    // were cryptographically bound to the GOWA device instead of calling the
+    // session-protected upsertExpenseDocument method.
+    const attachments = [{ id: `wa-${pending.message_id}`, name: media.name, mime_type: media.mime_type, size: Math.floor((media.data_url.length * 3) / 4), data_url: media.data_url }];
+    const expenseRows = await sql.begin(async (tx) => {
+      const rows = await tx`INSERT INTO expense_documents (company_id,status,kind,title,supplier_name,supplier_tax_id,invoice_number,issued_at,accounting_date,base_cents,vat_cents,total_cents,notes,attachments,source,source_phone,ocr_confidence,created_by) VALUES (${companyId},'review',${kind},${hints.title || media.name},${hints.supplier_name || ""},${hints.supplier_tax_id || ""},${hints.invoice_number || ""},${hints.issued_at || null},${hints.issued_at || null},${hints.base_cents || 0},${hints.vat_cents || 0},${hints.total_cents || 0},${hints.notes || pending.caption},${tx.json(attachments)},'whatsapp',${pending.from_phone},${hints.ocr_confidence ?? 0.8},${userId}) RETURNING *`;
+      await tx`UPDATE whatsapp_expense_pending SET status='processed',updated_at=NOW() WHERE id=${pending.id} AND status='awaiting_type'`;
+      return rows;
+    });
+    const expense = formatExpenseDocument(expenseRows[0]);
+    await gowaSendText(deviceId, from, visionError
+      ? `Documento recibido como ${kind === "ticket" ? "ticket" : kind === "credit_note" ? "abono" : "factura"}. Lo he dejado en Gastos y facturas para revisión; no he podido leer automáticamente todos los datos.`
+      : `Documento recibido como ${kind === "ticket" ? "ticket" : kind === "credit_note" ? "abono" : "factura"}. Lo he dejado en Gastos y facturas para revisión.`);
     return { state: "processed", expense };
   },
 
@@ -2901,11 +4026,13 @@ export const postgresApi = {
   async create_cash_movement(input: CashInput, token: string | null): Promise<CashMovement> {
     const user = await requireSession(token);
     const companyId = await resolveActiveCompanyId(token, user.id);
-    if (input.amount_cents <= 0) throw new Error("El importe debe ser mayor que cero");
+    const amount = Number(input.amount_cents);
+    if (!Number.isInteger(amount) || amount <= 0) throw new Error("El importe debe ser un entero mayor que cero");
+    if (!["income", "expense", "adjustment"].includes(input.kind)) throw new Error("Tipo de movimiento no válido");
     if (input.project_id != null) {
       const projectRows = await sql`
         SELECT id, customer_id FROM work_projects
-        WHERE id = ${input.project_id} AND company_id = ${companyId}
+        WHERE id = ${input.project_id} AND (company_id = ${companyId} OR task_company_id = ${companyId})
       `;
       if (projectRows.length === 0) throw new Error("Proyecto no encontrado.");
       if (projectRows[0].customer_id == null) {
@@ -2916,7 +4043,7 @@ export const postgresApi = {
     const occurredAt = input.occurred_at?.trim() || null;
     const res = await sql`
       INSERT INTO cash_movements (company_id, project_id, kind, amount_cents, category, description, occurred_at)
-      VALUES (${companyId}, ${input.project_id ?? null}, ${input.kind}, ${input.amount_cents}, ${input.category || "otros"}, ${input.description || ""}, COALESCE(${occurredAt}::timestamptz, NOW()))
+      VALUES (${companyId}, ${input.project_id ?? null}, ${input.kind}, ${amount}, ${input.category || "otros"}, ${input.description || ""}, COALESCE(${occurredAt}::timestamptz, NOW()))
       RETURNING *
     `;
     const m = res[0];
@@ -2948,7 +4075,8 @@ export const postgresApi = {
   },
 
   async vat_summary(from: string, to: string, token: string | null): Promise<VatSummary> {
-    await requireSession(token);
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
     // completed + partially_returned; net amounts after returned_qty (ciclo 8)
     const lines = await sql`
       SELECT sl.id, sl.product_id, sl.qty, sl.returned_qty, sl.vat_rate,
@@ -2956,6 +4084,7 @@ export const postgresApi = {
       FROM sale_lines sl
       JOIN sales s ON sl.sale_id = s.id
       WHERE s.status IN ('completed', 'partially_returned')
+        AND s.company_id = ${companyId}
         AND s.sold_at >= ${new Date(from)}
         AND s.sold_at <= ${new Date(to + "T23:59:59.999Z")}
     `;
@@ -3150,26 +4279,27 @@ export const postgresApi = {
   },
 
   async get_settings(token: string | null): Promise<Settings> {
-    await requireSession(token);
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const companyRows = await sql`SELECT trade_name FROM companies WHERE id = ${companyId} AND active = TRUE`;
     const rows = await sql`SELECT key, value FROM settings`;
-    const settingsMap = new Map(rows.map((r) => [r.key, r.value]));
 
     return {
-      shop_name: settingsMap.get("shop_name") || "Mi Tienda",
-      ollama_model: settingsMap.get("ollama_model") || "qwen3.5:4b",
-      ollama_url: settingsMap.get("ollama_url") || "http://127.0.0.1:11434",
+      shop_name: String(companyRows[0]?.trade_name || settingValue(rows, companyId, "shop_name", "Mi Tienda")),
+      ollama_model: settingValue(rows, companyId, "ollama_model", "qwen3.5:4b"),
+      ollama_url: settingValue(rows, companyId, "ollama_url", "http://127.0.0.1:11434"),
       default_vat: (() => {
-        const n = Number(settingsMap.get("default_vat") || "21");
+        const n = Number(settingValue(rows, companyId, "default_vat", "21"));
         return isVatRate(n) ? n : 21;
       })(),
       idle_timeout_minutes: (() => {
-        const n = Number(settingsMap.get("idle_timeout_minutes") || "15");
+        const n = Number(settingValue(rows, companyId, "idle_timeout_minutes", "15"));
         return Number.isInteger(n) && n >= 0 && n <= 480 ? n : 15;
       })(),
-      last_backup_at: settingsMap.get("last_backup_at") || null,
+      last_backup_at: settingValue(rows, companyId, "last_backup_at") || null,
       monthly_economic_goals: (() => {
         try {
-          const parsed = JSON.parse(settingsMap.get("monthly_economic_goals") || "{}");
+          const parsed = JSON.parse(settingValue(rows, companyId, "monthly_economic_goals", "{}"));
           return parsed && typeof parsed === "object" ? parsed : {};
         } catch {
           return {};
@@ -3179,7 +4309,8 @@ export const postgresApi = {
   },
 
   async update_settings(partial: Partial<Settings>, token: string | null): Promise<Settings> {
-    await requireAdmin(token);
+    const user = await requireAdmin(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
     const allowed: (keyof Settings)[] = [
       "shop_name",
       "ollama_model",
@@ -3201,9 +4332,12 @@ export const postgresApi = {
         const storedValue = key === "monthly_economic_goals"
           ? JSON.stringify(value)
           : value == null ? "" : value.toString();
+        if (key === "shop_name") {
+          await sql`UPDATE companies SET trade_name = ${String(value ?? "").trim()} WHERE id = ${companyId} AND active = TRUE`;
+        }
         await sql`
           INSERT INTO settings (key, value)
-          VALUES (${key}, ${storedValue})
+          VALUES (${companySettingKey(companyId, key)}, ${storedValue})
           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
         `;
       }
@@ -3214,6 +4348,7 @@ export const postgresApi = {
   async ai_chat(messages: AiMessage[], token: string | null): Promise<AiChatResult> {
     const me = await requireSession(token);
     const settings = await this.get_settings(token);
+    const cid = await resolveActiveCompanyId(token, me.id);
 
     const todayStr = new Date().toISOString().slice(0, 10);
 
@@ -3222,7 +4357,7 @@ export const postgresApi = {
     const lowStockProds = await sql`
       SELECT name, stock, price_cents
       FROM products
-      WHERE active = TRUE
+      WHERE active = TRUE AND company_id = ${cid}
       ORDER BY stock ASC
       LIMIT 10
     `;
@@ -3317,26 +4452,32 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
 
   async reset_demo(token: string | null): Promise<void> {
     await requireAdmin(token);
+    if (CENTRAL_MODE) {
+      throw new Error("Restaurar demo está desactivado en el CRM central; no se pueden borrar datos de otras empresas.");
+    }
     // Truncar tablas y volver a sembrar
     await sql`TRUNCATE TABLE sessions, work_items, work_projects, work_categories, cash_movements, sale_lines, sales, stock_movements, products, customers RESTART IDENTITY CASCADE`;
     await seedProductsAndCustomers();
   },
 
   async export_backup(token: string | null): Promise<BackupEnvelope> {
-    await requireAdmin(token);
+    const user = await requireAdmin(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
     const [products, customers, sales, sale_lines, cash_movements, stock_movements, settings, users, work_categories, work_projects, work_items] =
       await Promise.all([
-        sql`SELECT * FROM products ORDER BY id`,
-        sql`SELECT * FROM customers ORDER BY id`,
-        sql`SELECT * FROM sales ORDER BY id`,
-        sql`SELECT * FROM sale_lines ORDER BY id`,
-        sql`SELECT * FROM cash_movements ORDER BY id`,
-        sql`SELECT * FROM stock_movements ORDER BY id`,
-        sql`SELECT * FROM settings ORDER BY key`,
-        sql`SELECT id, username, display_name, role, active, created_at, must_change_password, temp_password_issued_at FROM users ORDER BY id`,
-        sql`SELECT * FROM work_categories ORDER BY id`,
-        sql`SELECT * FROM work_projects ORDER BY id`,
-        sql`SELECT * FROM work_items ORDER BY id`,
+        sql`SELECT * FROM products WHERE company_id = ${companyId} ORDER BY id`,
+        sql`SELECT * FROM customers WHERE company_id = ${companyId} ORDER BY id`,
+        sql`SELECT * FROM sales WHERE company_id = ${companyId} ORDER BY id`,
+        sql`SELECT sl.* FROM sale_lines sl JOIN sales s ON s.id = sl.sale_id WHERE s.company_id = ${companyId} ORDER BY sl.id`,
+        sql`SELECT * FROM cash_movements WHERE company_id = ${companyId} ORDER BY id`,
+        sql`SELECT * FROM stock_movements WHERE company_id = ${companyId} ORDER BY id`,
+        sql`SELECT * FROM settings WHERE key LIKE ${`company:${companyId}:%`} OR key = 'whatsapp_webhook_trace' ORDER BY key`,
+        sql`SELECT u.id, u.username, u.display_name, u.role, u.active, u.created_at, u.must_change_password, u.temp_password_issued_at
+            FROM users u INNER JOIN company_members cm ON cm.user_id = u.id
+            WHERE cm.company_id = ${companyId} ORDER BY u.id`,
+        sql`SELECT * FROM work_categories WHERE company_id = ${companyId} ORDER BY id`,
+        sql`SELECT * FROM work_projects WHERE company_id = ${companyId} OR task_company_id = ${companyId} ORDER BY id`,
+        sql`SELECT * FROM work_items WHERE company_id = ${companyId} ORDER BY id`,
       ]);
     const backup = await createBackupEnvelope({
       backend: "postgres",
@@ -3353,7 +4494,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
       work_items,
     });
     await sql`
-      INSERT INTO settings (key, value) VALUES ('last_backup_at', ${backup.created_at})
+      INSERT INTO settings (key, value) VALUES (${companySettingKey(companyId, "last_backup_at")}, ${backup.created_at})
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
     `;
     return backup;
@@ -3365,15 +4506,14 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     return createPreMigrationBackup(full.payload, reason);
   },
 
-  async restore_backup(raw: unknown, token: string | null): Promise<void> {
-    await requireAdmin(token);
+  async restore_backup(raw: unknown, token: string | null): Promise<{ imported: Record<string, number> }> {
+    const user = await requireAdmin(token);
     const v = await validateBackup(raw);
     if (!v.ok) throw new Error(v.error);
     const p = v.envelope.payload as { backend?: string; products?: unknown[] };
     if (!p || p.backend !== "postgres" || !Array.isArray(p.products)) {
-      throw new Error(
-        "Copia inválida o de otro backend. Restaura copias Postgres con este endpoint; localStorage usa la app browser.",
-      );
+      const companyId = await resolveActiveCompanyId(token, user.id);
+      return { imported: await importLocalBackup(v.envelope.payload, companyId, user.id) };
     }
     // Conservative: full restore is destructive; require explicit structure
     throw new Error(
@@ -3391,7 +4531,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
 
     let query = sql`
       SELECT * FROM work_projects
-      WHERE company_id = ${companyId}
+      WHERE (company_id = ${companyId} OR task_company_id = ${companyId})
     `;
     if (status_filter && status_filter.trim() !== "" && status_filter !== "all") {
       query = sql`${query} AND status = ${status_filter.trim()}`;
@@ -3409,7 +4549,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
 
     const rows = await sql`
       SELECT * FROM work_projects
-      WHERE company_id = ${companyId}
+      WHERE (company_id = ${companyId} OR task_company_id = ${companyId})
         AND (uid::text = ${ref} OR (${numericId}::integer IS NOT NULL AND id = ${numericId}))
     `;
     if (rows.length === 0) throw new Error("Proyecto no encontrado.");
@@ -3433,7 +4573,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     if (input.id != null) {
       const existingRows = await sql`
         SELECT * FROM work_projects
-        WHERE id = ${input.id} AND company_id = ${companyId}
+        WHERE id = ${input.id} AND (company_id = ${companyId} OR task_company_id = ${companyId})
       `;
       if (existingRows.length === 0) throw new Error("Proyecto no encontrado.");
       existing = existingRows[0];
@@ -3451,6 +4591,29 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     }
 
     const status = input.status ?? existing?.status ?? "planned";
+    const projectType = input.project_type ?? existing?.project_type ?? (existing?.customer_id == null ? "own" : "client");
+    if (!["own", "client", "internal"].includes(projectType)) throw new Error("Tipo de proyecto no válido.");
+    const requestedClientCompanyId = input.client_company_id !== undefined
+      ? (input.client_company_id ?? null)
+      : (existing?.client_company_id ?? null);
+    // Own products are managed by the studio itself and never retain a
+    // client-company relation when changing type from client/internal.
+    const clientCompanyId = projectType === "own" ? null : requestedClientCompanyId;
+    if (projectType === "internal" && clientCompanyId == null && input.project_type !== undefined) throw new Error("Selecciona la empresa propietaria.");
+    if (clientCompanyId != null) {
+      const companyRows = await sql`SELECT id FROM companies WHERE id = ${clientCompanyId} AND active = TRUE`;
+      if (companyRows.length === 0) throw new Error("Empresa cliente no encontrada.");
+      const members = await loadMembers();
+      if (!canAccessCompany(user.id, Number(clientCompanyId), members as { company_id: number; user_id: number; role: "admin" | "cajero" }[], !!user.is_master)) throw new Error("No tienes acceso a la empresa cliente.");
+    }
+    const taskCompanyId = projectType === "internal" ? clientCompanyId : companyId;
+    if (projectType === "internal" && taskCompanyId == null) throw new Error("Selecciona la empresa propietaria.");
+    if (taskCompanyId != null) {
+      const taskCompanyRows = await sql`SELECT id FROM companies WHERE id = ${taskCompanyId} AND active = TRUE`;
+      if (taskCompanyRows.length === 0) throw new Error("Empresa de tareas no encontrada.");
+      const taskMembers = await loadMembers();
+      if (!canAccessCompany(user.id, Number(taskCompanyId), taskMembers as { company_id: number; user_id: number; role: "admin" | "cajero" }[], !!user.is_master)) throw new Error("No tienes acceso a la empresa de tareas.");
+    }
     const valueCents = input.value_cents ?? existing?.value_cents ?? 0;
     if (valueCents < 0) throw new Error("El valor del proyecto no puede ser negativo.");
     const monthlyEstimateCents = input.revenue_milestones !== undefined
@@ -3473,13 +4636,18 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     const techStack = input.tech_stack !== undefined ? normalizeTechStack(input.tech_stack) : normalizeTechStack(existing?.tech_stack);
     const brief = input.brief !== undefined ? normalizeProjectBrief(input.brief, techStack) : normalizeProjectBrief(existing?.brief, techStack);
     const logoDataUrl = input.logo_data_url !== undefined ? input.logo_data_url : (existing?.logo_data_url ?? "");
-    const customerId = input.customer_id !== undefined
+    const ownerLogoRows = projectType === "own"
+      ? await sql`SELECT logo_data_url FROM companies WHERE id = ${existing?.company_id ?? companyId}`
+      : [];
+    const effectiveLogoDataUrl = logoDataUrl || String(ownerLogoRows[0]?.logo_data_url ?? "");
+    const requestedCustomerId = input.customer_id !== undefined
       ? input.customer_id
       : (existing?.customer_id ?? null);
+    const customerId = projectType === "client" ? requestedCustomerId : null;
     if (customerId != null) {
       const customerRows = await sql`
         SELECT id FROM customers
-        WHERE id = ${customerId} AND company_id = ${companyId}
+        WHERE id = ${customerId} AND company_id = ${existing?.company_id ?? companyId}
       `;
       if (customerRows.length === 0) {
         throw new Error("Cliente no encontrado en la empresa activa.");
@@ -3491,6 +4659,9 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
       const updated = await sql`
         UPDATE work_projects SET
           name = ${name},
+          project_type = ${projectType},
+          client_company_id = ${clientCompanyId},
+          task_company_id = ${taskCompanyId ?? existing?.company_id ?? companyId},
           description = ${description},
           status = ${status},
           customer_id = ${customerId},
@@ -3502,21 +4673,21 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
           prd = ${prd},
           tech_stack = ${sql.json(techStack as any)},
           brief = ${sql.json(brief as any)},
-          logo_data_url = ${logoDataUrl},
+          logo_data_url = ${effectiveLogoDataUrl},
           start_date = ${startDate},
           target_date = ${targetDate},
           updated_at = NOW()
-        WHERE id = ${existing.id} AND company_id = ${companyId}
+        WHERE id = ${existing.id} AND company_id = ${existing.company_id}
         RETURNING id
       `;
       projectId = updated[0].id;
     } else {
       const inserted = await sql`
         INSERT INTO work_projects (
-          company_id, customer_id, value_cents, monthly_estimate_cents, revenue_target_date, documents, requests, prd, tech_stack, brief, logo_data_url,
+          company_id, project_type, client_company_id, task_company_id, customer_id, value_cents, monthly_estimate_cents, revenue_target_date, documents, requests, prd, tech_stack, brief, logo_data_url,
           name, description, status, start_date, target_date, created_by
         ) VALUES (
-          ${companyId}, ${customerId}, ${valueCents}, ${monthlyEstimateCents}, ${revenueTargetDate}, ${sql.json(documents as any)}, ${sql.json(requests as any)}, ${prd}, ${sql.json(techStack as any)}, ${sql.json(brief as any)}, ${logoDataUrl},
+          ${companyId}, ${projectType}, ${clientCompanyId}, ${taskCompanyId ?? companyId}, ${customerId}, ${valueCents}, ${monthlyEstimateCents}, ${revenueTargetDate}, ${sql.json(documents as any)}, ${sql.json(requests as any)}, ${prd}, ${sql.json(techStack as any)}, ${sql.json(brief as any)}, ${effectiveLogoDataUrl},
           ${name}, ${description}, ${status}, ${startDate}, ${targetDate}, ${user.id}
         )
         RETURNING id
@@ -3540,21 +4711,21 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
       }
       await sql`
         DELETE FROM work_project_revenue_milestones
-        WHERE project_id = ${projectId} AND company_id = ${companyId}
+        WHERE project_id = ${projectId} AND company_id = ${existing?.company_id ?? companyId}
       `;
       for (const milestone of input.revenue_milestones) {
         await sql`
           INSERT INTO work_project_revenue_milestones (
             company_id, project_id, amount_cents, target_month
           ) VALUES (
-            ${companyId}, ${projectId}, ${milestone.amount_cents}, ${milestone.target_month}
+            ${existing?.company_id ?? companyId}, ${projectId}, ${milestone.amount_cents}, ${milestone.target_month}
           )
         `;
       }
     }
 
     const fetched = await sql`
-      SELECT * FROM work_projects WHERE id = ${projectId} AND company_id = ${companyId}
+      SELECT * FROM work_projects WHERE id = ${projectId} AND (company_id = ${companyId} OR task_company_id = ${companyId})
     `;
     return (await attachProjectRevenueMilestones([formatWorkProject(fetched[0])], companyId))[0];
   },
@@ -3566,13 +4737,13 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     const res = await sql`
       UPDATE work_projects
       SET status = 'archived', updated_at = NOW()
-      WHERE id = ${id} AND company_id = ${companyId}
+      WHERE id = ${id} AND (company_id = ${companyId} OR task_company_id = ${companyId})
       RETURNING id
     `;
     if (res.length === 0) throw new Error("Proyecto no encontrado.");
 
     const fetched = await sql`
-      SELECT * FROM work_projects WHERE id = ${id} AND company_id = ${companyId}
+      SELECT * FROM work_projects WHERE id = ${id} AND (company_id = ${companyId} OR task_company_id = ${companyId})
     `;
     return formatWorkProject(fetched[0]);
   },
@@ -3582,7 +4753,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     const companyId = await resolveActiveCompanyId(token ?? null, user.id);
     const project = await sql`
       SELECT id FROM work_projects
-      WHERE id = ${projectId} AND company_id = ${companyId}
+      WHERE id = ${projectId} AND (company_id = ${companyId} OR task_company_id = ${companyId})
     `;
     if (project.length === 0) throw new Error("Proyecto no encontrado.");
 
@@ -3590,13 +4761,13 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
       ? await sql`
           DELETE FROM work_items
           WHERE project_id = ${projectId}
-            AND company_id = ${companyId}
+            AND company_id = (SELECT task_company_id FROM work_projects WHERE id = ${projectId})
             AND (id = ANY(${itemIds}::int[]) OR parent_id = ANY(${itemIds}::int[]))
           RETURNING id
         `
       : await sql`
           DELETE FROM work_items
-          WHERE project_id = ${projectId} AND company_id = ${companyId}
+          WHERE project_id = ${projectId} AND company_id = (SELECT task_company_id FROM work_projects WHERE id = ${projectId})
           RETURNING id
         `;
     return deleted.length;
@@ -3703,7 +4874,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     }
 
     if (input.project_id != null) {
-      const projCheck = await sql`SELECT id, status FROM work_projects WHERE id = ${input.project_id} AND company_id = ${companyId}`;
+      const projCheck = await sql`SELECT id, status FROM work_projects WHERE id = ${input.project_id} AND (company_id = ${companyId} OR task_company_id = ${companyId})`;
       if (projCheck.length === 0) throw new Error("El proyecto no pertenece a esta empresa.");
       if (projCheck[0].status === "archived") throw new Error("No se pueden crear ni asignar tareas a un proyecto archivado.");
     }
@@ -4223,6 +5394,12 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   list_invoices(token?: string | null) { return this.listInvoices(token ?? null); },
   issue_invoice(input: InvoiceInput, token?: string | null) { return this.issueInvoice(input, token ?? null); },
   cancel_invoice(id: number, token?: string | null) { return this.cancelInvoice(id, token ?? null); },
+  list_budgets(token?: string | null) { return this.listBudgets(token ?? null); },
+  get_budget(id: number, token?: string | null) { return this.getBudget(id, token ?? null); },
+  upsert_budget(input: BudgetInput, token?: string | null) { return this.upsertBudget(input, token ?? null); },
+  update_budget_status(id: number, status: BudgetStatus, token?: string | null) { return this.updateBudgetStatus(id, status, token ?? null); },
+  convert_budget_to_invoice(id: number, token?: string | null) { return this.convertBudgetToInvoice(id, token ?? null); },
+  delete_budget(id: number, token?: string | null) { return this.deleteBudget(id, token ?? null); },
   list_invoice_payments(invoiceId: number, token?: string | null) { return this.listInvoicePayments(invoiceId, token ?? null); },
   add_invoice_payment(input: InvoicePaymentInput, token?: string | null) { return this.addInvoicePayment(input, token ?? null); },
   list_expense_payments(expenseId: number, token?: string | null) { return this.listExpensePayments(expenseId, token ?? null); },
@@ -4388,11 +5565,14 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     if (!productId) throw new Error("product_id es requerido");
 
     const qty = Number(input.quantity ?? input.qty);
-    if (!qty || qty <= 0 || !Number.isFinite(qty)) {
+    if (!Number.isInteger(qty) || qty <= 0 || !Number.isFinite(qty)) {
       throw new Error("La cantidad debe ser un número entero mayor que 0");
     }
 
     const movementType = String(input.movement_type);
+    if (!["in", "out", "transfer", "adjustment", "reversal", "initial_stock"].includes(movementType)) {
+      throw new Error("Tipo de movimiento de inventario no válido");
+    }
     const idempotencyKey = input.idempotency_key ? String(input.idempotency_key) : null;
 
     return await sql.begin(async (tx) => {
@@ -4453,6 +5633,14 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
           const defaultLoc = await tx`SELECT id FROM stock_locations WHERE company_id = ${cid} AND is_default = TRUE LIMIT 1`;
           fromLocationId = defaultLoc[0]?.id ?? null;
         }
+      }
+
+      const locationIds = [fromLocationId, toLocationId].filter((value): value is number => value != null);
+      if (locationIds.length > 0) {
+        const validLocations = await tx`
+          SELECT id FROM stock_locations WHERE company_id=${cid} AND id = ANY(${locationIds}::int[])
+        `;
+        if (validLocations.length !== new Set(locationIds).size) throw new Error("La ubicación no pertenece a la empresa activa");
       }
 
       const reasonCode = String(input.reason ?? input.reason_code ?? "other");

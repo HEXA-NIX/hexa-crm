@@ -9,6 +9,7 @@ import type {
   CashInput,
   CashMovement,
   Company,
+  CompanyInput,
   CompanyMember,
   CreateInventoryMovementInput,
   CreateUserResult,
@@ -445,6 +446,9 @@ function normalizeWorkProject(project: WorkProject): WorkProject {
   return {
     ...project,
     uid: project.uid || newProjectUid(),
+    project_type: project.project_type ?? (project.customer_id != null ? "client" : "own"),
+    client_company_id: project.client_company_id ?? null,
+    task_company_id: project.task_company_id ?? project.company_id,
     customer_id: project.customer_id ?? null,
     value_cents: project.value_cents ?? 0,
     monthly_estimate_cents: project.monthly_estimate_cents ?? 0,
@@ -1093,11 +1097,93 @@ export const browserApi = {
     return c;
   },
 
+  update_company_profile(input: Partial<Pick<Company, "logo_data_url" | "legal_name" | "trade_name" | "nif" | "kind" | "entity_type" | "address" | "postal_code" | "city" | "province" | "country" | "email" | "phone">>, token?: string | null): Company {
+    const s = load();
+    ensureCompanies(s);
+    requireAdmin(s, token);
+    const cid = sessionCompanyId(s, token);
+    const company = s.companies.find((c) => c.id === cid && c.active);
+    if (!company) throw new Error("Empresa no encontrada");
+    const logo = input.logo_data_url === undefined ? (company.logo_data_url ?? "") : String(input.logo_data_url ?? "");
+    const logoError = validateProjectLogo(logo);
+    if (logoError) throw new Error(logoError);
+    const legalName = input.legal_name === undefined ? company.legal_name : String(input.legal_name ?? "").trim();
+    const tradeName = input.trade_name === undefined ? company.trade_name : String(input.trade_name ?? "").trim();
+    if (!legalName || !tradeName) throw new Error("El nombre legal y el nombre comercial son obligatorios");
+    const entityType = input.entity_type === undefined ? (company.entity_type ?? "otra") : String(input.entity_type);
+    if (!["autonomo", "sl", "sa", "cooperativa", "otra"].includes(entityType)) throw new Error("Tipo de entidad no válido");
+    const kind = input.kind === undefined ? company.kind : input.kind;
+    if (!["retail_secondhand", "software_studio", "generic"].includes(kind)) throw new Error("Tipo de empresa no válido");
+    Object.assign(company, { logo_data_url: logo, legal_name: legalName, trade_name: tradeName, nif: input.nif === undefined ? company.nif : String(input.nif ?? "").trim(), kind, entity_type: entityType, address: input.address === undefined ? (company.address ?? "") : String(input.address ?? "").trim(), postal_code: input.postal_code === undefined ? (company.postal_code ?? "") : String(input.postal_code ?? "").trim(), city: input.city === undefined ? (company.city ?? "") : String(input.city ?? "").trim(), province: input.province === undefined ? (company.province ?? "") : String(input.province ?? "").trim(), country: input.country === undefined ? (company.country ?? "España") : String(input.country ?? "España").trim(), email: input.email === undefined ? (company.email ?? "") : String(input.email ?? "").trim(), phone: input.phone === undefined ? (company.phone ?? "") : String(input.phone ?? "").trim() });
+    save(s);
+    return company;
+  },
+
+  create_company(input: CompanyInput, token?: string | null): Company {
+    const s = load();
+    ensureCompanies(s);
+    const user = requireAdmin(s, token);
+    const legalName = String(input.legal_name ?? "").trim();
+    const tradeName = String(input.trade_name ?? legalName).trim();
+    if (!legalName || !tradeName) throw new Error("El nombre legal y el nombre comercial son obligatorios");
+    const entityType = String(input.entity_type ?? "otra");
+    if (!["autonomo", "sl", "sa", "cooperativa", "otra"].includes(entityType)) throw new Error("Tipo de entidad no válido");
+    const kind = input.kind ?? "generic";
+    if (!["retail_secondhand", "software_studio", "generic"].includes(kind)) throw new Error("Tipo de negocio no válido");
+    const logo = String(input.logo_data_url ?? "");
+    const logoError = validateProjectLogo(logo);
+    if (logoError) throw new Error(logoError);
+    const baseCode = String(input.code ?? tradeName)
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 12) || `EMPRESA-${s.seq.company + 1}`;
+    let code = baseCode;
+    let suffix = 2;
+    while (s.companies.some((company) => company.code === code)) code = `${baseCode.slice(0, Math.max(1, 12 - String(suffix).length - 1))}-${suffix++}`;
+    const company: Company = {
+      id: ++s.seq.company,
+      code,
+      legal_name: legalName,
+      trade_name: tradeName,
+      nif: String(input.nif ?? "").trim(),
+      kind,
+      entity_type: entityType as Company["entity_type"],
+      address: String(input.address ?? "").trim(),
+      postal_code: String(input.postal_code ?? "").trim(),
+      city: String(input.city ?? "").trim(),
+      province: String(input.province ?? "").trim(),
+      country: String(input.country ?? "España").trim() || "España",
+      email: String(input.email ?? "").trim(),
+      phone: String(input.phone ?? "").trim(),
+      logo_data_url: logo,
+      active: true,
+      created_at: now(),
+    };
+    s.companies.push(company);
+    s.company_members.push({ company_id: company.id, user_id: user.id, role: "admin" });
+    save(s);
+    return company;
+  },
+
   billing_by_company(token?: string | null) {
     const s = load();
     ensureCompanies(s);
     auth(s, token);
     return billingByCompany(s.sales, s.companies);
+  },
+
+  group_financial_summary(token?: string | null) {
+    const s = load();
+    const user = auth(s, token);
+    const visible = companiesForUser(user.id, s.company_members, s.companies);
+    return visible.map((company) => {
+      const invoices = s.invoices.filter((invoice) => invoice.company_id === company.id && invoice.status === "issued");
+      const expenses = s.expenses.filter((expense) => expense.company_id === company.id && ["review", "approved", "paid"].includes(expense.status));
+      const expensePayments = s.expensePayments.filter((payment) => payment.company_id === company.id);
+      const cash = s.cash.filter((movement) => movement.company_id === company.id);
+      const issuedTotal = invoices.reduce((sum, invoice) => sum + invoice.total_cents, 0);
+      const issuedPaid = invoices.reduce((sum, invoice) => sum + invoice.paid_cents, 0);
+      return { company_id: company.id, code: company.code, trade_name: company.trade_name, issued_total_cents: issuedTotal, issued_paid_cents: issuedPaid, issued_pending_cents: Math.max(0, issuedTotal - issuedPaid), received_total_cents: expenses.reduce((sum, expense) => sum + expense.total_cents, 0), received_paid_cents: expensePayments.reduce((sum, payment) => sum + payment.amount_cents, 0), cash_income_cents: cash.filter((movement) => movement.kind === "income").reduce((sum, movement) => sum + movement.amount_cents, 0), cash_expense_cents: cash.filter((movement) => movement.kind === "expense").reduce((sum, movement) => sum + movement.amount_cents, 0) };
+    });
   },
 
   async list_users(token?: string | null): Promise<AuthUser[]> {
@@ -1723,10 +1809,16 @@ export const browserApi = {
     return this.create_inventory_movement(reversalInput, token);
   },
 
-  list_customers(token?: string | null): Customer[] {
+  list_customers(token?: string | null, companyId?: number | null): Customer[] {
     const s = load();
     ensureCompanies(s);
-    const cid = sessionCompanyId(s, token);
+    const cid = companyId == null ? sessionCompanyId(s, token) : companyId;
+    if (companyId != null) {
+      const user = auth(s, token);
+      if (!canAccessCompany(user.id, companyId, s.company_members)) {
+        throw new Error("No tienes acceso a esa empresa");
+      }
+    }
     return filterByCompanyId(s.customers, cid).sort((a, b) =>
       a.name.localeCompare(b.name, "es"),
     );
@@ -2231,7 +2323,7 @@ export const browserApi = {
     const cid = sessionCompanyId(s, token);
     if (input.project_id != null) {
       const project = s.workProjects.find(
-        (candidate) => candidate.id === input.project_id && candidate.company_id === cid,
+        (candidate) => candidate.id === input.project_id && (candidate.company_id === cid || candidate.task_company_id === cid),
       );
       if (!project) throw new Error("Proyecto no encontrado.");
       if (project.customer_id == null) {
@@ -2324,8 +2416,11 @@ export const browserApi = {
     const user = requireSession(s, token);
     if (user.role !== "admin") throw new Error("Se requieren permisos de administrador");
     const cid = sessionCompanyId(s, token);
+    const previous = s.fiscalProfiles.find((item) => item.company_id === cid);
     const regime = input.regime ?? "general";
     const period = input.period ?? "quarterly";
+    const entityType = input.entity_type ?? previous?.entity_type ?? "autonomo";
+    if (!["autonomo", "sociedad", "otra"].includes(entityType)) throw new Error("Tipo de contribuyente no válido");
     if (!["general", "simplified", "recargo_equivalencia", "other"].includes(regime)) throw new Error("Régimen fiscal no válido");
     if (!["monthly", "quarterly"].includes(period)) throw new Error("Periodicidad no válida");
     const rate = Number(input.default_irpf_rate ?? 0);
@@ -2334,12 +2429,13 @@ export const browserApi = {
     if (!["disabled", "test", "production"].includes(verifactuMode)) throw new Error("Modo VERI*FACTU no válido");
     const producerNif = (input.verifactu_producer_nif ?? "").trim().toUpperCase();
     if (verifactuMode !== "disabled" && !producerNif) throw new Error("El NIF emisor es obligatorio para activar VERI*FACTU");
-    const previous = s.fiscalProfiles.find((item) => item.company_id === cid);
     const profile: FiscalProfile = {
       company_id: cid,
       invoice_series: input.invoice_series?.trim().toUpperCase() || previous?.invoice_series || "F",
       regime: regime as FiscalProfile["regime"],
       period: period as FiscalProfile["period"],
+      entity_type: entityType as FiscalProfile["entity_type"],
+      tax_models: Array.isArray(input.tax_models) ? input.tax_models.map(String) : (previous?.tax_models ?? []),
       irpf_enabled: !!input.irpf_enabled,
       default_irpf_rate: rate,
       sii_enabled: !!input.sii_enabled,
@@ -2653,7 +2749,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
   async listWorkProjects(status_filter?: string, token?: string | null): Promise<WorkProject[]> {
     const s = load();
     const companyId = sessionCompanyId(s, token);
-    let projects = s.workProjects.filter((p) => p.company_id === companyId);
+    let projects = s.workProjects.filter((p) => p.company_id === companyId || p.task_company_id === companyId);
     if (status_filter && status_filter.trim() !== "" && status_filter !== "all") {
       projects = projects.filter((p) => p.status === status_filter.trim());
     }
@@ -2668,7 +2764,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       : null;
     const proj = s.workProjects.find(
       (p) =>
-        p.company_id === companyId &&
+        (p.company_id === companyId || p.task_company_id === companyId) &&
         (p.uid === String(reference) || (numericId !== null && p.id === numericId)),
     );
     if (!proj) throw new Error("Proyecto no encontrado.");
@@ -2679,6 +2775,9 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     const s = load();
     const user = requireAdminProjectManagement(s, token);
     const companyId = sessionCompanyId(s, token);
+    const existingForInput = input.id != null
+      ? s.workProjects.find((p) => p.id === input.id && (p.company_id === companyId || p.task_company_id === companyId))
+      : undefined;
 
     const name = (input.name ?? "").trim();
     if (!name) throw new Error("El nombre del proyecto es obligatorio.");
@@ -2694,6 +2793,22 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     if (input.monthly_estimate_cents !== undefined && input.monthly_estimate_cents < 0) {
       throw new Error("La estimación mensual no puede ser negativa.");
     }
+    const projectType = input.project_type ?? existingForInput?.project_type ?? (input.customer_id != null ? "client" : "own");
+    if (!["own", "client", "internal"].includes(projectType)) throw new Error("Tipo de proyecto no válido.");
+    // Keep older API callers valid: before project_type existed, a customer_id
+    // alone represented client work. New explicit classifications must name
+    // the legal company as well.
+    if (projectType === "internal" && input.client_company_id == null && input.project_type !== undefined) throw new Error("Selecciona la empresa propietaria.");
+    const requestedClientCompanyId = input.client_company_id !== undefined
+      ? input.client_company_id
+      : (existingForInput?.client_company_id ?? null);
+    // Own products belong only to the managing studio. Any stale company or
+    // contact from a previous client/internal classification is discarded.
+    const clientCompanyId = projectType === "own" ? null : requestedClientCompanyId;
+    if (clientCompanyId != null && !s.companies.some((company) => company.id === clientCompanyId && company.active)) throw new Error("Empresa cliente no encontrada.");
+    const taskCompanyId = projectType === "internal" ? (clientCompanyId ?? null) : companyId;
+    if (projectType === "internal" && taskCompanyId == null) throw new Error("Selecciona la empresa propietaria.");
+    if (taskCompanyId != null && !s.companies.some((company) => company.id === taskCompanyId && company.active)) throw new Error("Empresa de tareas no encontrada.");
     if (input.revenue_milestones) {
       const minimumMonth = new Date().toISOString().slice(0, 7);
       const milestoneMonths = new Set<string>();
@@ -2709,21 +2824,21 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
         milestoneMonths.add(milestone.target_month);
       }
     }
-    const customerId = input.customer_id !== undefined
+    const requestedCustomerId = input.customer_id !== undefined
       ? input.customer_id
-      : undefined;
+      : (existingForInput?.customer_id ?? null);
+    const customerId = projectType === "client" ? requestedCustomerId : null;
     if (
       customerId != null &&
       !s.customers.some(
-        (customer) => customer.id === customerId && (customer.company_id ?? 1) === companyId,
+        (customer) => customer.id === customerId && (customer.company_id ?? 1) === (existingForInput?.company_id ?? companyId),
       )
     ) {
       throw new Error("Cliente no encontrado en la empresa activa.");
     }
 
-    let existing: WorkProject | undefined;
+    let existing: WorkProject | undefined = existingForInput;
     if (input.id != null) {
-      existing = s.workProjects.find((p) => p.id === input.id && p.company_id === companyId);
       if (!existing) throw new Error("Proyecto no encontrado.");
     }
 
@@ -2742,7 +2857,10 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     let saved: WorkProject;
     if (existing) {
       existing.name = name;
-      if (customerId !== undefined) existing.customer_id = customerId;
+      existing.project_type = projectType;
+      existing.client_company_id = clientCompanyId;
+      existing.task_company_id = taskCompanyId ?? existing.company_id;
+      existing.customer_id = customerId;
       if (input.value_cents !== undefined) existing.value_cents = input.value_cents;
       if (input.monthly_estimate_cents !== undefined) {
         existing.monthly_estimate_cents = input.monthly_estimate_cents;
@@ -2769,6 +2887,9 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       if (input.tech_stack !== undefined) existing.tech_stack = normalizeTechStack(input.tech_stack);
       if (input.brief !== undefined) existing.brief = normalizeProjectBrief(input.brief, existing.tech_stack);
       if (input.logo_data_url !== undefined) existing.logo_data_url = input.logo_data_url;
+      if (existing.project_type === "own" && !existing.logo_data_url) {
+        existing.logo_data_url = s.companies.find((company) => company.id === existing.company_id)?.logo_data_url ?? "";
+      }
       if (input.description !== undefined) existing.description = input.description;
       if (input.status !== undefined) existing.status = input.status;
       existing.start_date = startDate;
@@ -2781,6 +2902,9 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
         id: newId,
         uid: newProjectUid(),
         company_id: companyId,
+        project_type: input.project_type ?? (customerId != null ? "client" : "own"),
+        client_company_id: clientCompanyId,
+        task_company_id: taskCompanyId ?? companyId,
         customer_id: customerId ?? null,
         value_cents: input.value_cents ?? 0,
         monthly_estimate_cents: input.revenue_milestones
@@ -2797,7 +2921,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
         prd: normalizeProjectPrd(input.prd),
         tech_stack: normalizeTechStack(input.tech_stack),
         brief: normalizeProjectBrief(input.brief, input.tech_stack),
-        logo_data_url: input.logo_data_url ?? "",
+        logo_data_url: input.logo_data_url || (projectType === "own" ? (s.companies.find((company) => company.id === companyId)?.logo_data_url ?? "") : ""),
         name,
         description: input.description ?? "",
         status: input.status ?? "planned",
@@ -2817,7 +2941,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     const s = load();
     requireAdminProjectManagement(s, token);
     const companyId = sessionCompanyId(s, token);
-    const proj = s.workProjects.find((p) => p.id === id && p.company_id === companyId);
+    const proj = s.workProjects.find((p) => p.id === id && (p.company_id === companyId || p.task_company_id === companyId));
     if (!proj) throw new Error("Proyecto no encontrado.");
     proj.status = "archived";
     proj.updated_at = now();
@@ -2829,15 +2953,16 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     const s = load();
     requireAdminProjectManagement(s, token);
     const companyId = sessionCompanyId(s, token);
-    const projectExists = s.workProjects.some(
-      (project) => project.id === projectId && project.company_id === companyId,
+    const project = s.workProjects.find(
+      (candidate) => candidate.id === projectId && (candidate.company_id === companyId || candidate.task_company_id === companyId),
     );
-    if (!projectExists) throw new Error("Proyecto no encontrado.");
+    if (!project) throw new Error("Proyecto no encontrado.");
+    const taskCompanyId = project.task_company_id ?? project.company_id;
 
     const selectedIds = itemIds?.length ? new Set(itemIds) : null;
     const idsToDelete = new Set<number>();
     for (const item of s.workItems) {
-      if (item.company_id !== companyId || item.project_id !== projectId) continue;
+      if (item.company_id !== taskCompanyId || item.project_id !== projectId) continue;
       if (selectedIds === null || selectedIds.has(item.id)) idsToDelete.add(item.id);
     }
     // A parent cannot be removed while leaving its subtasks orphaned.
@@ -2936,7 +3061,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     }
 
     if (input.project_id != null) {
-      const proj = s.workProjects.find((p) => p.id === input.project_id && p.company_id === companyId);
+      const proj = s.workProjects.find((p) => p.id === input.project_id && (p.company_id === companyId || p.task_company_id === companyId));
       if (!proj) throw new Error("El proyecto no pertenece a esta empresa.");
       if (proj.status === "archived") throw new Error("No se pueden crear ni asignar tareas a un proyecto archivado.");
     }

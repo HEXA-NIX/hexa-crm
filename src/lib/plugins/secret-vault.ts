@@ -1,5 +1,4 @@
 import crypto from "node:crypto";
-import { env } from "$env/dynamic/private";
 
 /**
  * Deriva la clave maestra de cifrado de 32 bytes (256 bits) desde las variables de entorno del servidor.
@@ -11,10 +10,7 @@ import { env } from "$env/dynamic/private";
 function getMasterKey(): Buffer {
   const envKey =
     typeof process !== "undefined"
-      ? env.STRIPE_ENCRYPTION_KEY ||
-        env.HEXA_MASTER_ENCRYPTION_KEY ||
-        env.MASTER_ENCRYPTION_KEY ||
-        process.env?.STRIPE_ENCRYPTION_KEY ||
+      ? process.env?.STRIPE_ENCRYPTION_KEY ||
         process.env?.HEXA_MASTER_ENCRYPTION_KEY ||
         process.env?.MASTER_ENCRYPTION_KEY
       : "";

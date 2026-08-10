@@ -437,6 +437,50 @@ describe("Trabajo Backend & API Tests", () => {
   });
 
   describe("Work Project CRUD & Tri-state Filtering", () => {
+    it("creates an independent company and keeps it available for project relations", async () => {
+      const company = browserApi.create_company({
+        legal_name: "Voura Labs, S.L.",
+        trade_name: "Voura",
+        nif: "B12345678",
+        kind: "software_studio",
+        entity_type: "sl",
+      }, adminToken);
+      expect(company.trade_name).toBe("Voura");
+      expect(company.code).toBe("VOURA");
+      expect(company.kind).toBe("software_studio");
+      expect(browserApi.list_companies(adminToken).some((item) => item.id === company.id)).toBe(true);
+
+      const project = await browserApi.upsertWorkProject({
+        name: "Voura producto",
+        project_type: "internal",
+        client_company_id: company.id,
+      }, adminToken);
+      expect(project.project_type).toBe("internal");
+      expect(project.client_company_id).toBe(company.id);
+      expect(project.task_company_id).toBe(company.id);
+
+      const switched = browserApi.set_active_company(company.id, adminToken);
+      expect(switched.id).toBe(company.id);
+      const projectsInOwnerWorkspace = await browserApi.listWorkProjects(undefined, adminToken);
+      expect(projectsInOwnerWorkspace.some((item) => item.id === project.id)).toBe(true);
+      const task = await browserApi.upsertWorkItem({ title: "Tarea de Voura", project_id: project.id }, adminToken);
+      expect(task.company_id).toBe(company.id);
+      expect((await browserApi.listWorkItems({ project_id: project.id }, adminToken)).some((item) => item.id === task.id)).toBe(true);
+    });
+
+    it("permite corregir el tipo de empresa desde su ficha", () => {
+      const company = browserApi.create_company({
+        legal_name: "NIU Desarrollo, S.L.",
+        trade_name: "NIU",
+        kind: "retail_secondhand",
+      }, adminToken);
+      browserApi.set_active_company(company.id, adminToken);
+
+      const updated = browserApi.update_company_profile({ kind: "software_studio" }, adminToken);
+      expect(updated.kind).toBe("software_studio");
+      expect(browserApi.get_active_company(adminToken)?.kind).toBe("software_studio");
+    });
+
     it("upsertWorkProject requires admin session", async () => {
       await expect(
         browserApi.upsertWorkProject({ name: "Proyecto Cajero" }, cajeroToken)
@@ -460,6 +504,28 @@ describe("Trabajo Backend & API Tests", () => {
           adminToken
         )
       ).rejects.toThrow("La fecha de fin no puede ser anterior a la fecha de inicio.");
+    });
+
+    it("does not retain client data when a project becomes an own product", async () => {
+      const [customer] = browserApi.list_customers(adminToken);
+      const clientProject = await browserApi.upsertWorkProject({
+        name: "Servicio HEXA",
+        project_type: "client",
+        customer_id: customer.id,
+      }, adminToken);
+      expect(clientProject.customer_id).toBe(customer.id);
+      expect(clientProject.client_company_id).toBeNull();
+
+      const ownProduct = await browserApi.upsertWorkProject({
+        id: clientProject.id,
+        name: "Producto propio",
+        project_type: "own",
+        client_company_id: null,
+        customer_id: customer.id,
+      }, adminToken);
+      expect(ownProduct.project_type).toBe("own");
+      expect(ownProduct.client_company_id).toBeNull();
+      expect(ownProduct.customer_id).toBeNull();
     });
 
     it("supports project lifecycle: create, get, list with status filter, update, archive", async () => {

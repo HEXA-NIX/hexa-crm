@@ -13,7 +13,7 @@
   import { formatEUR } from "$lib/money";
   import Badge from "$lib/components/Badge.svelte";
   import { activeCompany } from "$lib/stores/session";
-  import { PROJECT_COMPANY_CODE } from "$lib/company/context";
+  import { isProjectCompany } from "$lib/company/context";
 
   let customers = $state<Customer[]>([]);
   let query = $state("");
@@ -22,7 +22,7 @@
   let sales = $state<Sale[]>([]);
   let projects = $state<WorkProject[]>([]);
   let workItems = $state<WorkItem[]>([]);
-  const isDevCompany = $derived($activeCompany?.code === PROJECT_COMPANY_CODE);
+  const isDevCompany = $derived(isProjectCompany($activeCompany));
 
   const filtered = $derived(
     customers.filter((c) => {

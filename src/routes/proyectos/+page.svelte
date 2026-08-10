@@ -3,7 +3,7 @@
   import { session, isAdmin } from "$lib/stores/session";
   import { showToast } from "$lib/stores/ui";
   import { formatEUR, parseEurosInput } from "$lib/money";
-  import type { CashMovement, Customer, Settings, WorkProject, WorkItem, WorkProjectInput } from "$lib/types";
+  import type { CashMovement, Customer, Settings, WorkProject, WorkItem, WorkProjectInput, WorkProjectKind } from "$lib/types";
   import { economicGoalKey, economicGoalProgress, monthlyEconomicGoal } from "$lib/projects/economic-goal";
   import { calculateTaskProgress } from "$lib/projects/task-progress";
   import { projectStatusLabel, projectStatusTone } from "$lib/projects/presentation";
@@ -38,6 +38,8 @@
     name: "",
     description: "",
     status: "active" as WorkProject["status"],
+    project_type: "own" as WorkProjectKind,
+    client_company_id: "",
     customer_id: "",
     value: "",
     milestones: [] as { amount: string; target_month: string }[],
@@ -62,6 +64,12 @@
     { value: "archived", label: "Archivado" },
   ];
 
+  const projectTypeOptions = [
+    { value: "own", label: "Dev · producto propio" },
+    { value: "client", label: "Dev · cliente / servicio facturable" },
+    { value: "internal", label: "Dev · empresa del grupo" },
+  ];
+
   const sortOptions = [
     { value: "attention", label: "Necesitan atención" },
     { value: "deadline", label: "Fecha objetivo" },
@@ -81,13 +89,38 @@
   });
 
   const customerOptions = $derived([
-    { value: "", label: "Proyecto propio (sin cliente)" },
+    { value: "", label: "Sin contacto específico" },
     ...customers.map((customer) => ({
       value: String(customer.id),
       label: customer.name,
       hint: customer.nif || customer.email || undefined,
     })),
   ]);
+  const clientCompanyOptions = $derived([
+    { value: "", label: "Seleccionar empresa" },
+    ...$session.companies.map((company) => ({ value: String(company.id), label: company.trade_name, hint: company.code })),
+  ]);
+
+  const projectTypeLabel = (type?: WorkProjectKind) =>
+    type === "client" ? "Dev · Cliente" : type === "internal" ? "Dev · Interno" : "Dev · Propio";
+  const projectClientCompanyName = (companyId?: number | null) =>
+    companyId ? $session.companies.find((company) => company.id === companyId)?.trade_name ?? "Empresa" : "";
+  const projectLogo = (project: WorkProject) => {
+    if (project.logo_data_url) return project.logo_data_url;
+    const kind = project.project_type ?? (project.customer_id != null ? "client" : "own");
+    // Client projects are branded only with an image explicitly provided for
+    // that project; never expose HEXA or the client's company logo as a
+    // fallback. Own/internal projects may inherit their workspace logo.
+    if (kind === "client") return "";
+    const logoCompanyId = kind === "own"
+      ? project.company_id
+      : project.task_company_id ?? project.company_id;
+    return $session.companies.find((company) => company.id === logoCompanyId)?.logo_data_url ?? "";
+  };
+  const hexaCompanyId = () =>
+    $session.companies.find((company) => company.code.toUpperCase() === "DEV")?.id
+    ?? $session.companies.find((company) => /hexa/i.test(company.trade_name) && company.kind === "software_studio")?.id
+    ?? $session.activeCompanyId;
 
   async function loadData() {
     loading = true;
@@ -95,7 +128,7 @@
       const [projList, itemList, customerList, movementList, loadedSettings] = await Promise.all([
         api.listWorkProjects(),
         api.listWorkItems(),
-        api.listCustomers(),
+        api.listCustomers(hexaCompanyId()),
         api.listCashMovements(),
         api.getSettings(),
       ]);
@@ -271,6 +304,8 @@
       name: "",
       description: "",
       status: "active",
+      project_type: "own",
+      client_company_id: "",
       customer_id: "",
       value: "",
       milestones: [],
@@ -296,6 +331,21 @@
     form.milestones = form.milestones.filter((_, itemIndex) => itemIndex !== index);
   }
 
+  function setProjectType(value: string) {
+    const projectType = value as WorkProjectKind;
+    form.project_type = projectType;
+    // A product owned by the studio has no external client/contact. Clear
+    // values immediately so they can never be submitted accidentally after
+    // switching from a client project.
+    if (projectType !== "client") {
+      form.customer_id = "";
+    }
+    if (projectType === "own") {
+      form.client_company_id = "";
+      form.value = "";
+    }
+  }
+
   async function handleCreateProject() {
     if (!form.name.trim()) {
       showToast("El nombre del proyecto es obligatorio", "err");
@@ -306,18 +356,18 @@
       return;
     }
     const projectValue = parseEurosInput(form.value);
-    if (form.customer_id && hasInvalidMoneyInput(form.value)) {
+    if (form.project_type === "client" && hasInvalidMoneyInput(form.value)) {
       showToast("Introduce un valor contratado válido", "err");
       return;
     }
     const invalidMilestone = form.milestones.some((milestone) => {
       return hasInvalidMoneyInput(milestone.amount);
     });
-    if (!form.customer_id && invalidMilestone) {
+    if (form.project_type === "own" && invalidMilestone) {
       showToast("Revisa los importes de los hitos mensuales", "err");
       return;
     }
-    if (!form.customer_id && hasDuplicateMilestoneMonths(form.milestones)) {
+    if (form.project_type === "own" && hasDuplicateMilestoneMonths(form.milestones)) {
       showToast("No puedes repetir el mismo mes en dos hitos", "err");
       return;
     }
@@ -327,23 +377,25 @@
         name: form.name.trim(),
         description: form.description.trim(),
         status: form.status,
-        customer_id: form.customer_id ? Number(form.customer_id) : null,
-        value_cents: form.customer_id ? (projectValue ?? 0) : 0,
-        monthly_estimate_cents: form.customer_id
+        project_type: form.project_type,
+        client_company_id: form.project_type === "own" || !form.client_company_id ? null : Number(form.client_company_id),
+        customer_id: form.project_type === "client" && form.customer_id ? Number(form.customer_id) : null,
+        value_cents: form.project_type === "client" ? (projectValue ?? 0) : 0,
+        monthly_estimate_cents: form.project_type === "own"
           ? 0
           : form.milestones.reduce(
               (sum, milestone) => sum + (parseEurosInput(milestone.amount) ?? 0),
               0,
             ),
         revenue_target_date: null,
-        revenue_milestones: form.customer_id
-          ? []
-          : form.milestones
+        revenue_milestones: form.project_type === "own"
+          ? form.milestones
               .map((milestone) => ({
                 amount_cents: parseEurosInput(milestone.amount) ?? 0,
                 target_month: milestone.target_month,
               }))
-              .filter((milestone) => milestone.amount_cents > 0 && milestone.target_month),
+              .filter((milestone) => milestone.amount_cents > 0 && milestone.target_month)
+          : [],
         start_date: form.start_date || null,
         target_date: form.target_date || null,
       };
@@ -504,8 +556,8 @@
               <!-- Top info: Title & Status -->
               <div class="flex items-start justify-between gap-2 mb-2">
                 <div class="flex min-w-0 items-center gap-2.5">
-                  {#if project.logo_data_url}
-                    <img src={project.logo_data_url} alt="" class="h-9 w-9 shrink-0 rounded-lg border border-white/10 object-cover shadow-sm" data-project-card-logo />
+                  {#if projectLogo(project)}
+                    <img src={projectLogo(project)} alt="" class="h-9 w-9 shrink-0 rounded-lg border border-white/10 object-cover shadow-sm" data-project-card-logo />
                   {:else}
                     <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-purple-400/20 bg-purple-500/10 text-sm font-bold uppercase text-purple-200" aria-hidden="true" data-project-card-logo>
                       {project.name.trim().charAt(0) || "P"}
@@ -531,14 +583,19 @@
 
               <!-- Description -->
               <p class="mb-2 text-xs font-medium text-[var(--color-purple-bright)]">
-                {project.customer_id
-                  ? `Cliente: ${customers.find((customer) => customer.id === project.customer_id)?.name ?? "Cliente"}`
-                  : "Proyecto propio"}
+                {projectTypeLabel(project.project_type)}
+                {#if project.client_company_id}
+                  · {projectClientCompanyName(project.client_company_id)}
+                {:else if project.project_type === "client" && project.customer_id}
+                  · {customers.find((customer) => customer.id === project.customer_id)?.name ?? "Cliente"}
+                {/if}
               </p>
               <p class="mb-3 text-sm font-semibold text-emerald-300">
-                {project.customer_id
+                {project.project_type === "client"
                   ? `Valor: ${formatEUR(project.value_cents)}`
-                  : `Estimación mensual: ${formatEUR(project.monthly_estimate_cents)}`}
+                  : project.project_type === "internal"
+                    ? "Gestión interna del grupo"
+                    : `Estimación mensual: ${formatEUR(project.monthly_estimate_cents)}`}
               </p>
               {#if project.description}
                 <RichDescription value={project.description} class="mb-4 line-clamp-2 text-xs text-[var(--color-muted-dim)]" />
@@ -632,18 +689,38 @@
     />
 
     <Select
-      label="Tipo y cliente"
-      options={customerOptions}
-      bind:value={form.customer_id}
-      placeholder="Proyecto propio (sin cliente)"
+      label="Tipo de proyecto"
+      options={projectTypeOptions}
+      bind:value={form.project_type}
+      onvaluechange={setProjectType}
     />
 
-    {#if form.customer_id}
+    {#if form.project_type === "internal"}
+      <Select
+        label="Empresa propietaria"
+        options={clientCompanyOptions}
+        bind:value={form.client_company_id}
+        placeholder="Seleccionar empresa"
+        required
+      />
+    {/if}
+
+    {#if form.project_type === "client"}
+      <Select
+        label="Cliente de HEXA / contacto (opcional)"
+        options={customerOptions}
+        bind:value={form.customer_id}
+        placeholder="Sin cliente/contacto específico"
+      />
+      <p class="-mt-2 text-[11px] text-[var(--color-muted-dim)]">Se selecciona del catálogo de clientes de HEXA.</p>
+    {/if}
+
+    {#if form.project_type === "client"}
       <div class="space-y-1">
         <label for="project-value" class="text-xs font-medium text-[var(--color-muted)]">Valor contratado (€)</label>
         <input id="project-value" type="text" inputmode="decimal" bind:value={form.value} placeholder="0,00" class="field w-full text-sm" />
       </div>
-    {:else}
+    {:else if form.project_type === "own"}
       <div class="space-y-3 rounded-xl border border-[var(--color-border)] p-3">
         <div class="flex items-center justify-between gap-3">
           <div>

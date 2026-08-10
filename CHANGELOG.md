@@ -9,14 +9,49 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+- La configuración que antes vivía en un espacio global (IVA, Ollama, objetivos, nombre y copias) se guarda ahora por empresa con compatibilidad de lectura para instalaciones antiguas; las copias ya no incluyen ajustes de otros tenants.
+- El arranque central bloquea de forma estricta la restauración destructiva, añade perfiles fiscales y ajustes por defecto para todas las empresas activas, y refuerza las relaciones y numeración por empresa en PostgreSQL.
+- Las ventas sincronizan el libro de stock legado con el nuevo saldo por ubicación; se validan cantidades, precios, IVA, movimientos de inventario y estados de gastos antes de persistirlos.
+
+- Los proyectos internos pueden designar una empresa propietaria: sus tareas se guardan en ese espacio y al abrir el proyecto se cambia automáticamente a la empresa correcta. Los productos propios heredan el logo de su empresa mientras no tengan una imagen personalizada.
+- La clasificación visible de proyectos deja claro que todos pertenecen al área Dev; la empresa propietaria y el tipo económico siguen siendo datos independientes.
+- El acceso de Visión pasa a llamarse Dashboard y se corrige la consulta de saldo que estaba intentando leer `task_company_id` desde caja.
+- El alta y la ficha de empresa permiten escoger y modificar el tipo de negocio (Dev, tienda u otra actividad); las empresas nuevas creadas desde Dev parten como Dev.
+- WhatsApp permite reutilizar el número ya vinculado en otra empresa accesible, sin escanear un segundo QR, manteniendo el enrutado documental por empresa.
+- Los proyectos internos heredan también el logo de la empresa de tareas/propietaria cuando no tienen una imagen propia, incluidos los proyectos de empresas del grupo como NIU.
+- El formulario de proyectos adapta sus datos al tipo: los productos propios no piden logo, empresa cliente ni contacto; los proyectos para cliente ofrecen el catálogo de contactos de HEXA y limpian relaciones antiguas al cambiar de tipo.
+- Los proyectos para clientes no muestran logos heredados: solo enseñan una imagen si se ha subido expresamente en su ficha.
+- Los proyectos para clientes se guardan directamente con un cliente del catálogo de HEXA; la empresa propietaria solo se exige para proyectos internos del grupo.
+- El selector de clientes de proyectos Dev carga siempre el catálogo de HEXA, aunque el espacio de trabajo activo sea otra empresa del grupo.
+- Ajustes ya no duplica el nombre de la tienda; el IVA por defecto queda integrado junto a los datos fiscales de la empresa activa.
+- Ajustes llama «Empresa» a los datos de la organización activa; WhatsApp queda dentro de Integraciones/Plugins y conserva su panel completo mediante un acceso de configuración.
+- Las tarjetas de integraciones muestran marcas inline de PostgreSQL, Stripe y Google Drive para que sigan visibles sin conexión y en la app nativa.
+- WhatsApp aparece como una integración más junto a PostgreSQL, Stripe y Google Drive, con acceso directo a su configuración QR y de recepción documental.
+- La configuración de WhatsApp se despliega dentro de su propia tarjeta; una sesión desconectada ya no muestra el teléfono antiguo del perfil y el número visible procede de la sesión real conectada.
+- La reconexión QR reutiliza el dispositivo compartido cuando está desconectado y no muestra una empresa origen arbitraria.
+- El alta de usuarios del equipo central genera y guarda correctamente contraseñas temporales alfanuméricas de 14 caracteres.
+- El alta y edición de usuarios del equipo los vincula a la empresa activa; se reparó la membresía del usuario Sergi para recuperar el espacio Dev y sus proyectos en nuevas sesiones.
+- La navegación de proyectos se muestra para cualquier empresa de tipo Dev/estudio de desarrollo, no solo para el código histórico DEV.
+- El detalle de cada proyecto identifica siempre el bloque «Apartados del proyecto» y ofrece un alta clara cuando todavía no hay trabajo asociado.
+- El asistente de puesta en marcha ya no se muestra en cada navegador cuando se usa el CRM central; los datos existentes se abren directamente y la configuración queda en Ajustes.
+
 ### Added
 
+- Recepción documental por WhatsApp con enlace público temporal: previsualización, selección de tipo, caducidad de 30 minutos, uso único y metadatos Open Graph seguros para la vista previa del enlace.
+- La configuración de empresa permite subir un logo PNG/JPG/WebP (máximo 1 MB), que se muestra en el selector de empresa, la navegación y la página pública de recepción de documentos.
+- La sección «Tienda» incorpora la ficha completa de la empresa activa: razón social, nombre comercial, NIF/CIF, tipo de entidad, dirección fiscal y datos de contacto.
+- Los logos de empresa ya no usan fondos blancos: adoptan el marco y halo lila de Hexa, con la marca Hexa como fallback cuando no hay logo configurado.
+- El dashboard incorpora una visión consolidada de las empresas autorizadas, con emitido, cobrado, pendiente y recibido por empresa, manteniendo la contabilidad aislada.
+- Los proyectos distinguen explícitamente entre producto propio, trabajo para cliente y proyecto interno de grupo, con empresa propietaria/cliente, contacto opcional y migración compatible con proyectos existentes.
+- Ajustes permite crear una empresa legal independiente (por ejemplo, Voura), asignarla al usuario administrador y activarla para gestionar su facturación, caja e impuestos de forma aislada.
+- El webhook de documentos de WhatsApp solo acepta remitentes cuyo teléfono esté registrado en un usuario activo miembro de la empresa receptora; los remitentes desconocidos se ignoran sin respuesta.
 - Las cabeceras de los listados tabulares principales (facturas, ventas, caja, impuestos e inventario) permiten ordenar ascendente/descendente con indicador visual.
 - Las facturas manuales pueden guardarse como borrador editable; al emitirlas pasan a estado inmutable y solo admiten cobro, anulación o abono rectificativo, sin volver a modificar sus datos registrados.
 - El registro de cobros se realiza desde un popup con validación de importe pendiente y mensajes de error visibles.
 
 - Primera base de la bandeja de gastos y facturas recibidas: adjuntos PDF/imagen, revisión, proyecto asociado y aprobación que genera el movimiento de Caja.
-- Webhook firmado de WhatsApp para convertir mensajes con documentos en borradores de gastos por empresa y usuario.
+- Webhook firmado de WhatsApp para convertir mensajes con documentos en borradores de gastos. El teléfono receptor determina la empresa y, si el mismo número está vinculado a varias, el remitente elige primero el destino desde WhatsApp.
+- El flujo de recepción por WhatsApp envía una encuesta para clasificar tickets y facturas; el parche de GOWA descifra el voto y lo entrega al webhook, con fallback textual para instalaciones antiguas.
 - Botón «Leer WhatsApp» para consultar multimedia de GOWA, descargar la última foto/documento y extraer sus datos mediante un modelo de visión Ollama antes de crear el borrador.
 - Primera fase fiscal: perfil fiscal por empresa, IVA repercutido y soportado, retenciones y borrador revisable del modelo 303 con exportación CSV. No realiza presentación ante la AEAT.
 - Facturación emitida separada de las facturas recibidas: series y numeración por empresa, conversión de ventas a factura o simplificada, IVA/IRPF, estados de emisión/anulación e impresión del documento.
@@ -32,6 +67,8 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 - El selector de periodo personalizado muestra dos meses en un único calendario para elegir inicio y fin, y el editor de factura muestra el error de emisión dentro del formulario.
 
 ### Fixed
+
+- La recepción de facturas por WhatsApp ya no requiere una sesión web para guardar el borrador y tolera reintentos del webhook sin duplicar ni reabrir documentos procesados.
 
 - La página Trabajo selecciona inicialmente al usuario conectado en el filtro de responsable, sin impedir cambiar después a otro usuario o a todos.
 - Los hitos económicos no permiten repetir mes y, después de elegir uno, los siguientes selectores solo ofrecen meses posteriores disponibles.

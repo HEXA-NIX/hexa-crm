@@ -5,6 +5,7 @@ export type UserRole = "admin" | "cajero";
 
 /** Multi-empresa: kind de negocio (docs/MULTI_COMPANY_ANALYSIS.md) */
 export type CompanyKind = "retail_secondhand" | "software_studio" | "generic";
+export type CompanyEntityType = "autonomo" | "sl" | "sa" | "cooperativa" | "otra";
 
 export type Company = {
   id: number;
@@ -13,8 +14,25 @@ export type Company = {
   trade_name: string;
   nif: string;
   kind: CompanyKind;
+  entity_type?: CompanyEntityType;
+  address?: string;
+  postal_code?: string;
+  city?: string;
+  province?: string;
+  country?: string;
+  email?: string;
+  phone?: string;
+  /** Logo de la empresa en data URL (PNG/JPG/WebP, máximo 1 MB). */
+  logo_data_url?: string;
   active: boolean;
   created_at: string;
+};
+
+export type CompanyInput = Partial<Pick<Company, "logo_data_url" | "nif" | "entity_type" | "address" | "postal_code" | "city" | "province" | "country" | "email" | "phone">> & {
+  legal_name: string;
+  trade_name: string;
+  kind?: CompanyKind;
+  code?: string;
 };
 
 export type CompanyMember = {
@@ -234,6 +252,7 @@ export type ExpenseDocumentInput = Partial<Omit<ExpenseDocument, "id" | "company
 
 export type FiscalRegime = "general" | "simplified" | "recargo_equivalencia" | "other";
 export type FiscalPeriod = "monthly" | "quarterly";
+export type FiscalEntityType = "autonomo" | "sociedad" | "otra";
 export type VerifactuMode = "disabled" | "test" | "production";
 export type VerifactuRecordType = "alta" | "anulacion";
 export type VerifactuRecordStatus = "generated" | "queued" | "sent" | "accepted" | "accepted_with_errors" | "rejected";
@@ -242,6 +261,8 @@ export type FiscalProfile = {
   invoice_series?: string;
   regime: FiscalRegime;
   period: FiscalPeriod;
+  entity_type?: FiscalEntityType;
+  tax_models?: string[];
   irpf_enabled: boolean;
   default_irpf_rate: number;
   sii_enabled: boolean;
@@ -359,6 +380,73 @@ export type InvoicePaymentInput = {
   method?: InvoicePayment["method"];
   notes?: string;
 };
+
+export type BudgetStatus = "draft" | "sent" | "accepted" | "rejected" | "expired" | "invoiced" | "cancelled";
+export type BudgetLine = {
+  description: string;
+  quantity: number;
+  unit_price_cents: number;
+  vat_rate: VatRate;
+  base_cents: number;
+  vat_cents: number;
+  total_cents: number;
+};
+export type BudgetLineInput = {
+  description: string;
+  quantity: number;
+  unit_price_cents: number;
+  vat_rate: VatRate;
+};
+export type Budget = {
+  id: number;
+  company_id: number;
+  series: string;
+  number: string;
+  status: BudgetStatus;
+  operation_date: string;
+  due_at: string | null;
+  customer_id: number | null;
+  customer_name: string;
+  customer_nif: string;
+  customer_email: string;
+  project_explanation: string;
+  lines: BudgetLine[];
+  base_cents: number;
+  vat_cents: number;
+  irpf_rate: number;
+  irpf_cents: number;
+  total_cents: number;
+  payment_method: string;
+  account: string;
+  tags: string[];
+  notes: string;
+  invoice_id: number | null;
+  created_by: number;
+  created_at: string;
+  updated_at: string;
+  accepted_at: string | null;
+  rejected_at: string | null;
+  converted_at: string | null;
+};
+export type BudgetInput = {
+  id?: number | null;
+  series?: string;
+  number?: string;
+  status?: BudgetStatus;
+  operation_date?: string | null;
+  due_at?: string | null;
+  customer_id?: number | null;
+  customer_name?: string;
+  customer_nif?: string;
+  customer_email?: string;
+  project_explanation: string;
+  lines: BudgetLineInput[];
+  irpf_rate?: number;
+  payment_method?: string;
+  account?: string;
+  tags?: string[];
+  notes?: string;
+};
 export type VerifactuRecord = {
   id: number;
   company_id: number;
@@ -424,6 +512,20 @@ export type DashboardStats = {
   low_stock: Product[];
   vat_month_cents: number;
   base_month_cents: number;
+};
+
+/** Resumen de lectura consolidado por empresa autorizada. */
+export type CompanyFinancialSummary = {
+  company_id: number;
+  code: string;
+  trade_name: string;
+  issued_total_cents: number;
+  issued_paid_cents: number;
+  issued_pending_cents: number;
+  received_total_cents: number;
+  received_paid_cents: number;
+  cash_income_cents: number;
+  cash_expense_cents: number;
 };
 
 export type Settings = {
@@ -608,6 +710,8 @@ export type WorkProjectDocumentInput = Omit<WorkProjectDocument, "id" | "updated
   id?: string;
 };
 
+export type WorkProjectKind = "own" | "client" | "internal";
+
 export type ProjectTechnicalProfile = {
   frontend: string[];
   backend: string[];
@@ -661,6 +765,12 @@ export type WorkProject = {
   id: number;
   uid: string;
   company_id: number;
+  /** Empresa que gestiona el proyecto (tenant actual). */
+  project_type?: WorkProjectKind;
+  /** Empresa cliente o propietaria, cuando el proyecto no es propio. */
+  client_company_id?: number | null;
+  /** Empresa cuyo espacio de trabajo contiene las tareas del proyecto. */
+  task_company_id?: number | null;
   customer_id: number | null;
   value_cents: number;
   monthly_estimate_cents: number;
@@ -684,6 +794,9 @@ export type WorkProject = {
 
 export type WorkProjectInput = {
   id?: number | null;
+  project_type?: WorkProjectKind;
+  client_company_id?: number | null;
+  task_company_id?: number | null;
   customer_id?: number | null;
   value_cents?: number;
   monthly_estimate_cents?: number;

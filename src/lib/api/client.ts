@@ -2,10 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AiChatResult,
   AiMessage,
+  Budget,
+  BudgetInput,
+  BudgetStatus,
   AuthUser,
   CashInput,
   CashMovement,
   Company,
+  CompanyInput,
   CreateInventoryMovementInput,
   CreateUserResult,
   Customer,
@@ -62,17 +66,21 @@ let remoteOperatorConfig: RemoteOperatorConfig | null = null;
 
 /**
  * Web data plane selection:
- * - vite dev defaults to the browser/localStorage store, so local review does
- *   not need PostgreSQL or accidentally touch a production database.
- * - production builds default to the server/PostgreSQL API.
+ * - all browser environments default to the server/PostgreSQL API. Local
+ *   storage is opt-in for isolated tests/demo only, never an implicit data
+ *   plane for a real user session.
  * - VITE_CRM_MODE=local|central can explicitly override either default.
  */
 export const WEB_DATA_MODE: "local" | "central" =
-  import.meta.env.VITE_CRM_MODE === "local" || import.meta.env.VITE_CRM_MODE === "central"
+  // Vitest must remain hermetic even when the developer's .env selects the
+  // central production data plane. Otherwise client integration tests try to
+  // call a relative `/api/rpc` URL from Node and fail before exercising the
+  // browser store.
+  import.meta.env.MODE === "test"
+    ? "local"
+    : import.meta.env.VITE_CRM_MODE === "local" || import.meta.env.VITE_CRM_MODE === "central"
     ? import.meta.env.VITE_CRM_MODE
-    : import.meta.env.DEV
-      ? "local"
-      : "central";
+    : "central";
 
 export function configureRemoteOperator(config: RemoteOperatorConfig | null) {
   remoteOperatorConfig = config ? { endpoint: config.endpoint, tenantCode: config.tenantCode } : null;
@@ -122,7 +130,10 @@ async function callLocal<T>(cmd: string, args: Record<string, any>, token: strin
     case "list_companies": return browserApi.list_companies(token) as T;
     case "get_active_company": return browserApi.get_active_company(token) as T;
     case "set_active_company": return browserApi.set_active_company(args.company_id, token) as T;
+    case "update_company_profile": return browserApi.update_company_profile(args.input, token) as T;
+    case "create_company": return browserApi.create_company(args.input, token) as T;
     case "billing_by_company": return browserApi.billing_by_company(token) as T;
+    case "group_financial_summary": return browserApi.group_financial_summary(token) as T;
     case "list_users": return browserApi.list_users(token) as Promise<T>;
     case "upsert_user": return browserApi.upsert_user(args.input, token) as Promise<T>;
     case "change_own_pin": return browserApi.change_own_pin(args.current_pin, args.new_pin, token) as Promise<T>;
@@ -140,7 +151,7 @@ async function callLocal<T>(cmd: string, args: Record<string, any>, token: strin
     case "list_inventory_movements": return browserApi.list_inventory_movements(args.filters, token) as T;
     case "create_inventory_movement": return browserApi.create_inventory_movement(args.input, token) as T;
     case "reverse_inventory_movement": return browserApi.reverse_inventory_movement(args.movement_id, args.reason, token) as T;
-    case "list_customers": return browserApi.list_customers(token) as T;
+    case "list_customers": return browserApi.list_customers(token, args.company_id == null ? null : Number(args.company_id)) as T;
     case "upsert_customer": return browserApi.upsert_customer(args.input, token) as T;
     case "create_sale": return browserApi.create_sale(args.lines, args.customer_id, args.notes, token) as T;
     case "list_sales": return browserApi.list_sales(token) as T;
@@ -178,6 +189,12 @@ async function callLocal<T>(cmd: string, args: Record<string, any>, token: strin
     case "list_invoices": return browserApi.list_invoices(token) as T;
     case "issue_invoice": return browserApi.issue_invoice(args.input, token) as T;
     case "cancel_invoice": return browserApi.cancel_invoice(args.id, token) as T;
+    case "list_budgets": throw new Error("Los presupuestos requieren PostgreSQL; no se usa localStorage");
+    case "get_budget": throw new Error("Los presupuestos requieren PostgreSQL; no se usa localStorage");
+    case "upsert_budget": throw new Error("Los presupuestos requieren PostgreSQL; no se usa localStorage");
+    case "update_budget_status": throw new Error("Los presupuestos requieren PostgreSQL; no se usa localStorage");
+    case "convert_budget_to_invoice": throw new Error("Los presupuestos requieren PostgreSQL; no se usa localStorage");
+    case "delete_budget": throw new Error("Los presupuestos requieren PostgreSQL; no se usa localStorage");
     case "list_invoice_payments": return browserApi.list_invoice_payments(args.invoice_id, token) as T;
     case "add_invoice_payment": return browserApi.add_invoice_payment(args.input, token) as T;
     case "list_expense_payments": return browserApi.list_expense_payments(args.expense_id, token) as T;
@@ -293,7 +310,13 @@ export const api = {
   sessionMe: () => remoteOperatorConfig ? remoteOperatorApi.me(requireRemoteConfig(), getToken() ?? "") : call<AuthUser | null>("session_me"),
   whatsappStatus: () => WEB_DATA_MODE === "local" && !isTauri()
     ? localWhatsApp<{ connected: boolean; logged_in: boolean; device_id: string; phone?: string; user_phone: string }>("status")
-    : call<{ connected: boolean; logged_in: boolean; device_id: string; phone?: string; user_phone: string }>("whatsapp_status"),
+    : call<{ connected: boolean; logged_in: boolean; device_id: string; phone?: string; user_phone: string; shared_from_company_id?: number | null; shared_from_company_name?: string | null; webhook_trace?: { at?: string; state?: string; error?: string; event?: string; reason?: string } | null }>("whatsapp_status"),
+  whatsappAvailableLinks: () => WEB_DATA_MODE === "local" && !isTauri()
+    ? Promise.resolve([] as { company_id: number; trade_name: string; phone: string }[])
+    : call<{ company_id: number; trade_name: string; phone: string }[]>("whatsapp_available_links"),
+  whatsappUseSharedLink: (sourceCompanyId: number) => WEB_DATA_MODE === "local" && !isTauri()
+    ? Promise.reject(new Error("Compartir WhatsApp entre empresas requiere el CRM central"))
+    : call<{ company_id: number; source_company_id: number; source_company_name: string; phone: string }>("whatsapp_use_shared_link", { source_company_id: sourceCompanyId }),
   whatsappLoginQr: () => WEB_DATA_MODE === "local" && !isTauri()
     ? localWhatsApp<{ qr_url: string; qr_data?: string }>("login")
     : call<{ qr_url: string; qr_data?: string }>("whatsapp_login_qr"),
@@ -318,7 +341,9 @@ export const api = {
   listSuppliers: () => call<Supplier[]>("list_suppliers"),
   upsertSupplier: (input: SupplierInput) => call<Supplier>("upsert_supplier", { input }),
   adjustStock: (productId: number, delta: number, reason: string) => remoteOperatorConfig ? remoteWriteUnavailable() : call<Product>("adjust_stock", { product_id: productId, delta, reason }),
-  listCustomers: () => remoteOperatorConfig ? remoteOperatorApi.customers(requireRemoteConfig(), getToken() ?? "") : call<Customer[]>("list_customers"),
+  listCustomers: (companyId?: number | null) => remoteOperatorConfig
+    ? remoteOperatorApi.customers(requireRemoteConfig(), getToken() ?? "")
+    : call<Customer[]>("list_customers", companyId == null ? undefined : { company_id: companyId }),
   upsertCustomer: (input: CustomerInput) => remoteOperatorConfig ? remoteOperatorApi.saveCustomer(requireRemoteConfig(), getToken() ?? "", input) : call<Customer>("upsert_customer", { input }),
   createSale: (lines: SaleLineInput[], customerId?: number | null, notes?: string) =>
     remoteOperatorConfig ? remoteOperatorApi.createSale(requireRemoteConfig(), getToken() ?? "", lines, customerId ?? null, notes ?? "") : call<Sale>("create_sale", {
@@ -339,6 +364,12 @@ export const api = {
   listInvoices: () => call<Invoice[]>("list_invoices"),
   issueInvoice: (input: InvoiceInput) => call<Invoice>("issue_invoice", { input }),
   cancelInvoice: (id: number) => call<Invoice>("cancel_invoice", { id }),
+  listBudgets: () => call<Budget[]>("list_budgets"),
+  getBudget: (id: number) => call<Budget>("get_budget", { id }),
+  upsertBudget: (input: BudgetInput) => call<Budget>("upsert_budget", { input }),
+  updateBudgetStatus: (id: number, status: BudgetStatus) => call<Budget>("update_budget_status", { id, status }),
+  convertBudgetToInvoice: (id: number) => call<{ budget: Budget; invoice: Invoice }>("convert_budget_to_invoice", { id }),
+  deleteBudget: (id: number) => call<void>("delete_budget", { id }),
   listInvoicePayments: (invoiceId: number) => call<InvoicePayment[]>("list_invoice_payments", { invoice_id: invoiceId }),
   addInvoicePayment: (input: InvoicePaymentInput) => call<InvoicePayment>("add_invoice_payment", { input }),
   listExpensePayments: (expenseId: number) => call<ExpensePayment[]>("list_expense_payments", { expense_id: expenseId }),
@@ -369,11 +400,14 @@ export const api = {
   exportBackup: () => call<unknown>("export_backup"),
   preMigrationBackup: (reason: string) =>
     call<unknown>("pre_migration_backup", { reason }),
-  restoreBackup: (raw: unknown) => call<void>("restore_backup", { raw }),
+  restoreBackup: (raw: unknown) => call<{ imported: Record<string, number> }>("restore_backup", { raw }),
   listCompanies: (includeAll = false) => call<Company[]>("list_companies", { include_all: includeAll }),
   getActiveCompany: () => call<Company | null>("get_active_company"),
   setActiveCompany: (companyId: number) =>
     call<Company>("set_active_company", { company_id: companyId }),
+  updateCompanyProfile: (input: Partial<Pick<Company, "logo_data_url" | "legal_name" | "trade_name" | "nif" | "kind" | "entity_type" | "address" | "postal_code" | "city" | "province" | "country" | "email" | "phone">>) =>
+    call<Company>("update_company_profile", { input }),
+  createCompany: (input: CompanyInput) => call<Company>("create_company", { input }),
   billingByCompany: () =>
     call<
       {
@@ -384,6 +418,7 @@ export const api = {
         total_cents: number;
       }[]
     >("billing_by_company"),
+  groupFinancialSummary: () => call<import("../types").CompanyFinancialSummary[]>("group_financial_summary"),
   listPlugins: () => call<TenantPlugin[]>("list_plugins"),
   updatePlugin: (
     pluginKey: PluginKey,

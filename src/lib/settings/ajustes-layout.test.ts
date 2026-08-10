@@ -52,9 +52,11 @@ describe("ajustes layout — category navigation", () => {
     // Labels come from catalog; page iterates navSections
     expect(src).toMatch(/sec\.label/);
     // Catalog itself has Spanish labels
-    for (const label of ["Cuenta", "Tienda", "Equipo", "Asistente IA", "Actualizaciones", "Sistema"]) {
+    for (const label of ["Cuenta", "Empresa", "Equipo", "Asistente IA", "Actualizaciones", "Sistema"]) {
       expect(AJUSTES_SECTIONS.some((s) => s.label === label)).toBe(true);
     }
+    expect(visibleAjustesSections(true).some((s) => s.id === "whatsapp")).toBe(false);
+    expect(src).toContain("<PluginManager />");
   });
 
   it("separates danger zone from everyday save", () => {

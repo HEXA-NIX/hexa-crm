@@ -64,6 +64,12 @@ describe("estructura UI de proyectos", () => {
     expect(DETAIL).toContain('size="xl"');
   });
 
+  it("hace visible el apartado de trabajo aunque el proyecto todavía esté vacío", () => {
+    expect(DETAIL).toContain('id="project-work-sections"');
+    expect(DETAIL).toContain("APARTADOS DEL PROYECTO");
+    expect(DETAIL).toContain("No hay apartados en este proyecto");
+  });
+
   it("dispone de una vista explícita para archivadas y Kanban móvil", () => {
     expect(DETAIL).toContain('filterStatus === "archived"');
     expect(DETAIL).toContain("overflow-x-auto");

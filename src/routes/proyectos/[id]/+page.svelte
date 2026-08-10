@@ -2,7 +2,7 @@
   import { page } from "$app/stores";
   import { goto } from "$app/navigation";
   import { api, supportsOrcaWorker, usesLocalOrcaBridge } from "$lib/api/client";
-  import { session, isAdmin, currentUser } from "$lib/stores/session";
+  import { session, isAdmin, currentUser, setActiveCompanyLocal } from "$lib/stores/session";
   import { showToast } from "$lib/stores/ui";
   import type {
     WorkProject,
@@ -21,6 +21,7 @@
     WorkProjectRequest,
     WorkProjectRequestStatus,
     WorkProjectRequestType,
+    WorkProjectKind,
   } from "$lib/types";
   import { formatEUR, parseEurosInput } from "$lib/money";
   import Button from "$lib/components/Button.svelte";
@@ -103,6 +104,8 @@
     name: "",
     description: "",
     status: "active" as WorkProject["status"],
+    project_type: "own" as WorkProjectKind,
+    client_company_id: "",
     customer_id: "",
     value: "",
     milestones: [] as { id?: number; amount: string; target_month: string }[],
@@ -251,13 +254,46 @@
   });
 
   const customerOptions = $derived([
-    { value: "", label: "Proyecto propio (sin cliente)" },
+    { value: "", label: "Sin contacto específico" },
     ...customers.map((customer) => ({
       value: String(customer.id),
       label: customer.name,
       hint: customer.nif || customer.email || undefined,
     })),
   ]);
+
+  const projectTypeOptions = [
+    { value: "own", label: "Dev · producto propio" },
+    { value: "client", label: "Dev · cliente / servicio facturable" },
+    { value: "internal", label: "Dev · empresa del grupo" },
+  ];
+  const clientCompanyOptions = $derived([
+    { value: "", label: "Seleccionar empresa" },
+    ...$session.companies.map((company) => ({ value: String(company.id), label: company.trade_name, hint: company.code })),
+  ]);
+  const projectType = (value?: WorkProjectKind, customerId?: number | null) =>
+    value ?? (customerId != null ? "client" : "own");
+  const projectTypeLabel = (value?: WorkProjectKind, customerId?: number | null) => {
+    const kind = projectType(value, customerId);
+    return kind === "client" ? "Dev · Cliente" : kind === "internal" ? "Dev · Interno" : "Dev · Propio";
+  };
+  const projectCompanyName = (companyId?: number | null) =>
+    companyId ? $session.companies.find((company) => company.id === companyId)?.trade_name ?? "Empresa" : "";
+  const projectLogo = (value: WorkProject) => {
+    if (value.logo_data_url) return value.logo_data_url;
+    const kind = projectType(value.project_type, value.customer_id);
+    // A client project has no visual fallback: the customer only sees an
+    // image when one was explicitly uploaded for that project.
+    if (kind === "client") return "";
+    const logoCompanyId = kind === "own"
+      ? value.company_id
+      : value.task_company_id ?? value.company_id;
+    return $session.companies.find((company) => company.id === logoCompanyId)?.logo_data_url ?? "";
+  };
+  const hexaCompanyId = () =>
+    $session.companies.find((company) => company.code.toUpperCase() === "DEV")?.id
+    ?? $session.companies.find((company) => /hexa/i.test(company.trade_name) && company.kind === "software_studio")?.id
+    ?? $session.activeCompanyId;
 
   const projectCustomer = $derived.by(() => {
     const customerId = project?.customer_id;
@@ -317,12 +353,19 @@
     loading = true;
     try {
       const p = await api.getWorkProject(projectReference);
+      // Los proyectos internos se gestionan en el espacio de trabajo de su
+      // empresa propietaria. Cambiamos el contexto antes de cargar sus tareas.
+      if (p.project_type === "internal" && p.task_company_id && p.task_company_id !== $session.activeCompanyId) {
+        const workspace = await api.setActiveCompany(p.task_company_id);
+        setActiveCompanyLocal(workspace);
+        return;
+      }
       const [itemsList, catList, memList, pList, customerList, movementList] = await Promise.all([
         api.listWorkItems({ project_id: p.id }),
         api.listWorkCategories(),
         api.listWorkMembers(),
         api.listWorkProjects(),
-        api.listCustomers(),
+        api.listCustomers(hexaCompanyId()),
         api.listCashMovements(),
       ]);
       project = p;
@@ -652,6 +695,8 @@
       name: project.name,
       description: project.description || "",
       status: project.status,
+      project_type: projectType(project.project_type, project.customer_id),
+      client_company_id: project.client_company_id ? String(project.client_company_id) : "",
       customer_id: project.customer_id ? String(project.customer_id) : "",
       value: String((project.value_cents / 100).toFixed(2)).replace(".", ","),
       milestones: project.revenue_milestones.map((milestone) => ({
@@ -681,6 +726,18 @@
     void handleProjectLogo(event.dataTransfer?.files?.[0]);
   }
 
+  function setEditProjectType(value: string) {
+    const projectType = value as WorkProjectKind;
+    editProjectForm.project_type = projectType;
+    if (projectType !== "client") {
+      editProjectForm.customer_id = "";
+    }
+    if (projectType === "own") {
+      editProjectForm.client_company_id = "";
+      editProjectForm.value = "";
+    }
+  }
+
   async function handleSaveProject() {
     if (!project || !editProjectForm.name.trim()) {
       showToast("El nombre del proyecto es obligatorio", "err");
@@ -695,19 +752,23 @@
       return;
     }
     const projectValue = parseEurosInput(editProjectForm.value);
-    if (editProjectForm.customer_id && hasInvalidMoneyInput(editProjectForm.value)) {
+    if (editProjectForm.project_type === "client" && hasInvalidMoneyInput(editProjectForm.value)) {
       showToast("Introduce un valor contratado válido", "err");
       return;
     }
     const invalidMilestone = editProjectForm.milestones.some((milestone) => {
       return hasInvalidMoneyInput(milestone.amount);
     });
-    if (!editProjectForm.customer_id && invalidMilestone) {
+    if (editProjectForm.project_type === "own" && invalidMilestone) {
       showToast("Revisa los importes de los hitos mensuales", "err");
       return;
     }
-    if (!editProjectForm.customer_id && hasDuplicateMilestoneMonths(editProjectForm.milestones)) {
+    if (editProjectForm.project_type === "own" && hasDuplicateMilestoneMonths(editProjectForm.milestones)) {
       showToast("No puedes repetir el mismo mes en dos hitos", "err");
+      return;
+    }
+    if (editProjectForm.project_type === "internal" && !editProjectForm.client_company_id) {
+      showToast("Selecciona la empresa propietaria", "err");
       return;
     }
     editProjectSaving = true;
@@ -717,26 +778,28 @@
         name: editProjectForm.name.trim(),
         description: editProjectForm.description.trim(),
         status: editProjectForm.status,
-        customer_id: editProjectForm.customer_id ? Number(editProjectForm.customer_id) : null,
-        value_cents: editProjectForm.customer_id
+        project_type: editProjectForm.project_type,
+        client_company_id: editProjectForm.project_type === "own" || !editProjectForm.client_company_id ? null : Number(editProjectForm.client_company_id),
+        customer_id: editProjectForm.project_type === "client" && editProjectForm.customer_id ? Number(editProjectForm.customer_id) : null,
+        value_cents: editProjectForm.project_type === "client"
           ? (projectValue ?? 0)
           : 0,
-        monthly_estimate_cents: editProjectForm.customer_id
-          ? 0
-          : editProjectForm.milestones.reduce(
+        monthly_estimate_cents: editProjectForm.project_type === "own"
+          ? editProjectForm.milestones.reduce(
               (sum, milestone) => sum + (parseEurosInput(milestone.amount) ?? 0),
               0,
-            ),
+            )
+          : 0,
         revenue_target_date: null,
-        revenue_milestones: editProjectForm.customer_id
-          ? []
-          : editProjectForm.milestones
+        revenue_milestones: editProjectForm.project_type === "own"
+          ? editProjectForm.milestones
               .map((milestone) => ({
                 id: milestone.id,
                 amount_cents: parseEurosInput(milestone.amount) ?? 0,
                 target_month: milestone.target_month,
               }))
-              .filter((milestone) => milestone.amount_cents > 0 && milestone.target_month),
+              .filter((milestone) => milestone.amount_cents > 0 && milestone.target_month)
+          : [],
         start_date: editProjectForm.start_date || null,
         target_date: editProjectForm.target_date || null,
         logo_data_url: editProjectForm.logo_data_url,
@@ -1561,8 +1624,8 @@
     <Card lift={false} class="mb-6 border border-[var(--color-border-strong)] bg-purple-950/20 p-6">
       <div class="flex flex-wrap items-start justify-between gap-4">
         <div class="flex min-w-0 max-w-3xl items-start gap-4">
-          {#if project.logo_data_url}
-            <img src={project.logo_data_url} alt="Logo de {project.name}" class="h-20 w-20 shrink-0 rounded-2xl border border-white/10 object-cover shadow-lg" />
+          {#if projectLogo(project)}
+            <img src={projectLogo(project)} alt="Logo de {project.name}" class="h-20 w-20 shrink-0 rounded-2xl border border-white/10 object-cover shadow-lg" />
           {/if}
           <div class="min-w-0">
           <div class="flex flex-wrap items-center gap-3 mb-2">
@@ -1580,9 +1643,13 @@
 
           <div class="flex flex-wrap items-center gap-6 text-xs text-[var(--color-muted-dim)]">
             <span>
-              Cliente:
+              {projectTypeLabel(project.project_type, project.customer_id)}:
               <strong class="text-[var(--color-text)]">
-                {projectCustomer?.name ?? "Proyecto propio"}
+                {project.client_company_id
+                  ? projectCompanyName(project.client_company_id)
+                  : project.customer_id
+                    ? projectCustomer?.name ?? "Cliente"
+                    : "Sin empresa externa"}
               </strong>
             </span>
             {#if project.start_date}
@@ -1732,19 +1799,21 @@
       <div class="mb-4 mt-4 flex flex-wrap items-start justify-between gap-3">
         <div>
           <p class="text-xs text-[var(--color-muted-dim)]">
-            {project.customer_id
+            {projectType(project.project_type, project.customer_id) === "client"
               ? "Valor contratado, cobros y gastos registrados en Caja."
-              : "Objetivo económico estimado para este proyecto propio."}
+              : projectType(project.project_type, project.customer_id) === "internal"
+                ? "Seguimiento interno del grupo; los movimientos se registran en la empresa gestora."
+                : "Objetivo económico estimado para este proyecto propio."}
           </p>
         </div>
-        {#if project.customer_id}
+        {#if projectType(project.project_type, project.customer_id) === "client"}
           <div class="flex gap-2">
             <Button variant="secondary" onclick={() => openCashModal("expense")}>− Registrar gasto</Button>
             <Button variant="primary" onclick={() => openCashModal("income")}>+ Registrar cobro</Button>
           </div>
         {/if}
       </div>
-      {#if project.customer_id}
+      {#if projectType(project.project_type, project.customer_id) === "client"}
         <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <div class="rounded-xl border border-purple-400/20 bg-purple-500/[0.06] p-3">
             <p class="text-xs text-[var(--color-muted)]">Valor contratado</p>
@@ -1772,7 +1841,7 @@
         </div>
       {/if}
       {#if economicSeries.length > 0}
-        <div class="mt-3 grid items-stretch gap-3 {project.customer_id == null && project.revenue_milestones.length > 0 ? 'lg:grid-cols-[minmax(0,1fr)_15rem]' : ''}">
+        <div class="mt-3 grid items-stretch gap-3 {projectType(project.project_type, project.customer_id) === 'own' && project.revenue_milestones.length > 0 ? 'lg:grid-cols-[minmax(0,1fr)_15rem]' : ''}">
         <div class="min-w-0 rounded-xl border border-white/[0.07] bg-black/10 p-3">
           <div class="mb-1.5 flex flex-wrap items-center justify-between gap-2">
             <div>
@@ -1818,7 +1887,7 @@
             </span>
           </div>
         </div>
-        {#if project.customer_id == null && project.revenue_milestones.length > 0}
+        {#if projectType(project.project_type, project.customer_id) === "own" && project.revenue_milestones.length > 0}
           <aside class="rounded-xl border border-white/[0.07] bg-black/10 p-3">
             <p class="text-xs font-semibold text-[var(--color-text)]">Hitos previstos</p>
             <div class="mt-2 space-y-1.5">
@@ -1870,6 +1939,15 @@
       </div>
     </div>
     </details>
+
+    <!-- Project work sections -->
+    <div id="project-work-sections" class="mb-3 flex flex-wrap items-end justify-between gap-2">
+      <div>
+        <span class="section-label">APARTADOS DEL PROYECTO</span>
+        <p class="mt-1 text-xs text-[var(--color-muted-dim)]">Organiza aquí el trabajo del proyecto por tareas, hitos e incidencias.</p>
+      </div>
+      <span class="text-xs tabular text-[var(--color-muted)]">{tasks.length} apartado{tasks.length === 1 ? "" : "s"}</span>
+    </div>
 
     <!-- Quick Capture Form for this Project -->
     <Card lift={false} class="mb-6 border border-[var(--color-border)] bg-purple-950/10 p-4">
@@ -1985,10 +2063,10 @@
     <!-- Content: Lista or Kanban -->
     {#if filteredTasks.length === 0}
       <EmptyState
-        title="No hay tareas en este proyecto"
-        description={tasks.length === 0 ? "Empieza creando la primera tarea para este proyecto." : "No hay tareas que coincidan con los filtros aplicados."}
+        title="No hay apartados en este proyecto"
+        description={tasks.length === 0 ? "Este proyecto todavía no tiene apartados de trabajo. Crea el primero para empezar a organizarlo." : "No hay apartados que coincidan con los filtros aplicados."}
       >
-        <Button variant="primary" onclick={openNewTaskModal}>+ Nueva tarea</Button>
+        <Button variant="primary" onclick={openNewTaskModal}>+ Añadir apartado</Button>
       </EmptyState>
     {:else if viewMode === "lista"}
       <div class="space-y-3">
@@ -2324,6 +2402,7 @@
 
     <RichDescriptionEditor id="edit-project-desc" bind:value={editProjectForm.description} />
 
+    {#if editProjectForm.project_type !== "own"}
     <div
       class="space-y-2 rounded-xl border border-dashed p-3 transition {projectLogoDragActive ? 'border-purple-400 bg-purple-500/10' : 'border-[var(--color-border)]'}"
       role="group"
@@ -2357,6 +2436,7 @@
         </div>
       </div>
     </div>
+    {/if}
 
     <Select
       label="Estado"
@@ -2365,18 +2445,37 @@
     />
 
     <Select
-      label="Cliente"
-      options={customerOptions}
-      bind:value={editProjectForm.customer_id}
-      placeholder="Proyecto propio (sin cliente)"
+      label="Tipo de proyecto"
+      options={projectTypeOptions}
+      bind:value={editProjectForm.project_type}
+      onvaluechange={setEditProjectType}
     />
 
-    {#if editProjectForm.customer_id}
+    {#if editProjectForm.project_type === "internal"}
+      <Select
+        label="Empresa propietaria"
+        options={clientCompanyOptions}
+        bind:value={editProjectForm.client_company_id}
+        placeholder="Seleccionar empresa"
+      />
+    {/if}
+
+    {#if editProjectForm.project_type === "client"}
+      <Select
+        label="Cliente de HEXA / contacto (opcional)"
+        options={customerOptions}
+        bind:value={editProjectForm.customer_id}
+        placeholder="Sin cliente/contacto específico"
+      />
+      <p class="-mt-2 text-[11px] text-[var(--color-muted-dim)]">Se selecciona del catálogo de clientes de HEXA.</p>
+    {/if}
+
+    {#if editProjectForm.project_type === "client"}
       <div class="space-y-1">
         <label for="edit-project-value" class="text-xs font-medium text-[var(--color-muted)]">Valor contratado (€)</label>
         <input id="edit-project-value" type="text" inputmode="decimal" bind:value={editProjectForm.value} placeholder="0,00" class="field w-full text-sm" />
       </div>
-    {:else}
+    {:else if editProjectForm.project_type === "own"}
       <div class="space-y-3 rounded-xl border border-[var(--color-border)] p-3">
         <div class="flex items-center justify-between gap-3">
           <div>

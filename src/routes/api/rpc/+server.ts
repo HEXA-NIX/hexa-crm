@@ -60,6 +60,12 @@ export const POST: RequestHandler = async ({ request }) => {
       case "whatsapp_status":
         result = await postgresApi.whatsapp_status(token);
         break;
+      case "whatsapp_available_links":
+        result = await postgresApi.whatsapp_available_links(token);
+        break;
+      case "whatsapp_use_shared_link":
+        result = await postgresApi.whatsapp_use_shared_link(Number(args?.source_company_id), token);
+        break;
       case "whatsapp_login_qr":
         result = await postgresApi.whatsapp_login_qr(token);
         break;
@@ -78,8 +84,17 @@ export const POST: RequestHandler = async ({ request }) => {
       case "set_active_company":
         result = await postgresApi.set_active_company(args?.company_id as number, token);
         break;
+      case "update_company_profile":
+        result = await postgresApi.update_company_profile(args?.input ?? {}, token);
+        break;
+      case "create_company":
+        result = await postgresApi.create_company(args?.input ?? {}, token);
+        break;
       case "billing_by_company":
         result = await postgresApi.billing_by_company(token);
+        break;
+      case "group_financial_summary":
+        result = await postgresApi.group_financial_summary(token);
         break;
       case "list_plugins":
         result = await postgresApi.list_plugins(token);
@@ -144,7 +159,7 @@ export const POST: RequestHandler = async ({ request }) => {
         result = await postgresApi.adjust_stock(args?.product_id as number, args?.delta as number, args?.reason as string, token);
         break;
       case "list_customers":
-        result = await postgresApi.list_customers(token);
+        result = await postgresApi.list_customers(token, args?.company_id == null ? null : Number(args.company_id));
         break;
       case "upsert_customer":
         result = await postgresApi.upsert_customer(args?.input, token);
@@ -180,6 +195,12 @@ export const POST: RequestHandler = async ({ request }) => {
       case "list_invoices": result = await postgresApi.list_invoices(token); break;
       case "issue_invoice": result = await postgresApi.issue_invoice(args?.input, token); break;
       case "cancel_invoice": result = await postgresApi.cancel_invoice(Number(args?.id), token); break;
+      case "list_budgets": result = await postgresApi.list_budgets(token); break;
+      case "get_budget": result = await postgresApi.get_budget(Number(args?.id), token); break;
+      case "upsert_budget": result = await postgresApi.upsert_budget(args?.input, token); break;
+      case "update_budget_status": result = await postgresApi.update_budget_status(Number(args?.id), args?.status, token); break;
+      case "convert_budget_to_invoice": result = await postgresApi.convert_budget_to_invoice(Number(args?.id), token); break;
+      case "delete_budget": result = await postgresApi.delete_budget(Number(args?.id), token); break;
       case "list_invoice_payments": result = await postgresApi.list_invoice_payments(Number(args?.invoice_id), token); break;
       case "add_invoice_payment": result = await postgresApi.add_invoice_payment(args?.input, token); break;
       case "list_expense_payments": result = await postgresApi.list_expense_payments(Number(args?.expense_id), token); break;
@@ -311,7 +332,10 @@ export const POST: RequestHandler = async ({ request }) => {
         return json({ error: `Comando no soportado: ${cmd}` }, { status: 400 });
     }
 
-    return json(result);
+    // SvelteKit serializes `undefined` as an empty response.  The browser
+    // client expects JSON for every RPC call (including void commands such as
+    // logout), so always return a small acknowledgement for those commands.
+    return json(result === undefined ? { ok: true } : result);
   } catch (error: any) {
     console.error(`Error en rpc endpoint [POST]:`, error);
     const code = error?.code || error?.errors?.[0]?.code;

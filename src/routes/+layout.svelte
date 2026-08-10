@@ -24,7 +24,7 @@
     setIdleTimeoutMinutes,
   } from "$lib/stores/session";
   import { idleTimeoutMs } from "$lib/auth/idle-timeout";
-  import { api } from "$lib/api/client";
+  import { api, WEB_DATA_MODE } from "$lib/api/client";
   import { configureRemoteOperator } from "$lib/api/client";
   import { page } from "$app/stores";
   import { showToast } from "$lib/stores/ui";
@@ -82,6 +82,14 @@
       title: "Facturas emitidas",
       subtitle: "Ventas facturadas, series y documentos para clientes",
     },
+    "/presupuestos": {
+      title: "Presupuestos",
+      subtitle: "Propuestas comerciales, aprobación y facturación",
+    },
+    "/servicios": {
+      title: "Servicios",
+      subtitle: "Catálogo de servicios y tarifas",
+    },
     "/clientes": {
       title: "Clientes",
       subtitle: "Relaciones y datos de contacto",
@@ -92,7 +100,7 @@
     },
     "/ajustes": {
       title: "Ajustes",
-      subtitle: "Tienda, usuarios y Ollama",
+      subtitle: "Empresa, usuarios e integraciones",
     },
   };
 
@@ -194,7 +202,10 @@
   $effect(() => {
     if (canEnter && !$mustChangePassword) {
       try {
-        showOnboarding = !isOnboardingDone();
+        // Central CRM data is shared between browsers. A browser-local
+        // onboarding flag must never make an existing company look new again.
+        // Central workspaces are configured from Empresa/Ajustes instead.
+        showOnboarding = WEB_DATA_MODE !== "central" && !isOnboardingDone();
       } catch {
         showOnboarding = false;
       }
@@ -290,7 +301,10 @@
   }
 </script>
 
-{#if !$session.ready}
+{#if $page.url.pathname.startsWith("/recibir/")}
+  <!-- Bearer-token document intake is intentionally public and does not load the CRM shell. -->
+  <main class="min-h-dvh">{@render children()}</main>
+{:else if !$session.ready}
   <div class="flex min-h-screen items-center justify-center p-4">
     <div class="text-center">
       <div class="mx-auto mb-4 flex justify-center">
@@ -381,18 +395,20 @@
               {#if $session.companies.length > 1}
                 <Select
                   class="header-company-select"
+                  showSelectedHint
                   value={String($session.activeCompanyId ?? "")}
                   options={$session.companies.map((company) => ({
                     value: String(company.id),
                     label: company.trade_name,
-                    hint: company.code,
+                    hint: `${company.code} · HEXA CRM`,
+                    icon: company.logo_data_url || "/logo-mark.svg",
                   }))}
                   disabled={switchingCompany}
                   onvaluechange={onCompanyChange}
                 />
               {:else if $activeCompany}
                 <strong class="block truncate text-xs font-medium text-[var(--color-text)]">{$activeCompany.trade_name}</strong>
-                <small class="text-[0.55rem] font-bold tracking-[0.12em] text-[var(--color-purple)]">{$activeCompany.code}</small>
+                <small class="text-[0.55rem] font-bold tracking-[0.12em] text-[var(--color-purple)]">{$activeCompany.code} · HEXA CRM</small>
               {:else}
                 <strong class="block truncate text-xs font-medium text-amber-200">Sin empresa asignada</strong>
               {/if}
@@ -407,8 +423,8 @@
                       onclick={() => onCompanyChange(String(company.id))}
                     >
                       <span>
-                        <strong>{company.trade_name}</strong>
-                        <small>{company.code}</small>
+                        <span class="flex items-center gap-2"><img src={company.logo_data_url || "/logo-mark.svg"} alt="" class="company-logo-frame h-7 w-7 rounded-md object-contain" /><strong>{company.trade_name}</strong></span>
+                        <small>{company.code} · HEXA CRM</small>
                       </span>
                       {#if masterOwnCompanies.some((own) => own.id === company.id)}
                         <em>Asignada</em>
@@ -431,7 +447,7 @@
             >
               <p>Empresa activa</p>
               <strong>{$activeCompany.trade_name}</strong>
-              <small>{$activeCompany.code}</small>
+              <small>{$activeCompany.code} · HEXA CRM</small>
             </div>
           {/if}
           <div class="app-header-user hidden items-center gap-2.5 lg:flex">
