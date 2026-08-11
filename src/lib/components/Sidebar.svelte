@@ -19,6 +19,8 @@
     onLogout?: () => void | Promise<void>;
   } = $props();
   let salesMenuOpen = $state(false);
+  let salesTriggerElement = $state<HTMLElement | null>(null);
+  let salesPopoverPosition = $state({ top: 0, left: 0 });
 
   const collapsed = $derived(forceExpanded ? false : $sidebarCollapsed);
   const showWork = $derived(
@@ -50,7 +52,6 @@
       ? [{
           label: "OPERACIÓN",
           links: [
-            { href: "/ventas", label: "Ventas", icon: "sales" },
             { href: "/inventario", label: "Inventario", icon: "inventory" },
             { href: "/clientes", label: "Clientes", icon: "customers" },
           ],
@@ -100,7 +101,31 @@
 
   function nav() {
     salesMenuOpen = false;
+    salesTriggerElement = null;
     onNavigate?.();
+  }
+
+  function positionSalesPopover() {
+    if (!salesTriggerElement || typeof window === "undefined") return;
+    const rect = salesTriggerElement.getBoundingClientRect();
+    const menuWidth = 224;
+    const menuHeight = 178;
+    const gap = 8;
+    let left = rect.right + gap;
+    if (left + menuWidth > window.innerWidth - gap) left = rect.left - menuWidth - gap;
+    let top = rect.top - menuHeight - gap;
+    if (top < gap) top = rect.bottom + gap;
+    salesPopoverPosition = {
+      top: Math.min(Math.max(gap, top), Math.max(gap, window.innerHeight - menuHeight - gap)),
+      left: Math.min(Math.max(gap, left), Math.max(gap, window.innerWidth - menuWidth - gap)),
+    };
+  }
+
+  function toggleSalesMenu(event: MouseEvent) {
+    event.preventDefault();
+    salesTriggerElement = event.currentTarget as HTMLElement;
+    salesMenuOpen = !salesMenuOpen;
+    if (salesMenuOpen) requestAnimationFrame(positionSalesPopover);
   }
 
   $effect(() => {
@@ -111,10 +136,20 @@
   onMount(() => {
     const close = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
-      if (!target?.closest(".sidebar-sales-trigger, .sidebar-sales-popover")) salesMenuOpen = false;
+      if (!target?.closest(".sidebar-sales-trigger, .sidebar-sales-popover")) {
+        salesMenuOpen = false;
+        salesTriggerElement = null;
+      }
     };
     document.addEventListener("click", close);
-    return () => document.removeEventListener("click", close);
+    const reposition = () => salesMenuOpen && positionSalesPopover();
+    window.addEventListener("resize", reposition);
+    window.addEventListener("scroll", reposition, true);
+    return () => {
+      document.removeEventListener("click", close);
+      window.removeEventListener("resize", reposition);
+      window.removeEventListener("scroll", reposition, true);
+    };
   });
 
   async function logout() {
@@ -162,7 +197,7 @@
               <div class="sidebar-link-wrap">
               <a
                 href={link.href}
-                onclick={(event) => { if (link.label === "Ventas") { event.preventDefault(); salesMenuOpen = !salesMenuOpen; } else nav(); }}
+                onclick={(event) => { if (link.label === "Ventas") toggleSalesMenu(event); else nav(); }}
                 class="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-all duration-200 {link.label === 'Ventas' ? 'sidebar-sales-trigger' : ''} {group.label === 'VENTAS' && link.label !== 'Ventas' ? 'ml-7 pl-3 text-[var(--color-muted)]' : ''} {active(
                   link.href,
                   $page.url.pathname + $page.url.search
@@ -183,7 +218,11 @@
                 {/if}
               </a>
               {#if link.label === "Ventas" && salesMenuOpen && !collapsed}
-                <div class="sidebar-sales-popover" role="menu">
+                <div
+                  class="sidebar-sales-popover"
+                  role="menu"
+                  style={`top:${salesPopoverPosition.top}px;left:${salesPopoverPosition.left}px`}
+                >
                   <a href="/facturas" onclick={nav} role="menuitem">Facturas</a>
                   <a href="/presupuestos" onclick={nav} role="menuitem">Presupuestos</a>
                   <a href="/servicios" onclick={nav} role="menuitem">Servicios</a>
@@ -244,7 +283,7 @@
 <style>
   .sidebar-icon :global(svg) { width:1.25rem; height:1.25rem; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; vertical-align:middle; }
   .sidebar-link-wrap { position:relative; }
-  .sidebar-sales-popover { position:fixed; z-index:9999; top:18rem; left:17.5rem; min-width:12rem; margin:0; padding:.3rem; border:1px solid var(--color-border); border-radius:.6rem; background:var(--color-obsidian-elevated); box-shadow:0 12px 28px rgba(0,0,0,.3); }
+  .sidebar-sales-popover { position:fixed; z-index:100000; width:14rem; min-width:14rem; margin:0; padding:.3rem; border:1px solid var(--color-border); border-radius:.6rem; background:var(--color-obsidian-elevated); box-shadow:0 18px 40px rgba(0,0,0,.48); }
   .sidebar-sales-popover a { display:block; border-radius:.4rem; color:var(--color-muted); padding:.55rem .7rem; font-size:.86rem; }
   .sidebar-sales-popover a:hover { background:var(--color-purple-soft); color:var(--color-purple-bright); }
 </style>

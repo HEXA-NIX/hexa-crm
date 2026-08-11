@@ -325,9 +325,9 @@
   <ForcePasswordChange />
   <Toast />
 {:else}
-  <div class="flex h-dvh max-h-dvh overflow-hidden">
+    <div class="flex h-dvh max-h-dvh overflow-hidden">
     <!-- Desktop sidebar -->
-    <div class="hidden h-full shrink-0 md:flex">
+    <div class="relative z-[500] hidden h-full shrink-0 overflow-visible md:flex">
       <Sidebar onLogout={closeSession} />
     </div>
 
@@ -339,7 +339,7 @@
           aria-label="Cerrar menú"
           onclick={() => (mobileNavOpen = false)}
         ></button>
-        <div class="absolute inset-y-0 left-0 z-10 flex h-full w-[min(18rem,88vw)] shadow-2xl">
+        <div class="absolute inset-y-0 left-0 z-[500] flex h-full w-[min(18rem,88vw)] overflow-visible shadow-2xl">
           <Sidebar
             forceExpanded
             onNavigate={() => (mobileNavOpen = false)}
