@@ -9,6 +9,9 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+- Los proyectos internos de empresas del grupo vuelven a permitir crear, editar y visualizar hitos mensuales de facturación prevista; al guardar ya no se eliminan sus previsiones por no ser un «producto propio» del estudio.
+- Se completa la cobertura del modo claro en modales, desplegables, paneles de IA, tarjetas editoriales y superficies de Ventas, Trabajo, Caja y Ajustes; los estados informativos usan tonos oscuros legibles y los botones principales mantienen contraste suficiente.
+- Se incorpora el área administrativa «Personal»: altas y fichas laborales separadas de los usuarios del CRM, vínculo opcional entre ambos, registro de nóminas por periodo y documentación, importes en céntimos y pago conectado con una salida de Caja. Los datos quedan aislados por empresa y restringidos a administradores; el módulo registra la nómina de la asesoría, sin sustituir su cálculo laboral.
 - La configuración que antes vivía en un espacio global (IVA, Ollama, objetivos, nombre y copias) se guarda ahora por empresa con compatibilidad de lectura para instalaciones antiguas; las copias ya no incluyen ajustes de otros tenants.
 - El arranque central bloquea de forma estricta la restauración destructiva, añade perfiles fiscales y ajustes por defecto para todas las empresas activas, y refuerza las relaciones y numeración por empresa en PostgreSQL.
 - Las ventas sincronizan el libro de stock legado con el nuevo saldo por ubicación; se validan cantidades, precios, IVA, movimientos de inventario y estados de gastos antes de persistirlos.
@@ -36,6 +39,12 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 - El asistente de puesta en marcha ya no se muestra en cada navegador cuando se usa el CRM central; los datos existentes se abren directamente y la configuración queda en Ajustes.
 - Impuestos ya no inventa modelos por el simple hecho de ser autónomo o sociedad: el perfil fiscal guarda un cuestionario por empresa en PostgreSQL y calcula la lista de modelos a partir de IVA, IRPF, retenciones, operaciones UE, terceros, empleados, Sociedades y activos en el extranjero.
 - El cuestionario separa tener empleados de practicar retenciones; identifica 111/190 solo cuando se responde esa obligación y deja explícito que nóminas, altas/bajas y Sistema RED quedan para el módulo laboral.
+- La configuración fiscal se separa del área de trabajo: el cuestionario y VERI*FACTU pasan a Ajustes, mientras Impuestos muestra un aviso con acceso directo cuando la empresa aún no está configurada.
+- El detalle de proyecto se divide en Resumen, Información, Gestión, Solicitudes y Economía, con URLs compartibles y una portada que concentra salud, progreso y accesos rápidos.
+- Las tareas antiguas de proyectos internos se reasocian a la empresa propietaria cuando quedaron en el tenant del estudio durante la migración multiempresa, sin tocar filas con categorías o responsables vinculados.
+- La navegación distingue cartera y empresa independiente: HEXA Studio conserva «Proyectos», mientras una empresa con un único proyecto muestra «Gestión» y entra directamente en el resumen de su espacio.
+- Los indicadores de proyectos reconocen fechas ISO completas al calcular tareas vencidas y próximas, tanto en el resumen como en la cartera.
+- Al cambiar de empresa se reinicia el contexto en el Dashboard, evitando arrastrar rutas de proyectos o registros pertenecientes al tenant anterior.
 
 ### Added
 

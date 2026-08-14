@@ -134,6 +134,18 @@ export const POST: RequestHandler = async ({ request }) => {
       case "list_users":
         result = await postgresApi.list_users(token);
         break;
+      case "list_employees":
+        result = await postgresApi.list_employees(token);
+        break;
+      case "upsert_employee":
+        result = await postgresApi.upsert_employee(args?.input, token);
+        break;
+      case "list_payrolls":
+        result = await postgresApi.list_payrolls(args?.employee_id == null ? null : Number(args.employee_id), token);
+        break;
+      case "upsert_payroll":
+        result = await postgresApi.upsert_payroll(args?.input, token);
+        break;
       case "upsert_user":
         result = await postgresApi.upsert_user(args?.input, token);
         break;

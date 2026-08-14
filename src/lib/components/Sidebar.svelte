@@ -5,8 +5,9 @@
   import Logo from "$lib/components/Logo.svelte";
   import { PRODUCT_DISPLAY_NAME, PRODUCT_TAGLINE } from "$lib/product";
   import { api } from "$lib/api/client";
-  import { activeCompany } from "$lib/stores/session";
-  import { isProjectCompany } from "$lib/company/context";
+  import { activeCompany, isAdmin } from "$lib/stores/session";
+  import type { WorkProject } from "$lib/types";
+  import { isProjectCompany, isProjectPortfolioCompany } from "$lib/company/context";
 
   let {
     forceExpanded = false,
@@ -21,11 +22,41 @@
   let salesMenuOpen = $state(false);
   let salesTriggerElement = $state<HTMLElement | null>(null);
   let salesPopoverPosition = $state({ top: 0, left: 0 });
+  let workspaceProjects = $state<WorkProject[]>([]);
 
   const collapsed = $derived(forceExpanded ? false : $sidebarCollapsed);
   const showWork = $derived(
     api.supportsWorkManagement() && isProjectCompany($activeCompany),
   );
+  const directProject = $derived(
+    showWork && !isProjectPortfolioCompany($activeCompany) && workspaceProjects.length === 1
+      ? workspaceProjects[0]
+      : null,
+  );
+  const projectEntry = $derived({
+    href: directProject ? `/proyectos/${directProject.uid}` : "/proyectos",
+    label: directProject ? "Gestión" : "Proyectos",
+    icon: "projects",
+  });
+  const projectGroup = $derived(directProject
+    ? { label: "GESTIÓN", links: [projectEntry, { href: "/clientes", label: "Clientes", icon: "customers" }, { href: "/trabajo", label: "Trabajo", icon: "projects" }, { href: "/roadmap", label: "Roadmap", icon: "sales" }] }
+    : { label: "PROYECTOS", links: [projectEntry, { href: "/clientes", label: "Clientes", icon: "customers" }, { href: "/trabajo", label: "Trabajo", icon: "projects" }, { href: "/roadmap", label: "Roadmap", icon: "sales" }] });
+
+  $effect(() => {
+    const companyId = $activeCompany?.id ?? null;
+    void $page.url.pathname;
+    if (!showWork || companyId == null) {
+      workspaceProjects = [];
+      return;
+    }
+    const requestedCompanyId = companyId;
+    void api.listWorkProjects().then((projects) => {
+      if (($activeCompany?.id ?? null) !== requestedCompanyId) return;
+      workspaceProjects = projects;
+    }).catch(() => {
+      if (($activeCompany?.id ?? null) === requestedCompanyId) workspaceProjects = [];
+    });
+  });
 
   const iconPaths: Record<string, string> = {
     pulse: '<path d="M4 17V9m5 8V5m5 12v-6m5 6V3"/><path d="m4 6 5-3 5 4 5-4"/>',
@@ -66,15 +97,11 @@
         { href: "/impuestos", label: "Impuestos", icon: "taxes" },
       ],
     },
-    ...(showWork
+    ...(showWork ? [projectGroup] : []),
+    ...($isAdmin
       ? [{
-          label: "PROYECTOS",
-          links: [
-            { href: "/proyectos", label: "Proyectos", icon: "projects" },
-            { href: "/clientes", label: "Clientes", icon: "customers" },
-            { href: "/trabajo", label: "Trabajo", icon: "projects" },
-            { href: "/roadmap", label: "Roadmap", icon: "sales" },
-          ],
+          label: "PERSONAS",
+          links: [{ href: "/personal", label: "Personal", icon: "customers" }],
         }]
       : []),
     {

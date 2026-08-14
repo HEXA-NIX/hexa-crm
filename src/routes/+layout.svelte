@@ -94,6 +94,10 @@
       title: "Clientes",
       subtitle: "Relaciones y datos de contacto",
     },
+    "/personal": {
+      title: "Personal",
+      subtitle: "Empleados, documentación y nóminas",
+    },
     "/impuestos": {
       title: "Impuestos (IVA ES)",
       subtitle: "Libro IVA simplificado — control interno",
@@ -242,8 +246,10 @@
       const c = await api.setActiveCompany(id);
       setActiveCompanyLocal(c);
       showToast(`Empresa activa: ${c.trade_name}`);
-      // Reload current route data
-      if (typeof window !== "undefined") window.location.reload();
+      // A company switch changes the whole tenant context. Start from the
+      // dashboard instead of carrying a project or record URL into a company
+      // where it may not exist.
+      if (typeof window !== "undefined") window.location.assign("/");
     } catch (err) {
       showToast(err instanceof Error ? err.message : "No se pudo cambiar de empresa", "err");
     } finally {

@@ -18,6 +18,13 @@ export function isProjectCompany(
   return company?.kind === "software_studio" || company?.code === PROJECT_COMPANY_CODE;
 }
 
+/** The studio manages a portfolio; product companies manage their own workspace directly. */
+export function isProjectPortfolioCompany(
+  company: Pick<Company, "code"> | null | undefined,
+): boolean {
+  return company?.code?.toUpperCase() === PROJECT_COMPANY_CODE;
+}
+
 export function seedCompanies(createdAt: string): Company[] {
   return [
     {

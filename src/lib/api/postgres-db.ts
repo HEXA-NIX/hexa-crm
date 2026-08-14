@@ -47,6 +47,10 @@ import type {
   InvoicePaymentInput,
   ExpensePayment,
   ExpensePaymentInput,
+  Employee,
+  EmployeeInput,
+  Payroll,
+  PayrollInput,
   Model303Draft,
   DashboardStats,
   InventoryMovement,
@@ -405,6 +409,32 @@ export async function initDb() {
       PRIMARY KEY (company_id, user_id)
     );
   `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS employees (
+      id SERIAL PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL, first_name TEXT NOT NULL, last_name TEXT NOT NULL,
+      tax_id TEXT NOT NULL DEFAULT '', social_security_number TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '',
+      position TEXT NOT NULL DEFAULT '', contract_type TEXT NOT NULL DEFAULT '', work_schedule TEXT NOT NULL DEFAULT '',
+      collective_agreement TEXT NOT NULL DEFAULT '', professional_group TEXT NOT NULL DEFAULT '', start_date DATE, end_date DATE,
+      annual_gross_cents INTEGER NOT NULL DEFAULT 0, payments_per_year INTEGER NOT NULL DEFAULT 12, iban TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','leave','ended')), notes TEXT NOT NULL DEFAULT '',
+      documents JSONB NOT NULL DEFAULT '[]'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_employees_company ON employees(company_id, status, last_name)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS payrolls (
+      id SERIAL PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE, period TEXT NOT NULL CHECK (period ~ '^[0-9]{4}-[0-9]{2}$'),
+      gross_cents INTEGER NOT NULL DEFAULT 0, employee_ss_cents INTEGER NOT NULL DEFAULT 0, irpf_cents INTEGER NOT NULL DEFAULT 0,
+      other_deductions_cents INTEGER NOT NULL DEFAULT 0, net_cents INTEGER NOT NULL DEFAULT 0, employer_ss_cents INTEGER NOT NULL DEFAULT 0,
+      total_cost_cents INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','reviewed','paid','cancelled')),
+      document_name TEXT NOT NULL DEFAULT '', document_url TEXT NOT NULL DEFAULT '', paid_at TIMESTAMPTZ,
+      cash_movement_id INTEGER, notes TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(company_id, employee_id, period)
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_payrolls_company_period ON payrolls(company_id, period DESC)`;
 
   // Crear tablas
   await sql`
@@ -927,6 +957,23 @@ export async function initDb() {
   await sql`CREATE INDEX IF NOT EXISTS idx_work_items_parent ON work_items(parent_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_work_items_assignee ON work_items(assignee_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_work_items_source ON work_items(company_id, source_type, source_key)`;
+  // Legacy internal projects could be reassigned to the company that owns
+  // their work while their pre-existing, unclassified tasks stayed in the
+  // studio tenant. Move only rows without tenant-bound category/assignee
+  // relations; linked rows require an explicit migration instead of silently
+  // breaking those references.
+  await sql`
+    UPDATE work_items wi
+    SET company_id = p.task_company_id,
+        updated_at = NOW()
+    FROM work_projects p
+    WHERE wi.project_id = p.id
+      AND p.project_type = 'internal'
+      AND p.task_company_id IS NOT NULL
+      AND wi.company_id <> p.task_company_id
+      AND wi.category_id IS NULL
+      AND wi.assignee_id IS NULL
+  `;
   await sql`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_work_items_active_source
     ON work_items (company_id, source_type, source_key)
@@ -2534,6 +2581,41 @@ export const postgresApi = {
       summary: r.summary ?? null,
       created_at: toIso(r.created_at),
     }));
+  },
+
+  async list_employees(token: string | null): Promise<Employee[]> {
+    const actor = await requireAdmin(token);
+    const companyId = await resolveActiveCompanyId(token, actor.id);
+    const rows = await sql`SELECT * FROM employees WHERE company_id=${companyId} ORDER BY status, last_name, first_name`;
+    return rows.map((r) => ({ ...r, id:Number(r.id), company_id:Number(r.company_id), user_id:r.user_id?Number(r.user_id):null, annual_gross_cents:Number(r.annual_gross_cents), payments_per_year:Number(r.payments_per_year), start_date:r.start_date?toIso(r.start_date).slice(0,10):null, end_date:r.end_date?toIso(r.end_date).slice(0,10):null, documents:Array.isArray(r.documents)?r.documents:[], created_at:toIso(r.created_at), updated_at:toIso(r.updated_at) })) as Employee[];
+  },
+
+  async upsert_employee(input: EmployeeInput, token: string | null): Promise<Employee> {
+    const actor = await requireAdmin(token);
+    const companyId = await resolveActiveCompanyId(token, actor.id);
+    const firstName=(input.first_name??"").trim(), lastName=(input.last_name??"").trim();
+    if(!firstName||!lastName) throw new Error("Nombre y apellidos son obligatorios");
+    if(input.user_id){ const member=await sql`SELECT 1 FROM company_members WHERE company_id=${companyId} AND user_id=${input.user_id}`; if(!member.length) throw new Error("El usuario no pertenece a esta empresa"); }
+    const values={ user_id:input.user_id??null, first_name:firstName,last_name:lastName,tax_id:(input.tax_id??"").trim(),social_security_number:(input.social_security_number??"").trim(),email:(input.email??"").trim(),phone:(input.phone??"").trim(),position:(input.position??"").trim(),contract_type:(input.contract_type??"").trim(),work_schedule:(input.work_schedule??"").trim(),collective_agreement:(input.collective_agreement??"").trim(),professional_group:(input.professional_group??"").trim(),start_date:input.start_date||null,end_date:input.end_date||null,annual_gross_cents:Math.max(0,Number(input.annual_gross_cents??0)),payments_per_year:[12,14].includes(Number(input.payments_per_year))?Number(input.payments_per_year):12,iban:(input.iban??"").trim(),status:input.status??"active",notes:input.notes??"",documents:input.documents??[] };
+    let id:number;
+    if(input.id){ const rows=await sql`UPDATE employees SET user_id=${values.user_id},first_name=${values.first_name},last_name=${values.last_name},tax_id=${values.tax_id},social_security_number=${values.social_security_number},email=${values.email},phone=${values.phone},position=${values.position},contract_type=${values.contract_type},work_schedule=${values.work_schedule},collective_agreement=${values.collective_agreement},professional_group=${values.professional_group},start_date=${values.start_date},end_date=${values.end_date},annual_gross_cents=${values.annual_gross_cents},payments_per_year=${values.payments_per_year},iban=${values.iban},status=${values.status},notes=${values.notes},documents=${sql.json(values.documents as any)},updated_at=NOW() WHERE id=${input.id} AND company_id=${companyId} RETURNING id`; if(!rows.length) throw new Error("Empleado no encontrado"); id=Number(rows[0].id); }
+    else { const rows=await sql`INSERT INTO employees(company_id,user_id,first_name,last_name,tax_id,social_security_number,email,phone,position,contract_type,work_schedule,collective_agreement,professional_group,start_date,end_date,annual_gross_cents,payments_per_year,iban,status,notes,documents) VALUES(${companyId},${values.user_id},${values.first_name},${values.last_name},${values.tax_id},${values.social_security_number},${values.email},${values.phone},${values.position},${values.contract_type},${values.work_schedule},${values.collective_agreement},${values.professional_group},${values.start_date},${values.end_date},${values.annual_gross_cents},${values.payments_per_year},${values.iban},${values.status},${values.notes},${sql.json(values.documents as any)}) RETURNING id`; id=Number(rows[0].id); }
+    return (await this.list_employees(token)).find((e)=>e.id===id)!;
+  },
+
+  async list_payrolls(employeeId: number | null, token: string | null): Promise<Payroll[]> {
+    const actor=await requireAdmin(token); const companyId=await resolveActiveCompanyId(token,actor.id);
+    const rows=employeeId?await sql`SELECT * FROM payrolls WHERE company_id=${companyId} AND employee_id=${employeeId} ORDER BY period DESC`:await sql`SELECT * FROM payrolls WHERE company_id=${companyId} ORDER BY period DESC`;
+    return rows.map((r)=>({...r,id:Number(r.id),company_id:Number(r.company_id),employee_id:Number(r.employee_id),gross_cents:Number(r.gross_cents),employee_ss_cents:Number(r.employee_ss_cents),irpf_cents:Number(r.irpf_cents),other_deductions_cents:Number(r.other_deductions_cents),net_cents:Number(r.net_cents),employer_ss_cents:Number(r.employer_ss_cents),total_cost_cents:Number(r.total_cost_cents),cash_movement_id:r.cash_movement_id?Number(r.cash_movement_id):null,paid_at:r.paid_at?toIso(r.paid_at):null,created_at:toIso(r.created_at),updated_at:toIso(r.updated_at)})) as Payroll[];
+  },
+
+  async upsert_payroll(input: PayrollInput, token: string | null): Promise<Payroll> {
+    const actor=await requireAdmin(token); const companyId=await resolveActiveCompanyId(token,actor.id);
+    if(!/^\d{4}-\d{2}$/.test(input.period)) throw new Error("Periodo de nómina no válido");
+    const employee=await sql`SELECT id FROM employees WHERE id=${input.employee_id} AND company_id=${companyId}`; if(!employee.length) throw new Error("Empleado no encontrado");
+    const n=(value:unknown)=>Math.max(0,Number(value??0)); const gross=n(input.gross_cents), ess=n(input.employee_ss_cents), irpf=n(input.irpf_cents), other=n(input.other_deductions_cents), net=input.net_cents===undefined?Math.max(0,gross-ess-irpf-other):n(input.net_cents), employer=n(input.employer_ss_cents), total=input.total_cost_cents===undefined?gross+employer:n(input.total_cost_cents);
+    const common={gross,ess,irpf,other,net,employer,total,status:input.status??"draft",document_name:input.document_name??"",document_url:input.document_url??"",paid_at:input.paid_at??null,cash_movement_id:input.cash_movement_id??null,notes:input.notes??""}; let id:number;
+    if(input.id){const rows=await sql`UPDATE payrolls SET period=${input.period},gross_cents=${gross},employee_ss_cents=${ess},irpf_cents=${irpf},other_deductions_cents=${other},net_cents=${net},employer_ss_cents=${employer},total_cost_cents=${total},status=${common.status},document_name=${common.document_name},document_url=${common.document_url},paid_at=${common.paid_at},cash_movement_id=${common.cash_movement_id},notes=${common.notes},updated_at=NOW() WHERE id=${input.id} AND employee_id=${input.employee_id} AND company_id=${companyId} RETURNING id`;if(!rows.length)throw new Error("Nómina no encontrada");id=Number(rows[0].id);}else{const rows=await sql`INSERT INTO payrolls(company_id,employee_id,period,gross_cents,employee_ss_cents,irpf_cents,other_deductions_cents,net_cents,employer_ss_cents,total_cost_cents,status,document_name,document_url,paid_at,cash_movement_id,notes) VALUES(${companyId},${input.employee_id},${input.period},${gross},${ess},${irpf},${other},${net},${employer},${total},${common.status},${common.document_name},${common.document_url},${common.paid_at},${common.cash_movement_id},${common.notes}) ON CONFLICT(company_id,employee_id,period) DO UPDATE SET gross_cents=EXCLUDED.gross_cents,employee_ss_cents=EXCLUDED.employee_ss_cents,irpf_cents=EXCLUDED.irpf_cents,other_deductions_cents=EXCLUDED.other_deductions_cents,net_cents=EXCLUDED.net_cents,employer_ss_cents=EXCLUDED.employer_ss_cents,total_cost_cents=EXCLUDED.total_cost_cents,status=EXCLUDED.status,document_name=EXCLUDED.document_name,document_url=EXCLUDED.document_url,paid_at=EXCLUDED.paid_at,cash_movement_id=EXCLUDED.cash_movement_id,notes=EXCLUDED.notes,updated_at=NOW() RETURNING id`;id=Number(rows[0].id);} return (await this.list_payrolls(input.employee_id,token)).find((p)=>p.id===id)!;
   },
 
   async list_users(token: string | null): Promise<AuthUser[]> {

@@ -10,6 +10,7 @@
   import Modal from "$lib/components/Modal.svelte";
   import Select from "$lib/components/Select.svelte";
   import PluginManager from "$lib/components/PluginManager.svelte";
+  import FiscalSettings from "$lib/components/FiscalSettings.svelte";
   import { showToast } from "$lib/stores/ui";
   import {
     currentUser,
@@ -257,7 +258,8 @@
         stored = null;
       }
     }
-    activeSection = resolveActiveSection(stored, $isAdmin);
+    const requested = new URLSearchParams(window.location.search).get("seccion");
+    activeSection = resolveActiveSection(requested ?? stored, $isAdmin);
     if (activeSection === "plugins") loadWhatsAppStatus();
     orcaConfig = loadOrcaLocalConfig();
     orcaBridgeToken = loadOrcaBridgeToken();
@@ -965,6 +967,8 @@
             </p>
           </div>
         </Card>
+      {:else if activeSection === "fiscal" && $isAdmin}
+        <FiscalSettings />
       {:else if activeSection === "equipo" && $isAdmin}
         <Card lift={false} class="border border-[var(--color-border)] !p-0">
           <div

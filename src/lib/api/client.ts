@@ -18,6 +18,8 @@ import type {
   ExpenseDocumentInput,
   ExpensePayment,
   ExpensePaymentInput,
+  Employee,
+  EmployeeInput,
   FiscalProfile,
   Invoice,
   InvoiceInput,
@@ -29,6 +31,8 @@ import type {
   LoginResult,
   Product,
   ProductInput,
+  Payroll,
+  PayrollInput,
   PluginAuditLogEntry,
   PluginConfig,
   PluginKey,
@@ -135,6 +139,10 @@ async function callLocal<T>(cmd: string, args: Record<string, any>, token: strin
     case "billing_by_company": return browserApi.billing_by_company(token) as T;
     case "group_financial_summary": return browserApi.group_financial_summary(token) as T;
     case "list_users": return browserApi.list_users(token) as Promise<T>;
+    case "list_employees": throw new Error("Personal requiere el CRM central");
+    case "upsert_employee": throw new Error("Personal requiere el CRM central");
+    case "list_payrolls": throw new Error("Personal requiere el CRM central");
+    case "upsert_payroll": throw new Error("Personal requiere el CRM central");
     case "upsert_user": return browserApi.upsert_user(args.input, token) as Promise<T>;
     case "change_own_pin": return browserApi.change_own_pin(args.current_pin, args.new_pin, token) as Promise<T>;
     case "complete_forced_password_change": return browserApi.complete_forced_password_change(args.current_password, args.new_password, token) as Promise<T>;
@@ -327,6 +335,10 @@ export const api = {
     ? localWhatsApp<{ ok: true; message_id?: string }>("send", { phone, message, confirmed })
     : call<{ ok: true; message_id?: string }>("whatsapp_send", { phone, message, confirmed }),
   listUsers: () => call<AuthUser[]>("list_users"),
+  listEmployees: () => call<Employee[]>("list_employees"),
+  upsertEmployee: (input: EmployeeInput) => call<Employee>("upsert_employee", { input }),
+  listPayrolls: (employeeId?: number | null) => call<Payroll[]>("list_payrolls", employeeId == null ? undefined : { employee_id: employeeId }),
+  upsertPayroll: (input: PayrollInput) => call<Payroll>("upsert_payroll", { input }),
   upsertUser: (input: UserInput) => call<CreateUserResult>("upsert_user", { input }),
   changeOwnPin: (currentPin: string, newPin: string) =>
     call<void>("change_own_pin", { current_pin: currentPin, new_pin: newPin }),

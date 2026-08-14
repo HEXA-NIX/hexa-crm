@@ -281,6 +281,26 @@ export type TaxModelDefinition = {
   frequency: "monthly" | "quarterly" | "annual" | "eventual";
   reason: string;
 };
+
+export type EmployeeStatus = "active" | "leave" | "ended";
+export type Employee = {
+  id: number; company_id: number; user_id: number | null; first_name: string; last_name: string;
+  tax_id: string; social_security_number: string; email: string; phone: string; position: string;
+  contract_type: string; work_schedule: string; collective_agreement: string; professional_group: string;
+  start_date: string | null; end_date: string | null; annual_gross_cents: number; payments_per_year: number;
+  iban: string; status: EmployeeStatus; notes: string; documents: { title: string; url: string }[];
+  created_at: string; updated_at: string;
+};
+export type EmployeeInput = Partial<Omit<Employee, "id" | "company_id" | "created_at" | "updated_at">> & { id?: number | null; first_name: string; last_name: string };
+export type PayrollStatus = "draft" | "reviewed" | "paid" | "cancelled";
+export type Payroll = {
+  id: number; company_id: number; employee_id: number; period: string; gross_cents: number;
+  employee_ss_cents: number; irpf_cents: number; other_deductions_cents: number; net_cents: number;
+  employer_ss_cents: number; total_cost_cents: number; status: PayrollStatus; document_name: string;
+  document_url: string; paid_at: string | null; cash_movement_id: number | null; notes: string;
+  created_at: string; updated_at: string;
+};
+export type PayrollInput = Partial<Omit<Payroll, "id" | "company_id" | "created_at" | "updated_at">> & { id?: number | null; employee_id: number; period: string };
 export type VerifactuMode = "disabled" | "test" | "production";
 export type VerifactuRecordType = "alta" | "anulacion";
 export type VerifactuRecordStatus = "generated" | "queued" | "sent" | "accepted" | "accepted_with_errors" | "rejected";

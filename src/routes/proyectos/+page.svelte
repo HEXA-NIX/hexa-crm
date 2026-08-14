@@ -18,6 +18,10 @@
   import RichDescription from "$lib/components/RichDescription.svelte";
   import RichDescriptionEditor from "$lib/components/RichDescriptionEditor.svelte";
   import { browser } from "$app/environment";
+  import { goto } from "$app/navigation";
+  import { activeCompany } from "$lib/stores/session";
+  import { isProjectPortfolioCompany } from "$lib/company/context";
+  import { isTaskDueSoon, isTaskOverdue, isTaskPendingWork } from "$lib/work/task-dates";
 
   let projects = $state<WorkProject[]>([]);
   let items = $state<WorkItem[]>([]);
@@ -133,6 +137,10 @@
         api.getSettings(),
       ]);
       projects = projList;
+      if (!isProjectPortfolioCompany($activeCompany) && projList.length === 1) {
+        await goto(`/proyectos/${projList[0].uid}`, { replaceState: true });
+        return;
+      }
       items = itemList;
       customers = customerList;
       cashMovements = movementList;
@@ -178,24 +186,18 @@
     }>();
     const now = new Date();
     now.setHours(0, 0, 0, 0);
-    const inSevenDays = new Date(now);
-    inSevenDays.setDate(inSevenDays.getDate() + 7);
     for (const proj of projects) {
       const projItems = items.filter((i) => i.project_id === proj.id);
       const { total, completed, progress } = calculateTaskProgress(projItems);
       const blocked = projItems.filter((i) => i.status === "blocked").length;
-      const openItems = projItems.filter((i) => i.status !== "done" && i.status !== "archived");
-      const overdue = openItems.filter((i) => i.due_date && new Date(`${i.due_date}T00:00:00`) < now).length;
-      const dueSoon = openItems.filter((i) => {
-        if (!i.due_date) return false;
-        const due = new Date(`${i.due_date}T00:00:00`);
-        return due >= now && due <= inSevenDays;
-      }).length;
+      const openItems = projItems.filter(isTaskPendingWork);
+      const overdue = openItems.filter((item) => isTaskOverdue(item, now)).length;
+      const dueSoon = openItems.filter((item) => isTaskDueSoon(item, now)).length;
       const targetOverdue = Boolean(
         proj.target_date &&
         proj.status !== "done" &&
         proj.status !== "archived" &&
-        new Date(`${proj.target_date}T00:00:00`) < now,
+        new Date(`${proj.target_date.slice(0, 10)}T00:00:00`) < now,
       );
       const health = targetOverdue || overdue > 0
         ? "off_track"
@@ -363,11 +365,11 @@
     const invalidMilestone = form.milestones.some((milestone) => {
       return hasInvalidMoneyInput(milestone.amount);
     });
-    if (form.project_type === "own" && invalidMilestone) {
+    if (form.project_type !== "client" && invalidMilestone) {
       showToast("Revisa los importes de los hitos mensuales", "err");
       return;
     }
-    if (form.project_type === "own" && hasDuplicateMilestoneMonths(form.milestones)) {
+    if (form.project_type !== "client" && hasDuplicateMilestoneMonths(form.milestones)) {
       showToast("No puedes repetir el mismo mes en dos hitos", "err");
       return;
     }
@@ -381,14 +383,14 @@
         client_company_id: form.project_type === "own" || !form.client_company_id ? null : Number(form.client_company_id),
         customer_id: form.project_type === "client" && form.customer_id ? Number(form.customer_id) : null,
         value_cents: form.project_type === "client" ? (projectValue ?? 0) : 0,
-        monthly_estimate_cents: form.project_type === "own"
-          ? 0
-          : form.milestones.reduce(
+        monthly_estimate_cents: form.project_type !== "client"
+          ? form.milestones.reduce(
               (sum, milestone) => sum + (parseEurosInput(milestone.amount) ?? 0),
               0,
-            ),
+            )
+          : 0,
         revenue_target_date: null,
-        revenue_milestones: form.project_type === "own"
+        revenue_milestones: form.project_type !== "client"
           ? form.milestones
               .map((milestone) => ({
                 amount_cents: parseEurosInput(milestone.amount) ?? 0,
@@ -720,7 +722,7 @@
         <label for="project-value" class="text-xs font-medium text-[var(--color-muted)]">Valor contratado (€)</label>
         <input id="project-value" type="text" inputmode="decimal" bind:value={form.value} placeholder="0,00" class="field w-full text-sm" />
       </div>
-    {:else if form.project_type === "own"}
+    {:else}
       <div class="space-y-3 rounded-xl border border-[var(--color-border)] p-3">
         <div class="flex items-center justify-between gap-3">
           <div>

@@ -9,6 +9,7 @@ export type AjustesSectionId =
   | "cuenta"
   | "whatsapp"
   | "tienda"
+  | "fiscal"
   | "equipo"
   | "ia"
   | "orca"
@@ -58,6 +59,13 @@ export const AJUSTES_SECTIONS: readonly AjustesSectionDef[] = [
     hint: "Identidad, datos fiscales, contacto y marca de la empresa activa. Solo administradores.",
     adminOnly: true,
     hasSave: true,
+  },
+  {
+    id: "fiscal",
+    label: "Fiscalidad",
+    title: "Configuración fiscal",
+    hint: "Cuestionario de obligaciones y configuración de facturación de la empresa activa.",
+    adminOnly: true,
   },
   {
     id: "equipo",

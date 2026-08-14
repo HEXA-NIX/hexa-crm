@@ -8,6 +8,7 @@
     step = undefined as string | undefined,
     min = undefined as string | number | undefined,
     class: className = "",
+    oninput,
   }: {
     label?: string;
     type?: string;
@@ -17,6 +18,7 @@
     step?: string;
     min?: string | number;
     class?: string;
+    oninput?: (event: Event & { currentTarget: HTMLInputElement }) => void;
   } = $props();
 </script>
 
@@ -31,6 +33,7 @@
     {step}
     {min}
     bind:value
+    {oninput}
     class="field w-full"
   />
 </label>

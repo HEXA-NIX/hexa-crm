@@ -23,7 +23,7 @@
 
   const styles: Record<Variant, string> = {
     primary:
-      "bg-[var(--color-purple)] text-[#17111f] hover:bg-[var(--color-purple-bright)] shadow-[0_10px_30px_rgba(184,153,237,0.18)]",
+      "button-primary bg-[var(--color-purple)] text-[#17111f] hover:bg-[var(--color-purple-bright)] shadow-[0_10px_30px_rgba(184,153,237,0.18)]",
     secondary:
       "bg-white/[0.03] text-[var(--color-text)] border border-[var(--color-border)] hover:bg-purple-500/10 hover:border-purple-400/30",
     ghost: "text-[var(--color-muted)] hover:bg-purple-500/10 hover:text-[var(--color-purple-bright)]",
@@ -32,6 +32,6 @@
   };
 </script>
 
-<button {...restProps} {type} {disabled} class="{base} {styles[variant]} {className}" {onclick}>
+<button {...restProps} {type} {disabled} class="button-{variant} {base} {styles[variant]} {className}" {onclick}>
   {@render children()}
 </button>

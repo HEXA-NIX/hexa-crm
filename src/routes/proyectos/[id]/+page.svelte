@@ -53,6 +53,25 @@
   import { browser } from "$app/environment";
 
   const projectReference = $derived($page.params.id);
+  type ProjectSection = "resumen" | "informacion" | "gestion" | "solicitudes" | "economia";
+  const projectSections: { id: ProjectSection; label: string }[] = [
+    { id: "resumen", label: "Resumen" },
+    { id: "informacion", label: "Información" },
+    { id: "gestion", label: "Gestión" },
+    { id: "solicitudes", label: "Solicitudes" },
+    { id: "economia", label: "Economía" },
+  ];
+  const activeProjectSection = $derived.by<ProjectSection>(() => {
+    const requested = $page.url.searchParams.get("seccion");
+    return projectSections.some((section) => section.id === requested) ? requested as ProjectSection : "resumen";
+  });
+
+  function openProjectSection(section: ProjectSection) {
+    const url = new URL($page.url);
+    if (section === "resumen") url.searchParams.delete("seccion");
+    else url.searchParams.set("seccion", section);
+    void goto(`${url.pathname}${url.search}${url.hash}`, { noScroll: true, keepFocus: true });
+  }
 
   let project = $state<WorkProject | null>(null);
   const projectId = $derived(project?.id ?? 0);
@@ -430,22 +449,16 @@
   const projectSignals = $derived.by(() => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const inSevenDays = new Date(today);
-    inSevenDays.setDate(inSevenDays.getDate() + 7);
     const openTasks = tasks.filter(isTaskPendingWork);
-    const overdue = openTasks.filter((task) => task.due_date && new Date(`${task.due_date}T00:00:00`) < today).length;
-    const dueSoon = openTasks.filter((task) => {
-      if (!task.due_date) return false;
-      const due = new Date(`${task.due_date}T00:00:00`);
-      return due >= today && due <= inSevenDays;
-    }).length;
+    const overdue = openTasks.filter((task) => isTaskOverdue(task, today)).length;
+    const dueSoon = openTasks.filter((task) => isTaskDueSoon(task, today)).length;
     const urgent = openTasks.filter((task) => task.priority === "urgent").length;
     const unassigned = openTasks.filter((task) => !task.assignee_id).length;
     const targetOverdue = Boolean(
       project?.target_date &&
       project.status !== "done" &&
       project.status !== "archived" &&
-      new Date(`${project.target_date}T00:00:00`) < today,
+      new Date(`${project.target_date.slice(0, 10)}T00:00:00`) < today,
     );
     const health = targetOverdue || overdue > 0
       ? { label: "Fuera de plazo", detail: "Hay trabajo vencido que requiere una nueva fecha o resolución.", className: "border-rose-400/30 bg-rose-500/10 text-rose-200" }
@@ -759,11 +772,11 @@
     const invalidMilestone = editProjectForm.milestones.some((milestone) => {
       return hasInvalidMoneyInput(milestone.amount);
     });
-    if (editProjectForm.project_type === "own" && invalidMilestone) {
+    if (editProjectForm.project_type !== "client" && invalidMilestone) {
       showToast("Revisa los importes de los hitos mensuales", "err");
       return;
     }
-    if (editProjectForm.project_type === "own" && hasDuplicateMilestoneMonths(editProjectForm.milestones)) {
+    if (editProjectForm.project_type !== "client" && hasDuplicateMilestoneMonths(editProjectForm.milestones)) {
       showToast("No puedes repetir el mismo mes en dos hitos", "err");
       return;
     }
@@ -784,14 +797,14 @@
         value_cents: editProjectForm.project_type === "client"
           ? (projectValue ?? 0)
           : 0,
-        monthly_estimate_cents: editProjectForm.project_type === "own"
+        monthly_estimate_cents: editProjectForm.project_type !== "client"
           ? editProjectForm.milestones.reduce(
               (sum, milestone) => sum + (parseEurosInput(milestone.amount) ?? 0),
               0,
             )
           : 0,
         revenue_target_date: null,
-        revenue_milestones: editProjectForm.project_type === "own"
+        revenue_milestones: editProjectForm.project_type !== "client"
           ? editProjectForm.milestones
               .map((milestone) => ({
                 id: milestone.id,
@@ -1605,12 +1618,14 @@
   {:else}
     <!-- Top Nav / Back Button -->
     <div class="mb-4 flex items-center justify-between">
-      <a
-        href="/proyectos"
-        class="inline-flex items-center gap-2 text-xs font-medium text-[var(--color-muted)] hover:text-[var(--color-purple-bright)] transition"
-      >
-        ← Volver a Proyectos
-      </a>
+      {#if projectsList.length !== 1}
+        <a
+          href="/proyectos"
+          class="inline-flex items-center gap-2 text-xs font-medium text-[var(--color-muted)] hover:text-[var(--color-purple-bright)] transition"
+        >
+          ← Volver a Proyectos
+        </a>
+      {:else}<span></span>{/if}
       {#if $isAdmin}
         <div class="flex items-center gap-2">
           <Button variant="secondary" onclick={openEditProjectModal} class="text-xs">
@@ -1623,11 +1638,11 @@
     <!-- Project Header Banner -->
     <Card lift={false} class="mb-6 border border-[var(--color-border-strong)] bg-purple-950/20 p-6">
       <div class="flex flex-wrap items-start justify-between gap-4">
-        <div class="flex min-w-0 max-w-3xl items-start gap-4">
+        <div class="flex min-w-0 flex-1 items-start gap-4">
           {#if projectLogo(project)}
             <img src={projectLogo(project)} alt="Logo de {project.name}" class="h-20 w-20 shrink-0 rounded-2xl border border-white/10 object-cover shadow-lg" />
           {/if}
-          <div class="min-w-0">
+          <div class="min-w-0 flex-1">
           <div class="flex flex-wrap items-center gap-3 mb-2">
             <h1 class="text-2xl font-bold text-[var(--color-text)]">
               {project.name}
@@ -1664,6 +1679,18 @@
       </div>
     </Card>
 
+    <nav class="mb-6 flex gap-2 overflow-x-auto rounded-2xl border border-[var(--color-border)] bg-black/20 p-2" aria-label="Secciones del proyecto" data-project-sections>
+      {#each projectSections as section}
+        <button
+          type="button"
+          aria-current={activeProjectSection === section.id ? "page" : undefined}
+          class="shrink-0 rounded-xl px-4 py-2 text-sm font-medium transition {activeProjectSection === section.id ? 'bg-purple-500/20 text-[var(--color-purple-bright)] shadow-[inset_0_0_0_1px_rgba(192,132,252,.25)]' : 'text-[var(--color-muted)] hover:bg-white/[0.04] hover:text-[var(--color-text)]'}"
+          onclick={() => openProjectSection(section.id)}
+        >{section.label}</button>
+      {/each}
+    </nav>
+
+    {#if activeProjectSection === "informacion"}
     <Card lift={false} class="mb-6 border border-[var(--color-border)] bg-black/10 p-4" data-project-technical-brief>
       {@const projectBrief = normalizeProjectBrief(project.brief, project.tech_stack)}
       <div class="flex flex-wrap items-start justify-between gap-3">
@@ -1758,7 +1785,9 @@
         <p class="mt-3 rounded-xl border border-dashed border-[var(--color-border)] px-4 py-3 text-xs text-[var(--color-muted-dim)]">Todavía no hay documentación vinculada.</p>
       {/if}
     </Card>
+    {/if}
 
+    {#if activeProjectSection === "solicitudes"}
     <Card lift={false} class="mb-6 border border-[var(--color-border)] bg-black/10 p-4" data-project-requests>
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
@@ -1789,7 +1818,9 @@
         <p class="mt-3 rounded-xl border border-dashed border-[var(--color-border)] px-4 py-3 text-xs text-[var(--color-muted-dim)]">No hay solicitudes. Registra aquí una idea o petición antes de comprometerla como tarea.</p>
       {/if}
     </Card>
+    {/if}
 
+    {#if activeProjectSection === "economia"}
     <Card lift={false} class="mb-6 border border-[var(--color-border-strong)] p-5">
       <details open>
         <summary class="flex cursor-pointer list-none items-center justify-between gap-3 rounded-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-purple-400">
@@ -1841,7 +1872,7 @@
         </div>
       {/if}
       {#if economicSeries.length > 0}
-        <div class="mt-3 grid items-stretch gap-3 {projectType(project.project_type, project.customer_id) === 'own' && project.revenue_milestones.length > 0 ? 'lg:grid-cols-[minmax(0,1fr)_15rem]' : ''}">
+        <div class="mt-3 grid items-stretch gap-3 {projectType(project.project_type, project.customer_id) !== 'client' && project.revenue_milestones.length > 0 ? 'lg:grid-cols-[minmax(0,1fr)_15rem]' : ''}">
         <div class="min-w-0 rounded-xl border border-white/[0.07] bg-black/10 p-3">
           <div class="mb-1.5 flex flex-wrap items-center justify-between gap-2">
             <div>
@@ -1887,7 +1918,7 @@
             </span>
           </div>
         </div>
-        {#if projectType(project.project_type, project.customer_id) === "own" && project.revenue_milestones.length > 0}
+        {#if projectType(project.project_type, project.customer_id) !== "client" && project.revenue_milestones.length > 0}
           <aside class="rounded-xl border border-white/[0.07] bg-black/10 p-3">
             <p class="text-xs font-semibold text-[var(--color-text)]">Hitos previstos</p>
             <div class="mt-2 space-y-1.5">
@@ -1906,7 +1937,23 @@
       {/if}
       </details>
     </Card>
+    {/if}
 
+    {#if activeProjectSection === "resumen"}
+    <div class="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <button type="button" onclick={() => openProjectSection("gestion")} class="rounded-2xl border border-purple-400/20 bg-purple-500/[0.06] p-4 text-left transition hover:border-purple-400/40">
+        <p class="text-2xl font-semibold text-purple-200">{totalTasks - completedTasks}</p><p class="mt-1 text-xs text-[var(--color-muted)]">Tareas pendientes · abrir gestión →</p>
+      </button>
+      <button type="button" onclick={() => openProjectSection("solicitudes")} class="rounded-2xl border border-amber-400/20 bg-amber-500/[0.05] p-4 text-left transition hover:border-amber-400/40">
+        <p class="text-2xl font-semibold text-amber-200">{(project.requests ?? []).filter((item) => !["rejected", "converted"].includes(item.status)).length}</p><p class="mt-1 text-xs text-[var(--color-muted)]">Solicitudes abiertas · revisar →</p>
+      </button>
+      <button type="button" onclick={() => openProjectSection("informacion")} class="rounded-2xl border border-cyan-400/20 bg-cyan-500/[0.05] p-4 text-left transition hover:border-cyan-400/40">
+        <p class="text-2xl font-semibold text-cyan-200">{project.documents.length}</p><p class="mt-1 text-xs text-[var(--color-muted)]">Documentos vinculados · información →</p>
+      </button>
+      <button type="button" onclick={() => openProjectSection("economia")} class="rounded-2xl border border-emerald-400/20 bg-emerald-500/[0.05] p-4 text-left transition hover:border-emerald-400/40">
+        <p class="text-2xl font-semibold text-emerald-200">{formatEUR(projectType(project.project_type, project.customer_id) === "client" ? projectBilledCents : project.value_cents)}</p><p class="mt-1 text-xs text-[var(--color-muted)]">{projectType(project.project_type, project.customer_id) === "client" ? "Cobrado" : "Valor estimado"} · economía →</p>
+      </button>
+    </div>
     <details open class="mb-6 rounded-2xl border border-[var(--color-border)] bg-black/10 p-4">
       <summary class="flex cursor-pointer list-none items-center justify-between gap-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-purple-400">
         <span class="section-label">SALUD Y SEÑALES</span>
@@ -1939,7 +1986,9 @@
       </div>
     </div>
     </details>
+    {/if}
 
+    {#if activeProjectSection === "gestion"}
     <!-- Project work sections -->
     <div id="project-work-sections" class="mb-3 flex flex-wrap items-end justify-between gap-2">
       <div>
@@ -2372,6 +2421,7 @@
         </div>
       </div>
     {/if}
+    {/if}
   {/if}
 </section>
 
@@ -2475,7 +2525,7 @@
         <label for="edit-project-value" class="text-xs font-medium text-[var(--color-muted)]">Valor contratado (€)</label>
         <input id="edit-project-value" type="text" inputmode="decimal" bind:value={editProjectForm.value} placeholder="0,00" class="field w-full text-sm" />
       </div>
-    {:else if editProjectForm.project_type === "own"}
+    {:else}
       <div class="space-y-3 rounded-xl border border-[var(--color-border)] p-3">
         <div class="flex items-center justify-between gap-3">
           <div>

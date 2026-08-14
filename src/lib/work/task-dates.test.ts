@@ -17,6 +17,7 @@ describe("fechas de tareas", () => {
 
   it("solo marca vencidas las tareas todavía abiertas", () => {
     expect(isTaskOverdue(task("Abierta", "2026-08-01") as never, new Date("2026-08-06"))).toBe(true);
+    expect(isTaskOverdue(task("ISO de PostgreSQL", "2026-08-01T00:00:00.000Z") as never, new Date("2026-08-06"))).toBe(true);
     expect(isTaskOverdue(task("Hecha", "2026-08-01", "done") as never, new Date("2026-08-06"))).toBe(false);
     expect(isTaskOverdue(task("Entregada", "2026-08-01", "validation") as never, new Date("2026-08-06"))).toBe(false);
   });
