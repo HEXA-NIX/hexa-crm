@@ -81,6 +81,7 @@ import type {
   WorkProjectInput,
 } from "../types";
 import { buildModel303Draft } from "../taxes/model303";
+import { deriveTaxModels, normalizeTaxSetup } from "../taxes/models";
 import { buildInvoiceFromSale, buildManualInvoice, buildRectifyingInvoice } from "../invoicing/invoice";
 import {
   billingByCompany,
@@ -284,6 +285,10 @@ export async function initDb() {
       invoice_series TEXT NOT NULL DEFAULT 'F',
       regime TEXT NOT NULL DEFAULT 'general',
       period TEXT NOT NULL DEFAULT 'quarterly',
+      entity_type TEXT NOT NULL DEFAULT 'autonomo',
+      tax_models JSONB NOT NULL DEFAULT '[]'::jsonb,
+      tax_setup JSONB NOT NULL DEFAULT '{}'::jsonb,
+      profile_completed BOOLEAN NOT NULL DEFAULT FALSE,
       irpf_enabled BOOLEAN NOT NULL DEFAULT FALSE,
       default_irpf_rate NUMERIC(5,2) NOT NULL DEFAULT 0,
       sii_enabled BOOLEAN NOT NULL DEFAULT FALSE,
@@ -303,6 +308,10 @@ export async function initDb() {
   await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS verifactu_software_version TEXT NOT NULL DEFAULT '0.3.2'`;
   await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS verifactu_producer_name TEXT NOT NULL DEFAULT ''`;
   await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS verifactu_producer_nif TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS entity_type TEXT NOT NULL DEFAULT 'autonomo'`;
+  await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS tax_models JSONB NOT NULL DEFAULT '[]'::jsonb`;
+  await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS tax_setup JSONB NOT NULL DEFAULT '{}'::jsonb`;
+  await sql`ALTER TABLE fiscal_profiles ADD COLUMN IF NOT EXISTS profile_completed BOOLEAN NOT NULL DEFAULT FALSE`;
   await sql`
     CREATE TABLE IF NOT EXISTS operator_accounts (
       id UUID PRIMARY KEY,
@@ -1051,6 +1060,7 @@ export async function initDb() {
   await sql`INSERT INTO schema_migrations (version) VALUES ('0021_fiscal_profile_defaults') ON CONFLICT (version) DO NOTHING`;
   await sql`INSERT INTO schema_migrations (version) VALUES ('0022_tenant_settings') ON CONFLICT (version) DO NOTHING`;
   await sql`INSERT INTO schema_migrations (version) VALUES ('0023_budgets') ON CONFLICT (version) DO NOTHING`;
+  await sql`INSERT INTO schema_migrations (version) VALUES ('0024_fiscal_questionnaire') ON CONFLICT (version) DO NOTHING`;
 }
 
 async function seedInventoryFoundation() {
@@ -1635,11 +1645,16 @@ function formatExpenseDocument(r: any): ExpenseDocument {
 }
 
 function formatFiscalProfile(r: any): FiscalProfile {
+  const taxSetup = r.tax_setup && typeof r.tax_setup === "object" && !Array.isArray(r.tax_setup) ? r.tax_setup : {};
   return {
     company_id: Number(r.company_id),
     invoice_series: String(r.invoice_series ?? "F").trim().toUpperCase() || "F",
     regime: r.regime,
     period: r.period,
+    entity_type: r.entity_type ?? "autonomo",
+    tax_models: Array.isArray(r.tax_models) ? r.tax_models.map(String) : [],
+    tax_setup: normalizeTaxSetup(taxSetup),
+    profile_completed: !!r.profile_completed,
     irpf_enabled: !!r.irpf_enabled,
     default_irpf_rate: Number(r.default_irpf_rate ?? 0),
     sii_enabled: !!r.sii_enabled,
@@ -4146,26 +4161,40 @@ export const postgresApi = {
   async upsertFiscalProfile(input: any, token: string | null): Promise<FiscalProfile> {
     const user = await requireAdmin(token);
     const companyId = await resolveActiveCompanyId(token, user.id);
-    const regime = String(input?.regime ?? "general");
-    const period = String(input?.period ?? "quarterly");
+    const previousRows = await sql`SELECT * FROM fiscal_profiles WHERE company_id = ${companyId}`;
+    const previous = previousRows[0] ? formatFiscalProfile(previousRows[0]) : null;
+    const regime = String(input?.regime ?? previous?.regime ?? "general");
+    const period = String(input?.period ?? previous?.period ?? "quarterly");
+    const entityType = String(input?.entity_type ?? previous?.entity_type ?? "autonomo");
     if (!["general", "simplified", "recargo_equivalencia", "other"].includes(regime)) throw new Error("Régimen fiscal no válido");
     if (!["monthly", "quarterly"].includes(period)) throw new Error("Periodicidad no válida");
-    const rate = Number(input?.default_irpf_rate ?? 0);
+    if (!["autonomo", "sociedad", "otra"].includes(entityType)) throw new Error("Tipo de contribuyente no válido");
+    const taxSetup = normalizeTaxSetup(input?.tax_setup ?? previous?.tax_setup);
+    if (entityType === "autonomo" && !["direct_estimation", "objective_estimation", "none"].includes(taxSetup.income_regime)) {
+      throw new Error("Selecciona el régimen de IRPF del autónomo");
+    }
+    const siiEnabled = input?.sii_enabled === undefined ? !!previous?.sii_enabled : !!input.sii_enabled;
+    if (siiEnabled && period !== "monthly") throw new Error("El SII requiere periodicidad mensual");
+    const rate = Number(input?.default_irpf_rate ?? previous?.default_irpf_rate ?? 0);
     if (!Number.isFinite(rate) || rate < 0 || rate > 100) throw new Error("El IRPF debe estar entre 0 y 100");
-    const verifactuMode = String(input?.verifactu_mode ?? "disabled");
+    const verifactuMode = String(input?.verifactu_mode ?? previous?.verifactu_mode ?? "disabled");
     if (!["disabled", "test", "production"].includes(verifactuMode)) throw new Error("Modo VERI*FACTU no válido");
-    const producerNif = String(input?.verifactu_producer_nif ?? "").trim().toUpperCase();
+    const producerNif = String(input?.verifactu_producer_nif ?? previous?.verifactu_producer_nif ?? "").trim().toUpperCase();
     if (verifactuMode !== "disabled" && !producerNif) throw new Error("El NIF emisor es obligatorio para activar VERI*FACTU");
+    const profileCompleted = input?.profile_completed === undefined ? !!previous?.profile_completed : input.profile_completed === true;
+    const taxModels = deriveTaxModels({ entity_type: entityType as FiscalProfile["entity_type"], regime: regime as FiscalProfile["regime"], period: period as FiscalProfile["period"], sii_enabled: siiEnabled, profile_completed: profileCompleted, tax_setup: taxSetup });
     const rows = await sql`
-      INSERT INTO fiscal_profiles (company_id, invoice_series, regime, period, irpf_enabled, default_irpf_rate, sii_enabled, verifactu_mode, verifactu_software_id, verifactu_software_name, verifactu_software_version, verifactu_producer_name, verifactu_producer_nif, updated_at)
-      VALUES (${companyId}, ${String(input?.invoice_series ?? "F").trim().toUpperCase() || "F"}, ${regime}, ${period}, ${!!input?.irpf_enabled}, ${rate}, ${!!input?.sii_enabled}, ${verifactuMode}, ${String(input?.verifactu_software_id ?? "hexa-crm")}, ${String(input?.verifactu_software_name ?? "Hexa CRM")}, ${String(input?.verifactu_software_version ?? "0.3.2")}, ${String(input?.verifactu_producer_name ?? "")}, ${producerNif}, NOW())
+      INSERT INTO fiscal_profiles (company_id, invoice_series, regime, period, entity_type, irpf_enabled, default_irpf_rate, sii_enabled, verifactu_mode, verifactu_software_id, verifactu_software_name, verifactu_software_version, verifactu_producer_name, verifactu_producer_nif, tax_models, tax_setup, profile_completed, updated_at)
+      VALUES (${companyId}, ${String(input?.invoice_series ?? previous?.invoice_series ?? "F").trim().toUpperCase() || "F"}, ${regime}, ${period}, ${entityType}, ${input?.irpf_enabled === undefined ? !!previous?.irpf_enabled : !!input.irpf_enabled}, ${rate}, ${siiEnabled}, ${verifactuMode}, ${String(input?.verifactu_software_id ?? previous?.verifactu_software_id ?? "hexa-crm")}, ${String(input?.verifactu_software_name ?? previous?.verifactu_software_name ?? "Hexa CRM")}, ${String(input?.verifactu_software_version ?? previous?.verifactu_software_version ?? "0.3.2")}, ${String(input?.verifactu_producer_name ?? previous?.verifactu_producer_name ?? "")}, ${producerNif}, ${sql.json(taxModels.map((model) => model.code))}, ${sql.json(taxSetup)}, ${profileCompleted}, NOW())
       ON CONFLICT (company_id) DO UPDATE SET regime=EXCLUDED.regime, period=EXCLUDED.period,
         invoice_series=EXCLUDED.invoice_series,
+        entity_type=EXCLUDED.entity_type,
         irpf_enabled=EXCLUDED.irpf_enabled, default_irpf_rate=EXCLUDED.default_irpf_rate,
         sii_enabled=EXCLUDED.sii_enabled, verifactu_mode=EXCLUDED.verifactu_mode,
         verifactu_software_id=EXCLUDED.verifactu_software_id, verifactu_software_name=EXCLUDED.verifactu_software_name,
         verifactu_software_version=EXCLUDED.verifactu_software_version, verifactu_producer_name=EXCLUDED.verifactu_producer_name,
-        verifactu_producer_nif=EXCLUDED.verifactu_producer_nif, updated_at=NOW()
+        verifactu_producer_nif=EXCLUDED.verifactu_producer_nif, tax_models=EXCLUDED.tax_models,
+        tax_setup=EXCLUDED.tax_setup, profile_completed=EXCLUDED.profile_completed, updated_at=NOW()
       RETURNING *
     `;
     return formatFiscalProfile(rows[0]);

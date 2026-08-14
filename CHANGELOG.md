@@ -34,6 +34,8 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 - La navegación de proyectos se muestra para cualquier empresa de tipo Dev/estudio de desarrollo, no solo para el código histórico DEV.
 - El detalle de cada proyecto identifica siempre el bloque «Apartados del proyecto» y ofrece un alta clara cuando todavía no hay trabajo asociado.
 - El asistente de puesta en marcha ya no se muestra en cada navegador cuando se usa el CRM central; los datos existentes se abren directamente y la configuración queda en Ajustes.
+- Impuestos ya no inventa modelos por el simple hecho de ser autónomo o sociedad: el perfil fiscal guarda un cuestionario por empresa en PostgreSQL y calcula la lista de modelos a partir de IVA, IRPF, retenciones, operaciones UE, terceros, empleados, Sociedades y activos en el extranjero.
+- El cuestionario separa tener empleados de practicar retenciones; identifica 111/190 solo cuando se responde esa obligación y deja explícito que nóminas, altas/bajas y Sistema RED quedan para el módulo laboral.
 
 ### Added
 

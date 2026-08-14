@@ -61,6 +61,7 @@ import type {
   WorkStatus,
 } from "../types";
 import { buildModel303Draft } from "../taxes/model303";
+import { deriveTaxModels, normalizeTaxSetup } from "../taxes/models";
 import { buildInvoiceFromSale, buildManualInvoice, buildRectifyingInvoice } from "../invoicing/invoice";
 import { createVerifactuRecord, verifyVerifactuChain } from "../verifactu/records";
 import {
@@ -2417,33 +2418,41 @@ export const browserApi = {
     if (user.role !== "admin") throw new Error("Se requieren permisos de administrador");
     const cid = sessionCompanyId(s, token);
     const previous = s.fiscalProfiles.find((item) => item.company_id === cid);
-    const regime = input.regime ?? "general";
-    const period = input.period ?? "quarterly";
+    const regime = input.regime ?? previous?.regime ?? "general";
+    const period = input.period ?? previous?.period ?? "quarterly";
     const entityType = input.entity_type ?? previous?.entity_type ?? "autonomo";
     if (!["autonomo", "sociedad", "otra"].includes(entityType)) throw new Error("Tipo de contribuyente no válido");
     if (!["general", "simplified", "recargo_equivalencia", "other"].includes(regime)) throw new Error("Régimen fiscal no válido");
     if (!["monthly", "quarterly"].includes(period)) throw new Error("Periodicidad no válida");
-    const rate = Number(input.default_irpf_rate ?? 0);
+    const rate = Number(input.default_irpf_rate ?? previous?.default_irpf_rate ?? 0);
     if (!Number.isFinite(rate) || rate < 0 || rate > 100) throw new Error("El IRPF debe estar entre 0 y 100");
-    const verifactuMode = input.verifactu_mode ?? "disabled";
+    const verifactuMode = input.verifactu_mode ?? previous?.verifactu_mode ?? "disabled";
     if (!["disabled", "test", "production"].includes(verifactuMode)) throw new Error("Modo VERI*FACTU no válido");
-    const producerNif = (input.verifactu_producer_nif ?? "").trim().toUpperCase();
+    const producerNif = (input.verifactu_producer_nif ?? previous?.verifactu_producer_nif ?? "").trim().toUpperCase();
     if (verifactuMode !== "disabled" && !producerNif) throw new Error("El NIF emisor es obligatorio para activar VERI*FACTU");
+    const taxSetup = normalizeTaxSetup(input.tax_setup ?? previous?.tax_setup);
+    if (entityType === "autonomo" && !["direct_estimation", "objective_estimation", "none"].includes(taxSetup.income_regime)) throw new Error("Selecciona el régimen de IRPF del autónomo");
+    const siiEnabled = input.sii_enabled === undefined ? !!previous?.sii_enabled : !!input.sii_enabled;
+    if (siiEnabled && period !== "monthly") throw new Error("El SII requiere periodicidad mensual");
+    const profileCompleted = input.profile_completed === undefined ? !!previous?.profile_completed : input.profile_completed === true;
+    const taxModels = deriveTaxModels({ entity_type: entityType as FiscalProfile["entity_type"], regime: regime as FiscalProfile["regime"], period: period as FiscalProfile["period"], sii_enabled: siiEnabled, profile_completed: profileCompleted, tax_setup: taxSetup });
     const profile: FiscalProfile = {
       company_id: cid,
       invoice_series: input.invoice_series?.trim().toUpperCase() || previous?.invoice_series || "F",
       regime: regime as FiscalProfile["regime"],
       period: period as FiscalProfile["period"],
       entity_type: entityType as FiscalProfile["entity_type"],
-      tax_models: Array.isArray(input.tax_models) ? input.tax_models.map(String) : (previous?.tax_models ?? []),
+      tax_models: taxModels.map((model) => model.code),
+      tax_setup: taxSetup,
+      profile_completed: profileCompleted,
       irpf_enabled: !!input.irpf_enabled,
       default_irpf_rate: rate,
-      sii_enabled: !!input.sii_enabled,
+      sii_enabled: siiEnabled,
       verifactu_mode: verifactuMode,
-      verifactu_software_id: input.verifactu_software_id?.trim() || "hexa-crm",
-      verifactu_software_name: input.verifactu_software_name?.trim() || "Hexa CRM",
-      verifactu_software_version: input.verifactu_software_version?.trim() || "0.3.2",
-      verifactu_producer_name: input.verifactu_producer_name?.trim() || "",
+      verifactu_software_id: input.verifactu_software_id?.trim() || previous?.verifactu_software_id || "hexa-crm",
+      verifactu_software_name: input.verifactu_software_name?.trim() || previous?.verifactu_software_name || "Hexa CRM",
+      verifactu_software_version: input.verifactu_software_version?.trim() || previous?.verifactu_software_version || "0.3.2",
+      verifactu_producer_name: input.verifactu_producer_name?.trim() || previous?.verifactu_producer_name || "",
       verifactu_producer_nif: producerNif,
       updated_at: now(),
     };

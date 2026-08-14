@@ -253,6 +253,34 @@ export type ExpenseDocumentInput = Partial<Omit<ExpenseDocument, "id" | "company
 export type FiscalRegime = "general" | "simplified" | "recargo_equivalencia" | "other";
 export type FiscalPeriod = "monthly" | "quarterly";
 export type FiscalEntityType = "autonomo" | "sociedad" | "otra";
+export type FiscalIncomeRegime = "direct_estimation" | "objective_estimation" | "none";
+export type FiscalVatActivity = "taxable" | "mixed" | "exempt" | "not_applicable";
+export type FiscalTaxSetup = {
+  tax_residency: "spain" | "non_resident";
+  census_changes: boolean;
+  income_regime: FiscalIncomeRegime;
+  vat_registered: boolean;
+  vat_activity: FiscalVatActivity;
+  annual_vat_summary: boolean;
+  intra_community_operations: boolean;
+  imports_exports: boolean;
+  third_party_operations: boolean;
+  has_employees: boolean;
+  withholds_employees: boolean;
+  withholds_professionals: boolean;
+  withholds_rent: boolean;
+  withholds_capital: boolean;
+  corporate_tax: boolean;
+  corporate_tax_installments: boolean;
+  foreign_assets: boolean;
+  crypto_assets: boolean;
+};
+export type TaxModelDefinition = {
+  code: string;
+  label: string;
+  frequency: "monthly" | "quarterly" | "annual" | "eventual";
+  reason: string;
+};
 export type VerifactuMode = "disabled" | "test" | "production";
 export type VerifactuRecordType = "alta" | "anulacion";
 export type VerifactuRecordStatus = "generated" | "queued" | "sent" | "accepted" | "accepted_with_errors" | "rejected";
@@ -263,6 +291,8 @@ export type FiscalProfile = {
   period: FiscalPeriod;
   entity_type?: FiscalEntityType;
   tax_models?: string[];
+  tax_setup?: Partial<FiscalTaxSetup>;
+  profile_completed?: boolean;
   irpf_enabled: boolean;
   default_irpf_rate: number;
   sii_enabled: boolean;
