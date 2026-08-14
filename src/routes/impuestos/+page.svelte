@@ -57,10 +57,11 @@
         api.verifyVerifactuChain(),
       ]);
       summary = vat;
-      if (profiles[0]) profile = { ...profile, ...profiles[0], tax_setup: normalizeTaxSetup(profiles[0].tax_setup) };
+      const loadedProfile = profiles[0] ? { ...profile, ...profiles[0], tax_setup: normalizeTaxSetup(profiles[0].tax_setup) } : profile;
+      profile = loadedProfile;
       verifactuRecords = records;
       verifactuChain = chain;
-      const modelCodes = availableModels.map((model) => model.code);
+      const modelCodes = deriveTaxModels(loadedProfile).map((model) => model.code);
       if (modelCodes.includes("303")) {
         draft = await api.model303Draft(range.from, range.to);
         periodRows = await Promise.all([1, 2, 3, 4].map(async (quarter) => { const q = yearRange(selectedYear, quarter); const qDraft = await api.model303Draft(q.from, q.to); return { label: `${quarter} Trimestre`, output: qDraft.output_vat_cents, input: qDraft.input_vat_cents, result: qDraft.net_vat_cents, status: qDraft.output_vat_cents || qDraft.input_vat_cents ? "review" as const : "pending" as const }; }));
