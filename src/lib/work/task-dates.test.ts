@@ -21,4 +21,12 @@ describe("fechas de tareas", () => {
     expect(isTaskOverdue(task("Hecha", "2026-08-01", "done") as never, new Date("2026-08-06"))).toBe(false);
     expect(isTaskOverdue(task("Entregada", "2026-08-01", "validation") as never, new Date("2026-08-06"))).toBe(false);
   });
+
+  it("opera con la fecha heredada sin asignarla a la subtarea", () => {
+    const child = { ...task("Subtarea", null), effective_due_date: "2026-08-08" };
+    expect(child.due_date).toBeNull();
+    expect(isTaskDueSoon(child as never, new Date("2026-08-06"))).toBe(true);
+    expect(sortTasksByDueDate([task("Sin fecha", null), child]).map((item) => item.title))
+      .toEqual(["Subtarea", "Sin fecha"]);
+  });
 });

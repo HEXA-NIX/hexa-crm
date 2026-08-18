@@ -14,6 +14,7 @@
   import Badge from "$lib/components/Badge.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import Select from "$lib/components/Select.svelte";
+  import DatePicker from "$lib/components/DatePicker.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import RichDescription from "$lib/components/RichDescription.svelte";
   import RichDescriptionEditor from "$lib/components/RichDescriptionEditor.svelte";
@@ -22,6 +23,7 @@
   import { activeCompany } from "$lib/stores/session";
   import { isProjectPortfolioCompany } from "$lib/company/context";
   import { isTaskDueSoon, isTaskOverdue, isTaskPendingWork } from "$lib/work/task-dates";
+  import { latestProjectUpdate, normalizeProjectManagement, projectUpdateIsStale } from "$lib/projects/management";
 
   let projects = $state<WorkProject[]>([]);
   let items = $state<WorkItem[]>([]);
@@ -37,6 +39,9 @@
   let saving = $state(false);
   let savingGoal = $state(false);
   let goalInput = $state("");
+  let centerView = $state<"command" | "projects" | "timeline" | "team" | "economy" | "updates">(
+    browser ? (localStorage.getItem("hexa-project-center-view") as any) || "command" : "command",
+  );
 
   let form = $state({
     name: "",
@@ -129,9 +134,8 @@
   async function loadData() {
     loading = true;
     try {
-      const [projList, itemList, customerList, movementList, loadedSettings] = await Promise.all([
+      const [projList, customerList, movementList, loadedSettings] = await Promise.all([
         api.listWorkProjects(),
-        api.listWorkItems(),
         api.listCustomers(hexaCompanyId()),
         api.listCashMovements(),
         api.getSettings(),
@@ -141,7 +145,9 @@
         await goto(`/proyectos/${projList[0].uid}`, { replaceState: true });
         return;
       }
-      items = itemList;
+      items = (await Promise.all(
+        projList.map((project) => api.listWorkItems({ project_id: project.id })),
+      )).flat();
       customers = customerList;
       cashMovements = movementList;
       settings = loadedSettings;
@@ -165,6 +171,7 @@
     if (!browser) return;
     localStorage.setItem("hexa-projects-status", filterStatus);
     localStorage.setItem("hexa-projects-sort", sortBy);
+    localStorage.setItem("hexa-project-center-view", centerView);
   });
 
   function clearFilters() {
@@ -257,6 +264,49 @@
     monthlyEconomicGoal(settings?.monthly_economic_goals, $session.activeCompanyId, currentMonth),
   );
   const currentGoalProgress = $derived(economicGoalProgress(currentMonthIncomeCents, currentGoalCents));
+  const projectMonthlyEconomics = $derived.by(() => {
+    const map = new Map<number, { month: string; goal: number; achieved: number }>();
+    for (const project of projects) {
+      const milestones = [...project.revenue_milestones]
+        .filter((milestone) => milestone.target_month >= currentMonth)
+        .sort((a, b) => a.target_month.localeCompare(b.target_month));
+      const month = milestones.some((milestone) => milestone.target_month === currentMonth)
+        ? currentMonth
+        : milestones[0]?.target_month ?? currentMonth;
+      const goal = project.revenue_milestones
+        .filter((milestone) => milestone.target_month === month)
+        .reduce((sum, milestone) => sum + milestone.amount_cents, 0);
+      const achieved = cashMovements
+        .filter((movement) => movement.project_id === project.id && movement.kind === "income" && movement.occurred_at.slice(0, 7) === month)
+        .reduce((sum, movement) => sum + movement.amount_cents, 0);
+      map.set(project.id, { month, goal, achieved });
+    }
+    return map;
+  });
+  const portfolioUpdates = $derived.by(() => projects.flatMap((project) =>
+    normalizeProjectManagement(project.management).updates.map((update) => ({ project, update })),
+  ).sort((a, b) => b.update.created_at.localeCompare(a.update.created_at)));
+  const teamLoad = $derived.by(() => {
+    const map = new Map<string, { name: string; open: number; overdue: number; projects: Set<number> }>();
+    for (const item of items.filter(isTaskPendingWork)) {
+      const name = item.assignee_name || "Sin responsable";
+      const entry = map.get(name) ?? { name, open: 0, overdue: 0, projects: new Set<number>() };
+      entry.open += 1;
+      if (isTaskOverdue(item)) entry.overdue += 1;
+      if (item.project_id) entry.projects.add(item.project_id);
+      map.set(name, entry);
+    }
+    return [...map.values()].sort((a, b) => b.open - a.open);
+  });
+  const upcomingMilestones = $derived.by(() => projects.flatMap((project) =>
+    normalizeProjectManagement(project.management).milestones
+      .filter((milestone) => milestone.status !== "done")
+      .map((milestone) => ({ project, milestone })),
+  ).sort((a, b) => (a.milestone.target_date || "9999").localeCompare(b.milestone.target_date || "9999")));
+
+  function shortMonth(month: string) {
+    return new Date(`${month}-01T12:00:00`).toLocaleDateString("es-ES", { month: "short", year: "numeric" }).replace(".", "");
+  }
 
   async function saveEconomicGoal() {
     const amount = goalInput.trim() ? parseEurosInput(goalInput) : 0;
@@ -432,6 +482,15 @@
     </div>
   </div>
 
+  <nav class="mb-6 flex gap-2 overflow-x-auto rounded-2xl border border-[var(--color-border)] bg-black/20 p-2" aria-label="Centro de proyectos" data-project-center-navigation>
+    {#each [
+      ["command", "Centro de mando"], ["projects", "Proyectos"], ["timeline", "Cronología"],
+      ["team", "Equipo"], ["economy", "Economía"], ["updates", "Actualizaciones"]
+    ] as view}
+      <button type="button" class="shrink-0 rounded-xl px-4 py-2 text-sm font-medium transition {centerView === view[0] ? 'bg-purple-500/20 text-[var(--color-purple-bright)] shadow-[inset_0_0_0_1px_rgba(192,132,252,.25)]' : 'text-[var(--color-muted)] hover:bg-white/[0.04] hover:text-[var(--color-text)]'}" onclick={() => (centerView = view[0] as typeof centerView)}>{view[1]}</button>
+    {/each}
+  </nav>
+
   {#if !loading && projects.length > 0}
     <div class="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <div class="rounded-xl border border-[var(--color-border)] bg-black/20 p-4">
@@ -492,7 +551,34 @@
     </div>
   {/if}
 
+  {#if !loading && centerView === "command"}
+    <div class="mb-6 grid gap-4 xl:grid-cols-2" data-project-command-center>
+      <section class="rounded-2xl border border-[var(--color-border)] bg-black/15 p-4">
+        <div class="flex items-center justify-between"><span class="section-label">REQUIEREN ATENCIÓN</span><span class="text-xs text-[var(--color-muted)]">Prioridad automática</span></div>
+        <div class="mt-3 space-y-2">
+          {#each projects.filter((project) => (projectMetrics.get(project.id)?.attentionScore ?? 0) > 0 || projectUpdateIsStale(project)).sort((a,b) => (projectMetrics.get(b.id)?.attentionScore ?? 0) - (projectMetrics.get(a.id)?.attentionScore ?? 0)).slice(0, 8) as project}
+            {@const metric = projectMetrics.get(project.id)}
+            <a href={`/proyectos/${project.uid}`} class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.07] px-3 py-2.5 transition hover:border-purple-400/30"><div><p class="text-sm font-semibold text-[var(--color-text)]">{project.name}</p><p class="text-xs text-[var(--color-muted)]">{metric?.overdue ?? 0} vencidas · {metric?.blocked ?? 0} bloqueadas{projectUpdateIsStale(project) ? " · actualización pendiente" : ""}</p></div><span class="text-xs text-[var(--color-purple-bright)]">Abrir →</span></a>
+          {:else}<p class="rounded-xl border border-dashed border-[var(--color-border)] p-4 text-sm text-[var(--color-muted)]">No hay señales críticas. La cartera está al día.</p>{/each}
+        </div>
+      </section>
+      <section class="rounded-2xl border border-[var(--color-border)] bg-black/15 p-4">
+        <div class="flex items-center justify-between"><span class="section-label">PRÓXIMOS HITOS</span><button class="text-xs text-[var(--color-purple-bright)]" onclick={() => (centerView = "timeline")}>Ver cronología →</button></div>
+        <div class="mt-3 space-y-2">{#each upcomingMilestones.slice(0,8) as entry}<a href={`/proyectos/${entry.project.uid}?seccion=plan`} class="grid grid-cols-[1fr_auto] gap-3 rounded-xl border border-white/[0.07] px-3 py-2.5"><div><p class="text-sm font-semibold">{entry.milestone.title}</p><p class="text-xs text-[var(--color-muted)]">{entry.project.name}</p></div><time class="text-xs text-cyan-200">{entry.milestone.target_date || "Sin fecha"}</time></a>{:else}<p class="rounded-xl border border-dashed border-[var(--color-border)] p-4 text-sm text-[var(--color-muted)]">Todavía no hay hitos operativos.</p>{/each}</div>
+      </section>
+    </div>
+  {:else if !loading && centerView === "timeline"}
+    <section class="mb-6 overflow-x-auto rounded-2xl border border-[var(--color-border)] bg-black/15 p-4" data-project-timeline><div class="min-w-[760px]"><div class="grid grid-cols-[13rem_1fr_8rem] gap-3 border-b border-white/10 pb-3 text-xs font-semibold uppercase text-[var(--color-muted)]"><span>Proyecto</span><span>Periodo y progreso</span><span>Dependencias</span></div>{#each projects.filter((project) => project.status !== "archived") as project}{@const metric = projectMetrics.get(project.id)}{@const management = normalizeProjectManagement(project.management)}<a href={`/proyectos/${project.uid}?seccion=plan`} class="grid grid-cols-[13rem_1fr_8rem] items-center gap-3 border-b border-white/[0.06] py-3"><div><p class="text-sm font-semibold">{project.name}</p><p class="text-xs text-[var(--color-muted)]">{project.start_date?.slice(0,10) || "Sin inicio"} → {project.target_date?.slice(0,10) || "Sin fin"}</p></div><div><div class="h-3 overflow-hidden rounded-full bg-white/10"><div class="h-full rounded-full bg-gradient-to-r from-purple-500 to-cyan-400" style={`width:${metric?.progress ?? 0}%`}></div></div><div class="mt-2 flex flex-wrap gap-1">{#each management.milestones.filter((item) => item.status !== "done").slice(0,4) as milestone}<span class="rounded-full border border-cyan-400/20 px-2 py-0.5 text-[10px] text-cyan-200">{milestone.title} · {milestone.target_date || "s/f"}</span>{/each}</div></div><span class="text-center text-sm text-[var(--color-muted)]">{management.dependencies.length}</span></a>{/each}</div></section>
+  {:else if !loading && centerView === "team"}
+    <section class="mb-6 rounded-2xl border border-[var(--color-border)] bg-black/15 p-4" data-portfolio-team><div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{#each teamLoad as member}<div class="rounded-xl border border-white/[0.07] p-4"><div class="flex justify-between"><p class="font-semibold">{member.name}</p>{#if member.overdue}<span class="text-xs font-semibold text-rose-300">{member.overdue} vencidas</span>{/if}</div><p class="mt-2 text-2xl font-semibold text-[var(--color-purple-bright)]">{member.open}</p><p class="text-xs text-[var(--color-muted)]">tareas abiertas en {member.projects.size} proyectos</p></div>{/each}</div></section>
+  {:else if !loading && centerView === "economy"}
+    <section class="mb-6 rounded-2xl border border-[var(--color-border)] bg-black/15 p-4" data-portfolio-economy><div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{#each projects as project}{@const economics = projectMonthlyEconomics.get(project.id) ?? {month:currentMonth,goal:0,achieved:0}}<a href={`/proyectos/${project.uid}?seccion=economia`} class="rounded-xl border border-white/[0.07] p-4"><div class="flex justify-between gap-3"><p class="font-semibold">{project.name}</p><span class="text-xs text-[var(--color-muted)]">{shortMonth(economics.month)}</span></div><p class="mt-3 text-xl font-semibold text-emerald-300">{formatEUR(economics.achieved)}</p><p class="text-xs text-[var(--color-muted)]">ingresado de {economics.goal ? formatEUR(economics.goal) : "objetivo sin definir"}</p>{#if economics.goal}<div class="mt-3 h-2 overflow-hidden rounded-full bg-white/10"><div class="h-full bg-gradient-to-r from-purple-500 to-emerald-400" style={`width:${Math.min(100,economicGoalProgress(economics.achieved,economics.goal))}%`}></div></div>{/if}</a>{/each}</div></section>
+  {:else if !loading && centerView === "updates"}
+    <section class="mb-6 rounded-2xl border border-[var(--color-border)] bg-black/15 p-4" data-portfolio-updates><div class="space-y-3">{#each portfolioUpdates as entry}<a href={`/proyectos/${entry.project.uid}`} class="block rounded-xl border border-white/[0.07] p-4"><div class="flex flex-wrap justify-between gap-3"><div><p class="text-xs font-semibold uppercase text-[var(--color-purple-bright)]">{entry.project.name}</p><p class="mt-1 text-sm font-semibold">{entry.update.summary}</p></div><Badge tone={entry.update.health === "on_track" ? "ok" : entry.update.health === "at_risk" ? "warn" : "danger"}>{entry.update.health}</Badge></div><p class="mt-2 text-xs text-[var(--color-muted)]">{entry.update.author} · {new Date(entry.update.created_at).toLocaleString("es-ES")}</p></a>{:else}<p class="py-8 text-center text-sm text-[var(--color-muted)]">Todavía no hay actualizaciones publicadas.</p>{/each}</div></section>
+  {/if}
+
   <!-- Status Filter Toolbar -->
+  {#if centerView === "projects"}
   <div class="workspace-toolbar mb-6 flex flex-wrap items-center justify-between gap-4">
     <div class="flex flex-1 flex-wrap items-center gap-3">
       <input
@@ -549,6 +635,7 @@
     <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
       {#each filteredProjects as project (project.id)}
         {@const metrics = projectMetrics.get(project.id) ?? { total: 0, completed: 0, blocked: 0, overdue: 0, dueSoon: 0, progress: 0, health: "on_track" as const, attentionScore: 0 }}
+        {@const economics = projectMonthlyEconomics.get(project.id) ?? { month: currentMonth, goal: 0, achieved: 0 }}
         <a
           href="/proyectos/{project.uid}"
           class="group block transition-transform duration-200 hover:-translate-y-0.5"
@@ -599,6 +686,20 @@
                     ? "Gestión interna del grupo"
                     : `Estimación mensual: ${formatEUR(project.monthly_estimate_cents)}`}
               </p>
+              {#if project.project_type !== "client"}
+                <div class="mb-3 rounded-lg border border-purple-400/20 bg-purple-500/[0.06] px-3 py-2.5">
+                  <p class="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Objetivo {shortMonth(economics.month)}</p>
+                  <div class="mt-1 flex items-baseline justify-between gap-3 text-xs">
+                    <strong class="text-[var(--color-text)]">{economics.goal ? formatEUR(economics.goal) : "Sin objetivo"}</strong>
+                    <span class="text-emerald-300">Llevamos {formatEUR(economics.achieved)}</span>
+                  </div>
+                  {#if economics.goal}
+                    <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
+                      <div class="h-full rounded-full bg-gradient-to-r from-purple-500 to-emerald-400" style={`width: ${Math.min(economicGoalProgress(economics.achieved, economics.goal), 100)}%`}></div>
+                    </div>
+                  {/if}
+                </div>
+              {/if}
               {#if project.description}
                 <RichDescription value={project.description} class="mb-4 line-clamp-2 text-xs text-[var(--color-muted-dim)]" />
               {:else}
@@ -650,6 +751,7 @@
         </a>
       {/each}
     </div>
+  {/if}
   {/if}
 </section>
 
@@ -751,21 +853,11 @@
     <div class="grid gap-3 sm:grid-cols-2">
       <div class="space-y-1">
         <label for="project-start-date" class="text-xs font-medium text-[var(--color-muted)]">Fecha de inicio</label>
-        <input
-          id="project-start-date"
-          type="date"
-          bind:value={form.start_date}
-          class="field w-full text-sm"
-        />
+        <DatePicker bind:value={form.start_date} ariaLabel="Fecha de inicio" />
       </div>
       <div class="space-y-1">
         <label for="project-target-date" class="text-xs font-medium text-[var(--color-muted)]">Fecha objetivo</label>
-        <input
-          id="project-target-date"
-          type="date"
-          bind:value={form.target_date}
-          class="field w-full text-sm"
-        />
+        <DatePicker bind:value={form.target_date} ariaLabel="Fecha objetivo" />
       </div>
     </div>
 

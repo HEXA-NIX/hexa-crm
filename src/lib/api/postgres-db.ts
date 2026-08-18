@@ -106,6 +106,7 @@ import {
 } from "../plugins/catalog";
 import { normalizeProjectDocuments, validateProjectDocuments } from "../projects/project-documents";
 import { normalizeProjectBrief, normalizeProjectPrd, normalizeTechStack } from "../projects/project-brief";
+import { normalizeProjectManagement } from "../projects/management";
 import { validateProjectLogo } from "../projects/project-logo";
 import { validateUserAvatar } from "../users/user-avatar";
 import { decodeBase64File, testGoogleDrive, uploadToGoogleDrive } from "../storage/google-drive";
@@ -906,6 +907,7 @@ export async function initDb() {
   await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS prd TEXT NOT NULL DEFAULT ''`;
   await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS tech_stack JSONB NOT NULL DEFAULT '[]'::jsonb`;
   await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS brief JSONB NOT NULL DEFAULT '{}'::jsonb`;
+  await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS management JSONB NOT NULL DEFAULT '{}'::jsonb`;
   await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS logo_data_url TEXT NOT NULL DEFAULT ''`;
   await sql`CREATE INDEX IF NOT EXISTS idx_cash_movements_project ON cash_movements(company_id, project_id)`;
   await sql`
@@ -1596,6 +1598,7 @@ function formatWorkProject(r: any): WorkProject {
     prd: normalizeProjectPrd(r.prd),
     tech_stack: normalizeTechStack(r.tech_stack),
     brief: normalizeProjectBrief(r.brief, r.tech_stack),
+    management: normalizeProjectManagement(r.management),
     logo_data_url: r.logo_data_url ?? "",
     name: r.name,
     description: r.description ?? "",
@@ -1652,6 +1655,8 @@ function formatWorkItem(r: any): WorkItem {
     priority: r.priority,
     start_date: toIso(r.start_date) || null,
     due_date: toIso(r.due_date) || null,
+    effective_assignee_id: r.effective_assignee_id ?? r.assignee_id ?? null,
+    effective_due_date: toIso(r.effective_due_date ?? r.due_date) || null,
     sort_order: r.sort_order ?? 0,
     source_type: r.source_type ?? null,
     source_key: r.source_key ?? null,
@@ -4746,6 +4751,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     const prd = input.prd !== undefined ? normalizeProjectPrd(input.prd) : normalizeProjectPrd(existing?.prd);
     const techStack = input.tech_stack !== undefined ? normalizeTechStack(input.tech_stack) : normalizeTechStack(existing?.tech_stack);
     const brief = input.brief !== undefined ? normalizeProjectBrief(input.brief, techStack) : normalizeProjectBrief(existing?.brief, techStack);
+    const management = input.management !== undefined ? normalizeProjectManagement(input.management) : normalizeProjectManagement(existing?.management);
     const logoDataUrl = input.logo_data_url !== undefined ? input.logo_data_url : (existing?.logo_data_url ?? "");
     const ownerLogoRows = projectType === "own"
       ? await sql`SELECT logo_data_url FROM companies WHERE id = ${existing?.company_id ?? companyId}`
@@ -4784,6 +4790,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
           prd = ${prd},
           tech_stack = ${sql.json(techStack as any)},
           brief = ${sql.json(brief as any)},
+          management = ${sql.json(management as any)},
           logo_data_url = ${effectiveLogoDataUrl},
           start_date = ${startDate},
           target_date = ${targetDate},
@@ -4795,10 +4802,10 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     } else {
       const inserted = await sql`
         INSERT INTO work_projects (
-          company_id, project_type, client_company_id, task_company_id, customer_id, value_cents, monthly_estimate_cents, revenue_target_date, documents, requests, prd, tech_stack, brief, logo_data_url,
+          company_id, project_type, client_company_id, task_company_id, customer_id, value_cents, monthly_estimate_cents, revenue_target_date, documents, requests, prd, tech_stack, brief, management, logo_data_url,
           name, description, status, start_date, target_date, created_by
         ) VALUES (
-          ${companyId}, ${projectType}, ${clientCompanyId}, ${taskCompanyId ?? companyId}, ${customerId}, ${valueCents}, ${monthlyEstimateCents}, ${revenueTargetDate}, ${sql.json(documents as any)}, ${sql.json(requests as any)}, ${prd}, ${sql.json(techStack as any)}, ${sql.json(brief as any)}, ${effectiveLogoDataUrl},
+          ${companyId}, ${projectType}, ${clientCompanyId}, ${taskCompanyId ?? companyId}, ${customerId}, ${valueCents}, ${monthlyEstimateCents}, ${revenueTargetDate}, ${sql.json(documents as any)}, ${sql.json(requests as any)}, ${prd}, ${sql.json(techStack as any)}, ${sql.json(brief as any)}, ${sql.json(management as any)}, ${effectiveLogoDataUrl},
           ${name}, ${description}, ${status}, ${startDate}, ${targetDate}, ${user.id}
         )
         RETURNING id
@@ -4887,10 +4894,28 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   async listWorkItems(filters?: WorkItemFilters, token?: string | null): Promise<WorkItem[]> {
     const user = await requireSession(token ?? null);
     const companyId = await resolveActiveCompanyId(token ?? null, user.id);
+    let workCompanyId = companyId;
+
+    // A portfolio company may own an internal project whose tasks live in the
+    // project company's tenant. Resolve that tenant only after confirming the
+    // active company is allowed to see the project.
+    if (typeof filters?.project_id === "number") {
+      const projectRows = await sql`
+        SELECT COALESCE(task_company_id, company_id) AS task_company_id
+        FROM work_projects
+        WHERE id = ${filters.project_id}
+          AND (company_id = ${companyId} OR task_company_id = ${companyId})
+        LIMIT 1
+      `;
+      if (projectRows.length === 0) throw new Error("Proyecto no encontrado.");
+      workCompanyId = Number(projectRows[0].task_company_id);
+    }
 
     let query = sql`
       SELECT
         wi.*,
+        COALESCE(wi.assignee_id, parent.assignee_id) AS effective_assignee_id,
+        COALESCE(wi.due_date, parent.due_date) AS effective_due_date,
         wc.name AS category_name,
         wc.normalized_name AS category_normalized_name,
         wc.color AS category_color,
@@ -4902,9 +4927,9 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
         parent.title AS parent_title
       FROM work_items wi
       LEFT JOIN work_categories wc ON wi.category_id = wc.id
-      LEFT JOIN users u ON wi.assignee_id = u.id
       LEFT JOIN work_items parent ON wi.parent_id = parent.id
-      WHERE wi.company_id = ${companyId}
+      LEFT JOIN users u ON COALESCE(wi.assignee_id, parent.assignee_id) = u.id
+      WHERE wi.company_id = ${workCompanyId}
     `;
 
     if (filters) {
@@ -4927,9 +4952,9 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
       }
       if (filters.assignee_id !== undefined) {
         if (filters.assignee_id === null) {
-          query = sql`${query} AND wi.assignee_id IS NULL`;
+          query = sql`${query} AND COALESCE(wi.assignee_id, parent.assignee_id) IS NULL`;
         } else {
-          query = sql`${query} AND wi.assignee_id = ${filters.assignee_id}`;
+          query = sql`${query} AND COALESCE(wi.assignee_id, parent.assignee_id) = ${filters.assignee_id}`;
         }
       }
       if (filters.text && filters.text.trim()) {
@@ -5138,6 +5163,8 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     const fetched = await sql`
       SELECT
         wi.*,
+        COALESCE(wi.assignee_id, parent.assignee_id) AS effective_assignee_id,
+        COALESCE(wi.due_date, parent.due_date) AS effective_due_date,
         wc.name AS category_name,
         wc.normalized_name AS category_normalized_name,
         wc.color AS category_color,
@@ -5149,8 +5176,8 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
         parent.title AS parent_title
       FROM work_items wi
       LEFT JOIN work_categories wc ON wi.category_id = wc.id
-      LEFT JOIN users u ON wi.assignee_id = u.id
       LEFT JOIN work_items parent ON wi.parent_id = parent.id
+      LEFT JOIN users u ON COALESCE(wi.assignee_id, parent.assignee_id) = u.id
       WHERE wi.id = ${itemId} AND wi.company_id = ${companyId}
     `;
     return formatWorkItem(fetched[0]);
@@ -5208,6 +5235,8 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     const fetched = await sql`
       SELECT
         wi.*,
+        COALESCE(wi.assignee_id, parent.assignee_id) AS effective_assignee_id,
+        COALESCE(wi.due_date, parent.due_date) AS effective_due_date,
         wc.name AS category_name,
         wc.normalized_name AS category_normalized_name,
         wc.color AS category_color,
@@ -5219,8 +5248,8 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
         parent.title AS parent_title
       FROM work_items wi
       LEFT JOIN work_categories wc ON wi.category_id = wc.id
-      LEFT JOIN users u ON wi.assignee_id = u.id
       LEFT JOIN work_items parent ON wi.parent_id = parent.id
+      LEFT JOIN users u ON COALESCE(wi.assignee_id, parent.assignee_id) = u.id
       WHERE wi.id = ${id} AND wi.company_id = ${companyId}
     `;
     return formatWorkItem(fetched[0]);

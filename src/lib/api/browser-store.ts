@@ -83,6 +83,7 @@ import {
 } from "../company/context";
 import { normalizeProjectDocuments, validateProjectDocuments } from "../projects/project-documents";
 import { normalizeProjectBrief, normalizeProjectPrd, normalizeTechStack } from "../projects/project-brief";
+import { normalizeProjectManagement } from "../projects/management";
 import { validateProjectLogo } from "../projects/project-logo";
 import { validateUserAvatar } from "../users/user-avatar";
 import { decodeBase64File, testGoogleDrive, uploadToGoogleDrive } from "../storage/google-drive";
@@ -459,6 +460,7 @@ function normalizeWorkProject(project: WorkProject): WorkProject {
     prd: normalizeProjectPrd(project.prd),
     tech_stack: normalizeTechStack(project.tech_stack),
     brief: normalizeProjectBrief(project.brief, project.tech_stack),
+    management: normalizeProjectManagement(project.management),
     logo_data_url: project.logo_data_url ?? "",
   };
 }
@@ -877,16 +879,23 @@ function populateWorkItem(item: WorkItem, s: Store): WorkItem {
     item.category_id != null
       ? s.workCategories.find((c) => c.id === item.category_id && c.company_id === item.company_id) ?? null
       : null;
-  const assignee =
-    item.assignee_id != null ? s.users.find((u) => u.id === item.assignee_id) : null;
   const parent =
     item.parent_id != null ? s.workItems.find((candidate) => candidate.id === item.parent_id) : null;
+  const effectiveAssigneeId = item.assignee_id ?? parent?.assignee_id ?? null;
   return {
     ...item,
     parent_id: item.parent_id ?? null,
+    // Empty subtask fields inherit the planning context of their parent. Keep
+    // the stored values nullable so changing a parent also updates its children.
+    effective_assignee_id: effectiveAssigneeId,
+    effective_due_date: item.due_date ?? parent?.due_date ?? null,
     category: category ? { ...category } : null,
-    assignee_name: assignee ? assignee.display_name : null,
-    assignee_avatar_data_url: assignee?.avatar_data_url ?? null,
+    assignee_name: effectiveAssigneeId != null
+      ? s.users.find((u) => u.id === effectiveAssigneeId)?.display_name ?? null
+      : null,
+    assignee_avatar_data_url: effectiveAssigneeId != null
+      ? s.users.find((u) => u.id === effectiveAssigneeId)?.avatar_data_url ?? null
+      : null,
     parent_title: parent?.title ?? null,
   };
 }
@@ -2895,6 +2904,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       if (input.prd !== undefined) existing.prd = normalizeProjectPrd(input.prd);
       if (input.tech_stack !== undefined) existing.tech_stack = normalizeTechStack(input.tech_stack);
       if (input.brief !== undefined) existing.brief = normalizeProjectBrief(input.brief, existing.tech_stack);
+      if (input.management !== undefined) existing.management = normalizeProjectManagement(input.management);
       if (input.logo_data_url !== undefined) existing.logo_data_url = input.logo_data_url;
       if (existing.project_type === "own" && !existing.logo_data_url) {
         existing.logo_data_url = s.companies.find((company) => company.id === existing.company_id)?.logo_data_url ?? "";
@@ -2930,6 +2940,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
         prd: normalizeProjectPrd(input.prd),
         tech_stack: normalizeTechStack(input.tech_stack),
         brief: normalizeProjectBrief(input.brief, input.tech_stack),
+        management: normalizeProjectManagement(input.management),
         logo_data_url: input.logo_data_url || (projectType === "own" ? (s.companies.find((company) => company.id === companyId)?.logo_data_url ?? "") : ""),
         name,
         description: input.description ?? "",
@@ -2991,7 +3002,16 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
   async listWorkItems(filters?: WorkItemFilters, token?: string | null): Promise<WorkItem[]> {
     const s = load();
     const companyId = sessionCompanyId(s, token);
-    let items = s.workItems.filter((i) => i.company_id === companyId);
+    let workCompanyId = companyId;
+    if (typeof filters?.project_id === "number") {
+      const project = s.workProjects.find((candidate) =>
+        candidate.id === filters.project_id &&
+        (candidate.company_id === companyId || candidate.task_company_id === companyId)
+      );
+      if (!project) throw new Error("Proyecto no encontrado.");
+      workCompanyId = project.task_company_id ?? project.company_id;
+    }
+    let items = s.workItems.filter((i) => i.company_id === workCompanyId);
 
     if (filters) {
       if (filters.status) items = items.filter((i) => i.status === filters.status);
@@ -3006,8 +3026,14 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
           items = items.filter((i) => i.project_id === filters.project_id);
         }
       }
-      if (filters.assignee_id !== undefined)
-        items = items.filter((i) => i.assignee_id === filters.assignee_id);
+      if (filters.assignee_id !== undefined) {
+        items = items.filter((item) => {
+          const parent = item.parent_id != null
+            ? s.workItems.find((candidate) => candidate.id === item.parent_id)
+            : null;
+          return (item.assignee_id ?? parent?.assignee_id ?? null) === filters.assignee_id;
+        });
+      }
       if (filters.text && filters.text.trim()) {
         const q = filters.text.trim().toLowerCase();
         items = items.filter(

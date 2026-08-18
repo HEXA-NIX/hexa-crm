@@ -1003,6 +1003,28 @@ html[data-theme="light"] .app-header-icon-button {
   background: rgba(192, 132, 252, 0.4);
 }
 
+/* Native date controls must remain legible in both themes. Chromium paints
+   the calendar glyph as an image, so its contrast cannot inherit currentColor. */
+html[data-theme="dark"] input:is([type="date"], [type="datetime-local"], [type="month"], [type="time"]) {
+  color-scheme: dark;
+}
+html[data-theme="light"] input:is([type="date"], [type="datetime-local"], [type="month"], [type="time"]) {
+  color-scheme: light;
+}
+html[data-theme="dark"] input:is([type="date"], [type="datetime-local"], [type="month"], [type="time"])::-webkit-calendar-picker-indicator {
+  filter: invert(1) brightness(1.35);
+  opacity: .82;
+  cursor: pointer;
+}
+html[data-theme="light"] input:is([type="date"], [type="datetime-local"], [type="month"], [type="time"])::-webkit-calendar-picker-indicator {
+  filter: none;
+  opacity: .68;
+  cursor: pointer;
+}
+input:is([type="date"], [type="datetime-local"], [type="month"], [type="time"])::-webkit-calendar-picker-indicator:hover {
+  opacity: 1;
+}
+
 :focus-visible {
   outline: 2px solid rgba(192, 132, 252, 0.65);
   outline-offset: 2px;

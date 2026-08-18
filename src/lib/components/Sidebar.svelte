@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { page } from "$app/stores";
   import { sidebarCollapsed } from "$lib/stores/ui";
   import Logo from "$lib/components/Logo.svelte";
@@ -20,8 +19,6 @@
     onLogout?: () => void | Promise<void>;
   } = $props();
   let salesMenuOpen = $state(false);
-  let salesTriggerElement = $state<HTMLElement | null>(null);
-  let salesPopoverPosition = $state({ top: 0, left: 0 });
   let workspaceProjects = $state<WorkProject[]>([]);
 
   const collapsed = $derived(forceExpanded ? false : $sidebarCollapsed);
@@ -128,55 +125,18 @@
 
   function nav() {
     salesMenuOpen = false;
-    salesTriggerElement = null;
     onNavigate?.();
   }
 
-  function positionSalesPopover() {
-    if (!salesTriggerElement || typeof window === "undefined") return;
-    const rect = salesTriggerElement.getBoundingClientRect();
-    const menuWidth = 224;
-    const menuHeight = 178;
-    const gap = 8;
-    let left = rect.right + gap;
-    if (left + menuWidth > window.innerWidth - gap) left = rect.left - menuWidth - gap;
-    let top = rect.top - menuHeight - gap;
-    if (top < gap) top = rect.bottom + gap;
-    salesPopoverPosition = {
-      top: Math.min(Math.max(gap, top), Math.max(gap, window.innerHeight - menuHeight - gap)),
-      left: Math.min(Math.max(gap, left), Math.max(gap, window.innerWidth - menuWidth - gap)),
-    };
-  }
-
   function toggleSalesMenu(event: MouseEvent) {
+    if (collapsed) return;
     event.preventDefault();
-    salesTriggerElement = event.currentTarget as HTMLElement;
     salesMenuOpen = !salesMenuOpen;
-    if (salesMenuOpen) requestAnimationFrame(positionSalesPopover);
   }
 
   $effect(() => {
-    void $page.url.pathname;
-    salesMenuOpen = false;
-  });
-
-  onMount(() => {
-    const close = (event: MouseEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (!target?.closest(".sidebar-sales-trigger, .sidebar-sales-popover")) {
-        salesMenuOpen = false;
-        salesTriggerElement = null;
-      }
-    };
-    document.addEventListener("click", close);
-    const reposition = () => salesMenuOpen && positionSalesPopover();
-    window.addEventListener("resize", reposition);
-    window.addEventListener("scroll", reposition, true);
-    return () => {
-      document.removeEventListener("click", close);
-      window.removeEventListener("resize", reposition);
-      window.removeEventListener("scroll", reposition, true);
-    };
+    const path = $page.url.pathname;
+    salesMenuOpen = ["/facturas", "/presupuestos", "/servicios"].some((prefix) => path.startsWith(prefix));
   });
 
   async function logout() {
@@ -242,17 +202,20 @@
                 </span>{/if}
                 {#if !collapsed}
                   <span class="font-medium">{link.label}</span>
+                  {#if link.label === "Ventas"}
+                    <span class="ml-auto text-[10px] transition-transform {salesMenuOpen ? 'rotate-180' : ''}" aria-hidden="true">⌄</span>
+                  {/if}
                 {/if}
               </a>
               {#if link.label === "Ventas" && salesMenuOpen && !collapsed}
-                <div
-                  class="sidebar-sales-popover"
-                  role="menu"
-                  style={`top:${salesPopoverPosition.top}px;left:${salesPopoverPosition.left}px`}
-                >
-                  <a href="/facturas" onclick={nav} role="menuitem">Facturas</a>
-                  <a href="/presupuestos" onclick={nav} role="menuitem">Presupuestos</a>
-                  <a href="/servicios" onclick={nav} role="menuitem">Servicios</a>
+                <div class="sidebar-sales-children" aria-label="Opciones de ventas">
+                  {#each [
+                    { href: "/facturas", label: "Facturas" },
+                    { href: "/presupuestos", label: "Presupuestos" },
+                    { href: "/servicios", label: "Servicios" },
+                  ] as child}
+                    <a href={child.href} onclick={nav} aria-current={active(child.href, $page.url.pathname) ? "page" : undefined} class:nav-active={active(child.href, $page.url.pathname)}>{child.label}</a>
+                  {/each}
                 </div>
               {/if}
               </div>
@@ -310,7 +273,8 @@
 <style>
   .sidebar-icon :global(svg) { width:1.25rem; height:1.25rem; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; vertical-align:middle; }
   .sidebar-link-wrap { position:relative; }
-  .sidebar-sales-popover { position:fixed; z-index:100000; width:14rem; min-width:14rem; margin:0; padding:.3rem; border:1px solid var(--color-border); border-radius:.6rem; background:var(--color-obsidian-elevated); box-shadow:0 18px 40px rgba(0,0,0,.48); }
-  .sidebar-sales-popover a { display:block; border-radius:.4rem; color:var(--color-muted); padding:.55rem .7rem; font-size:.86rem; }
-  .sidebar-sales-popover a:hover { background:var(--color-purple-soft); color:var(--color-purple-bright); }
+  .sidebar-sales-children { margin:.15rem 0 .35rem 2.45rem; padding-left:.65rem; border-left:1px solid var(--color-border); }
+  .sidebar-sales-children a { display:block; border-radius:.55rem; color:var(--color-muted); padding:.45rem .65rem; font-size:.78rem; transition:background .2s,color .2s; }
+  .sidebar-sales-children a:hover { background:var(--color-purple-soft); color:var(--color-purple-bright); }
+  .sidebar-sales-children a.nav-active { color:var(--color-purple-bright); background:var(--color-purple-soft); }
 </style>

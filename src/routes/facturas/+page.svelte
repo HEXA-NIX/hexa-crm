@@ -7,6 +7,10 @@
   import Card from "$lib/components/Card.svelte";
   import Button from "$lib/components/Button.svelte";
   import Modal from "$lib/components/Modal.svelte";
+  import DatePicker from "$lib/components/DatePicker.svelte";
+  import CommercialDocument from "$lib/components/CommercialDocument.svelte";
+  import { activeCompany } from "$lib/stores/session";
+  import { invoicePrintHtml } from "$lib/documents/commercial-print";
   import SortableHeader from "$lib/components/SortableHeader.svelte";
   import { sortedCopy, type SortDirection } from "$lib/list-sort";
   import { showToast } from "$lib/stores/ui";
@@ -315,11 +319,10 @@
   }
 
   async function print(invoice: Invoice) {
-    const rows = invoice.lines.map((line) => `<tr><td>${line.description}</td><td>${line.quantity}</td><td>${formatEUR(line.base_cents)}</td><td>${line.vat_rate}%</td><td>${formatEUR(line.total_cents)}</td></tr>`).join("");
     const verifactu = verifactuRecords.find((record) => record.invoice_id === invoice.id && record.record_type === "alta");
     const qrDataUrl = verifactu ? await QRCode.toDataURL(verifactu.qr_url, { errorCorrectionLevel: "M", width: 150, margin: 2 }) : "";
     const qrHtml = verifactu ? `<div class="qr"><div>QR tributario:</div><img src="${qrDataUrl}" alt="QR tributario" /><div class="qr-label">${verifactu.mode === "test" ? "Entorno de pruebas VERI*FACTU" : "Factura verificable en la sede electrónica de la AEAT"}</div></div>` : "";
-    const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>${invoice.series}-${invoice.number}</title><style>body{font:14px Arial;color:#17121f;max-width:820px;margin:40px auto}header{display:flex;justify-content:space-between;border-bottom:2px solid #7c3aed;padding-bottom:24px}.qr{float:right;text-align:center;font-size:11px;margin-left:20px}.qr img{display:block;width:150px;height:150px;margin:4px auto}.qr-label{max-width:180px;font-size:10px}table{width:100%;border-collapse:collapse;margin-top:32px}th,td{text-align:left;padding:10px;border-bottom:1px solid #ddd}tfoot td{font-weight:bold;text-align:right}.muted{color:#666}.meta{margin-top:12px;color:#555;font-size:12px}</style></head><body>${qrHtml}<header><div><h1>${invoice.seller_trade_name}</h1><div>${invoice.seller_legal_name}<br>NIF: ${invoice.seller_nif}</div></div><div><h2>${invoice.kind === "rectifying" ? "ABONO / RECTIFICATIVA" : "FACTURA"}</h2><strong>${invoice.series}-${invoice.number}</strong><br>Fecha emisión: ${new Date(invoice.issued_at).toLocaleDateString("es-ES")}<br>Fecha operación: ${invoice.operation_date}${invoice.due_at ? `<br>Vencimiento: ${invoice.due_at}` : ""}</div></header><section style="margin-top:28px"><strong>Cliente</strong><br>${invoice.customer_name}<br>${invoice.customer_nif || ""}</section><table><thead><tr><th>Concepto</th><th>Cant.</th><th>Base</th><th>IVA</th><th>Total</th></tr></thead><tbody>${rows}</tbody><tfoot><tr><td colspan="4">Base imponible</td><td>${formatEUR(invoice.base_cents)}</td></tr><tr><td colspan="4">IVA</td><td>${formatEUR(invoice.vat_cents)}</td></tr><tr><td colspan="4">Retención IRPF (${invoice.irpf_rate}%)</td><td>${formatEUR(invoice.irpf_cents)}</td></tr><tr><td colspan="4">TOTAL</td><td>${formatEUR(invoice.total_cents)}</td></tr><tr><td colspan="4">Cobrado</td><td>${formatEUR(invoice.paid_cents)}</td></tr><tr><td colspan="4">Pendiente</td><td>${formatEUR(invoice.total_cents - invoice.paid_cents)}</td></tr></tfoot></table><p class="muted">${invoice.notes}</p></body></html>`;
+    const html = invoicePrintHtml(invoice, $activeCompany, qrHtml);
     const popup = window.open("", "_blank");
     if (!popup) { showToast("El navegador ha bloqueado la ventana de impresión", "err"); return; }
     popup.document.write(html); popup.document.close(); popup.focus(); popup.print();
@@ -350,12 +353,23 @@
     <div class="flex flex-1 flex-wrap items-center justify-end gap-2">
       <div class="relative min-w-[14rem] max-w-md flex-1"><svg class="invoice-search-icon pointer-events-none" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.6" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16 16 5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><input class="field invoice-search-input w-full" placeholder="Buscar número, cliente o NIF…" aria-label="Buscar facturas" bind:value={invoiceSearch} /></div>
       <div class="relative">
-        <button type="button" class="invoice-date-trigger" aria-expanded={dateMenuOpen} onclick={() => { dateMenuOpen = !dateMenuOpen; filterMenuOpen = false; }}><svg class="invoice-calendar-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7 2.8v4M17 2.8v4M3 9h18M7 12.5h.01M12 12.5h.01M17 12.5h.01M7 16.5h.01M12 16.5h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>{dateFilterLabel}</span><span class="text-slate-500">⌄</span></button>
+        <button type="button" class="invoice-date-trigger" aria-expanded={dateMenuOpen} onclick={() => { dateMenuOpen = !dateMenuOpen; filterMenuOpen = false; }}><svg class="invoice-calendar-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7 2.8v4M17 2.8v4M3 9h18M7 12.5h.01M12 12.5h.01M17 12.5h.01M7 16.5h.01M12 16.5h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span class="invoice-date-label">{dateFilterLabel}</span><span class="invoice-date-chevron" aria-hidden="true">⌄</span></button>
         {#if dateMenuOpen}<div class="invoice-popover invoice-date-menu">
-          {#each [{ value: "last12", label: "Últimos 12 meses" }, { value: "today", label: "Hoy" }, { value: "yesterday", label: "Ayer" }, { value: "last7", label: "Últimos 7 días" }, { value: "month", label: "Mes actual" }, { value: "previous_month", label: "Mes anterior" }, { value: "quarter", label: "Trimestre actual" }, { value: "previous_quarter", label: "Trimestre anterior" }, { value: "year", label: "Año actual" }, { value: "previous_year", label: "Año anterior" }] as preset}
-            <button type="button" class:active={datePreset === preset.value} onclick={() => { setDatePreset(preset.value as typeof datePreset); dateMenuOpen = false; }}>{preset.label}</button>
-          {/each}
-          <div class="invoice-popover-divider"></div><button type="button" onclick={() => { setDatePreset("custom"); dateMenuOpen = false; }}>Personalizado</button>
+          <aside class="invoice-date-presets">
+            <p>PERIODO</p>
+            {#each [{ value: "today", label: "Hoy" }, { value: "yesterday", label: "Ayer" }, { value: "last7", label: "Últimos 7 días" }, { value: "month", label: "Este mes" }, { value: "previous_month", label: "Mes anterior" }, { value: "quarter", label: "Este trimestre" }, { value: "previous_quarter", label: "Trimestre anterior" }, { value: "year", label: "Este año" }, { value: "last12", label: "Últimos 12 meses" }] as preset}
+              <button type="button" class:active={datePreset === preset.value} onclick={() => { setDatePreset(preset.value as typeof datePreset); dateMenuOpen = false; }}>{preset.label}</button>
+            {/each}
+          </aside>
+          <div class="invoice-range-calendar">
+            <header><button type="button" class="invoice-month-nav" aria-label="Mes anterior" onclick={() => moveCalendar(-1)}>‹</button><div><strong>Selecciona un intervalo</strong><span>{fromFilter ? displayDate(fromFilter) : "Fecha inicial"} → {toFilter ? displayDate(toFilter) : "Fecha final"}</span></div><button type="button" class="invoice-month-nav" aria-label="Mes siguiente" onclick={() => moveCalendar(1)}>›</button></header>
+            <div class="invoice-calendar-months">
+              {#each [0, 1] as offset}
+                <section><p class="invoice-month-label">{monthLabel(offset)}</p><div class="invoice-weekdays">{#each ["L", "M", "X", "J", "V", "S", "D"] as weekday}<span>{weekday}</span>{/each}</div><div class="invoice-days">{#each calendarDays(offset) as cell}<div>{#if cell}<button type="button" class:range-edge={cell.date === fromFilter || cell.date === toFilter} class:in-range={inCalendarRange(cell.date)} onclick={() => { setDatePreset("custom"); chooseCalendarDate(cell.date); }}>{cell.day}</button>{/if}</div>{/each}</div></section>
+              {/each}
+            </div>
+            <footer><button type="button" class="invoice-date-clear" onclick={() => { fromFilter = ""; toFilter = ""; datePreset = "all"; }}>Borrar</button><div><button type="button" class="invoice-date-cancel" onclick={() => (dateMenuOpen = false)}>Cancelar</button><button type="button" class="invoice-date-apply" disabled={!fromFilter || !toFilter} onclick={() => (dateMenuOpen = false)}>Aplicar</button></div></footer>
+          </div>
         </div>{/if}
       </div>
       <Button variant="ghost" class="!rounded-lg !px-3 !py-2 text-xs" onclick={clearInvoiceFilters}>Limpiar</Button>
@@ -380,7 +394,7 @@
 
   {#if loading}<div class="skeleton h-48"></div>{:else if filteredInvoices.length === 0}<Card lift={false} class="p-10 text-center"><p class="text-sm text-[var(--color-muted)]">{invoices.length === 0 ? "Todavía no hay facturas emitidas." : "No hay facturas que coincidan con los filtros."}</p></Card>{:else}<Card lift={false} class="invoice-table-card overflow-hidden p-0"><div class="overflow-x-auto"><table class="invoice-table w-full min-w-[1280px] text-left text-sm"><thead><tr><SortableHeader label="Fecha" active={invoiceSortKey === "date"} direction={invoiceSortDirection} onclick={() => sortInvoices("date")} /><SortableHeader label="Nº factura" active={invoiceSortKey === "number"} direction={invoiceSortDirection} onclick={() => sortInvoices("number")} /><SortableHeader label="Fecha operación" active={invoiceSortKey === "operation_date"} direction={invoiceSortDirection} onclick={() => sortInvoices("operation_date")} /><th>Vencimiento</th><SortableHeader label="Cliente" active={invoiceSortKey === "customer"} direction={invoiceSortDirection} onclick={() => sortInvoices("customer")} /><th>Descripción</th><th>Etiquetas</th><SortableHeader label="Subtotal" align="right" active={invoiceSortKey === "base"} direction={invoiceSortDirection} onclick={() => sortInvoices("base")} /><SortableHeader label="IVA" align="right" active={invoiceSortKey === "vat"} direction={invoiceSortDirection} onclick={() => sortInvoices("vat")} /><th class="text-right">Retención</th><SortableHeader label="Cobrado" align="right" active={invoiceSortKey === "paid"} direction={invoiceSortDirection} onclick={() => sortInvoices("paid")} /><SortableHeader label="Pendiente" align="right" active={invoiceSortKey === "pending"} direction={invoiceSortDirection} onclick={() => sortInvoices("pending")} /><th>Fecha de cobro</th><th class="text-right">⋮</th></tr></thead><tbody>{#each paginatedInvoices as invoice}<tr class="invoice-row-clickable" onclick={(event) => openInvoicePreview(event, invoice)}><td>{invoice.issued_at.slice(0, 10)}</td><td><p class="font-semibold">{invoice.series}{invoice.number}</p><p class="invoice-subline">{invoice.status === "draft" ? "Borrador" : invoice.kind === "simplified" ? "Simplificada" : "Factura"}</p></td><td>{invoice.operation_date}</td><td>{invoice.due_at ?? "—"}</td><td><p>{invoice.customer_name}</p>{#if invoice.customer_nif}<p class="invoice-subline">{invoice.customer_nif}</p>{/if}</td><td class="max-w-[13rem] truncate">{invoice.notes || "—"}</td><td><span class:invoice-tag-issued={invoice.status === "issued"} class:invoice-tag-draft={invoice.status === "draft"} class:invoice-tag-cancelled={invoice.status === "cancelled"} class="invoice-tag">{invoice.status === "issued" ? "Emitida" : invoice.status === "draft" ? "Borrador" : "Anulada"}</span>{#if isOverdue(invoice)} <span class="invoice-tag invoice-tag-danger">Vencida</span>{/if}</td><td class="text-right tabular">{formatEUR(invoice.base_cents)}</td><td class="text-right tabular">{formatEUR(invoice.vat_cents)}</td><td class="text-right tabular">{formatEUR(invoice.irpf_cents)}</td><td class="text-right tabular">{formatEUR(invoice.paid_cents)}</td><td class="text-right tabular font-semibold">{formatEUR(Math.max(0, invoice.total_cents - invoice.paid_cents))}</td><td>{invoice.payment_status === "paid" ? invoice.issued_at.slice(0, 10) : "—"}</td><td class="text-right"><div class="relative inline-block"><button type="button" class="invoice-more" aria-label={`Acciones de ${invoice.series}-${invoice.number}`} aria-expanded={actionInvoiceId === invoice.id} onclick={(event) => { event.stopPropagation(); actionInvoiceId = actionInvoiceId === invoice.id ? null : invoice.id; }}>⋮</button>{#if actionInvoiceId === invoice.id}<div class="invoice-popover invoice-actions-menu"><button type="button" onclick={(event) => { event.stopPropagation(); void print(invoice); }}>Enviar / descargar</button>{#if invoice.status === "draft"}<button type="button" onclick={(event) => { event.stopPropagation(); actionInvoiceId = null; editDraft(invoice); }}><span>Editar</span></button><button type="button" class="danger" onclick={(event) => { event.stopPropagation(); actionInvoiceId = null; void cancel(invoice); }}>Eliminar</button>{:else}<button type="button" onclick={(event) => { event.stopPropagation(); actionInvoiceId = null; selectedInvoice = invoice; paymentAmount = String(Math.max(0, invoice.total_cents - invoice.paid_cents) / 100); }}>Registrar cobro</button>{#if invoice.status === "issued"}<button type="button" onclick={(event) => { event.stopPropagation(); actionInvoiceId = null; void rectify(invoice); }}>Crear rectificativa</button>{/if}{/if}</div>{/if}</div></td></tr>{/each}</tbody><tfoot><tr><td colspan="7">{displayedInvoices.length} facturas</td><td class="text-right tabular">{formatEUR(displayedInvoices.reduce((sum, invoice) => sum + invoice.base_cents, 0))}</td><td class="text-right tabular">{formatEUR(displayedInvoices.reduce((sum, invoice) => sum + invoice.vat_cents, 0))}</td><td class="text-right tabular">{formatEUR(displayedInvoices.reduce((sum, invoice) => sum + invoice.irpf_cents, 0))}</td><td class="text-right tabular">{formatEUR(displayedInvoices.reduce((sum, invoice) => sum + invoice.paid_cents, 0))}</td><td class="text-right tabular">{formatEUR(displayedInvoices.reduce((sum, invoice) => sum + Math.max(0, invoice.total_cents - invoice.paid_cents), 0))}</td><td colspan="2"></td></tr></tfoot></table></div></Card>{/if}
 
-  <div class="invoice-pagination"><span>{displayedInvoices.length ? `${(invoicePage - 1) * invoicePageSize + 1} - ${Math.min(invoicePage * invoicePageSize, displayedInvoices.length)}` : "0"} de {displayedInvoices.length}</span><select class="invoice-page-size" aria-label="Filas por página" bind:value={invoicePageSize} onchange={() => (invoicePage = 1)}><option value={50}>50</option><option value={25}>25</option><option value={100}>100</option></select><div class="invoice-page-controls"><button type="button" aria-label="Página anterior" disabled={invoicePage === 1} onclick={() => changeInvoicePage(invoicePage - 1)}>‹</button><span>{invoicePage}</span><button type="button" aria-label="Página siguiente" disabled={invoicePage === invoicePageCount} onclick={() => changeInvoicePage(invoicePage + 1)}>›</button></div></div>
+  <div class="invoice-pagination"><span>{displayedInvoices.length ? `${(invoicePage - 1) * invoicePageSize + 1} - ${Math.min(invoicePage * invoicePageSize, displayedInvoices.length)}` : "0"} de {displayedInvoices.length}</span><select class="invoice-page-size" aria-label="Filas por página" bind:value={invoicePageSize} onchange={() => (invoicePage = 1)}><option value={50}>50</option><option value={25}>25</option><option value={100}>100</option></select><div class="invoice-page-controls"><button type="button" aria-label="Página anterior" disabled={invoicePage === 1} onclick={() => changeInvoicePage(invoicePage - 1)}><span aria-hidden="true">‹</span></button><span class="invoice-current-page">{invoicePage}</span><button type="button" aria-label="Página siguiente" disabled={invoicePage === invoicePageCount} onclick={() => changeInvoicePage(invoicePage + 1)}><span aria-hidden="true">›</span></button></div></div>
 
   <Modal open={!!selectedInvoice} title={selectedInvoice ? `Registrar cobro · ${selectedInvoice.series}-${selectedInvoice.number}` : "Registrar cobro"} size="sm" onclose={() => { selectedInvoice = null; paymentError = ""; }}>
     {#if selectedInvoice}<div class="space-y-4"><div class="rounded-xl border border-emerald-400/20 bg-emerald-400/[0.06] p-3"><p class="text-sm text-slate-400">Pendiente de cobro</p><p class="mt-1 text-2xl font-semibold text-emerald-200">{formatEUR(selectedInvoice.total_cents - selectedInvoice.paid_cents)}</p></div><label class="block text-sm"><span class="mb-1 block text-slate-400">Importe (€)</span><input class="field w-full" type="number" min="0.01" step="0.01" bind:value={paymentAmount} /></label><label class="block text-sm"><span class="mb-1 block text-slate-400">Método</span><select class="field w-full" bind:value={paymentMethod}><option value="bank_transfer">Transferencia</option><option value="card">Tarjeta</option><option value="cash">Efectivo</option><option value="other">Otro</option></select></label>{#if paymentError}<p class="rounded-lg border border-rose-400/25 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert">{paymentError}</p>{/if}<div class="flex justify-end gap-2"><Button variant="ghost" onclick={() => (selectedInvoice = null)}>Cancelar</Button><Button disabled={paying} onclick={addPayment}>{paying ? "Guardando…" : "Guardar cobro"}</Button></div></div>{/if}
@@ -403,8 +417,8 @@
     </div>
     <div class="grid gap-3 sm:grid-cols-3">
       <label class="text-sm"><span class="mb-1 block text-slate-400">Tipo</span><select class="field w-full" bind:value={manualForm.kind}><option value="complete">Completa</option><option value="simplified">Simplificada</option></select></label>
-      <label class="text-sm"><span class="mb-1 block text-slate-400">Fecha operación</span><input type="date" class="field w-full" bind:value={manualForm.operation_date} /></label>
-      <label class="text-sm"><span class="mb-1 block text-slate-400">Vencimiento</span><input type="date" class="field w-full" bind:value={manualForm.due_at} /></label>
+      <label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">Fecha operación</span><DatePicker bind:value={manualForm.operation_date} /></label>
+      <label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">Vencimiento</span><DatePicker bind:value={manualForm.due_at} align="right" /></label>
     </div>
     <div class="grid gap-3 sm:grid-cols-3">
       <label class="text-sm"><span class="mb-1 block text-slate-400">Cliente guardado</span><select class="field w-full" value={manualForm.customer_id} onchange={(event) => selectManualCustomer(event.currentTarget.value)}><option value="">Cliente nuevo / contado</option>{#each customers as customer}<option value={customer.id}>{customer.name}{customer.nif ? ` · ${customer.nif}` : ""}</option>{/each}</select></label>
@@ -424,7 +438,9 @@
   .invoice-toolbar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.75rem; padding:.5rem; border:1px solid var(--color-border); border-radius:.7rem; background:var(--color-obsidian-panel); }
   .invoice-quick-status, .invoice-date-trigger, .invoice-filter-trigger { min-height:2.35rem; }
   .invoice-filter-trigger, .invoice-date-trigger { border:1px solid var(--color-border); border-radius:.45rem; background:transparent; color:var(--color-text); padding:.45rem .7rem; cursor:pointer; font-size:.84rem; }
-  .invoice-date-trigger { display:flex; align-items:center; gap:.5rem; min-width:15rem; justify-content:space-between; }
+  .invoice-date-trigger { display:flex; align-items:center; gap:.65rem; min-width:15rem; justify-content:flex-start; padding-inline:.8rem; }
+  .invoice-date-label { flex:1; text-align:left; white-space:nowrap; }
+  .invoice-date-chevron { display:grid; width:1.5rem; height:1.5rem; flex:none; place-items:center; margin-left:.35rem; color:var(--color-muted-dim); font-size:.85rem; line-height:1; }
   .invoice-calendar-icon { width:1.15rem; height:1.15rem; flex:none; }
   .invoice-search-icon { position:absolute; left:.75rem; top:50%; width:1.2rem; height:1.2rem; transform:translateY(-50%); color:var(--color-muted); }
   .invoice-search-input { padding-left:2.55rem !important; }
@@ -432,7 +448,29 @@
   .invoice-filter-count { color:var(--color-purple); font-size:.72rem; }
   .invoice-popover { position:absolute; z-index:40; top:calc(100% + .45rem); min-width:15rem; border:1px solid var(--color-border); border-radius:.55rem; background:var(--color-obsidian-elevated); box-shadow:0 14px 32px rgba(0,0,0,.35); padding:.4rem; }
   .invoice-filter-menu { left:0; }
-  .invoice-date-menu { right:0; min-width:16rem; }
+  .invoice-date-menu { right:0; display:grid; grid-template-columns:10.5rem minmax(34rem,1fr); width:min(48rem,calc(100vw - 2rem)); padding:0; overflow:hidden; }
+  .invoice-date-presets { padding:.75rem; border-right:1px solid var(--color-border); background:rgba(0,0,0,.12); }
+  .invoice-date-presets p { padding:.35rem .65rem .55rem; color:var(--color-muted-dim); font-size:.62rem; font-weight:700; letter-spacing:.14em; }
+  .invoice-range-calendar { min-width:0; padding:1rem; }
+  .invoice-range-calendar header { display:grid; grid-template-columns:2.25rem 1fr 2.25rem; align-items:center; gap:.75rem; margin-bottom:1rem; }
+  .invoice-range-calendar header div { text-align:center; }
+  .invoice-range-calendar header strong { display:block; color:var(--color-text); font-size:.85rem; }
+  .invoice-range-calendar header span { display:block; margin-top:.15rem; color:var(--color-muted); font-size:.7rem; }
+  .invoice-popover button.invoice-month-nav { display:grid; width:2.25rem; height:2.25rem; padding:0 0 .15rem; place-items:center; border:1px solid var(--color-border); border-radius:.5rem; font-size:1.2rem; text-align:center; }
+  .invoice-calendar-months { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1.5rem; }
+  .invoice-month-label { margin-bottom:.65rem; color:var(--color-text); font-size:.78rem; font-weight:700; text-align:center; text-transform:capitalize; }
+  .invoice-weekdays,.invoice-days { display:grid; grid-template-columns:repeat(7,1fr); text-align:center; }
+  .invoice-weekdays { margin-bottom:.25rem; color:var(--color-muted-dim); font-size:.6rem; font-weight:700; }
+  .invoice-days > div { display:grid; min-height:2rem; place-items:center; }
+  .invoice-popover .invoice-days button { display:grid; width:2rem; height:2rem; padding:0; place-items:center; border-radius:50%; color:var(--color-muted); font-size:.72rem; text-align:center; }
+  .invoice-popover .invoice-days button.in-range { border-radius:0; background:rgba(168,85,247,.14); color:var(--color-text); }
+  .invoice-popover .invoice-days button.range-edge { border-radius:50%; background:var(--color-purple); color:white; font-weight:700; }
+  .invoice-range-calendar footer { display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-top:1rem; padding-top:.85rem; border-top:1px solid var(--color-border); }
+  .invoice-range-calendar footer > div { display:flex; gap:.5rem; }
+  .invoice-popover button.invoice-date-clear,.invoice-popover button.invoice-date-cancel,.invoice-popover button.invoice-date-apply { width:auto; padding:.5rem .8rem; text-align:center; }
+  .invoice-popover button.invoice-date-clear { color:var(--color-muted); }
+  .invoice-popover button.invoice-date-apply { background:var(--color-purple); color:white; font-weight:700; }
+  .invoice-popover button.invoice-date-apply:disabled { opacity:.4; cursor:not-allowed; }
   .invoice-actions-menu { right:0; top:calc(100% + .35rem); min-width:12rem; }
   .invoice-popover button { display:block; width:100%; border:0; border-radius:.35rem; background:transparent; color:var(--color-text); padding:.62rem .65rem; text-align:left; cursor:pointer; font-size:.84rem; }
   .invoice-popover button:hover, .invoice-popover button.active { background:var(--color-purple-soft); color:var(--color-purple-bright); }
@@ -440,16 +478,17 @@
   .invoice-popover button.has-arrow { display:flex; justify-content:space-between; align-items:center; }
   .invoice-popover button.has-arrow span { font-size:1.35rem; line-height:1; }
   .invoice-popover button.invoice-back { color:var(--color-purple); font-weight:600; margin-bottom:.25rem; }
-  .invoice-popover-divider { height:1px; margin:.35rem 0; background:var(--color-border); }
   .invoice-table { border-collapse:separate; border-spacing:0; }
   .invoice-table th { background:var(--color-obsidian-elevated); color:var(--color-muted-dim); font-size:.66rem; font-weight:600; letter-spacing:.04em; padding:.65rem .7rem; white-space:nowrap; }
   .invoice-table td { border-top:1px solid var(--color-border-soft); color:var(--color-text); padding:.72rem .7rem; white-space:nowrap; }
   .invoice-table tbody tr:hover { background:var(--color-purple-mist); }
   .invoice-table tfoot td { border-top:1px solid var(--color-border); color:var(--color-text); font-weight:700; padding:.8rem .7rem; }
-  .invoice-pagination { display:flex; align-items:center; gap:.7rem; min-height:2.5rem; padding:.35rem .6rem; color:var(--color-muted); font-size:.72rem; }
+  .invoice-pagination { display:flex; align-items:center; gap:.7rem; min-height:3rem; padding:.35rem 1rem .35rem .6rem; color:var(--color-muted); font-size:.72rem; }
   .invoice-page-size { border:1px solid var(--color-border); border-radius:.3rem; background:var(--color-obsidian-panel); color:var(--color-text); padding:.25rem .4rem; font-size:.7rem; }
-  .invoice-page-controls { display:flex; align-items:center; gap:.4rem; margin-left:auto; }
-  .invoice-page-controls button { border:0; background:transparent; color:var(--color-muted); cursor:pointer; font-size:1rem; padding:.1rem .3rem; }
+  .invoice-page-controls { display:flex; align-items:center; gap:.35rem; margin-left:auto; padding-left:.75rem; }
+  .invoice-page-controls button { display:grid; width:2rem; height:2rem; flex:none; place-items:center; border:1px solid var(--color-border); border-radius:.45rem; background:var(--color-obsidian-panel); color:var(--color-muted); cursor:pointer; font-size:1.15rem; line-height:1; padding:0 0 .1rem; transition:border-color .2s,background .2s,color .2s; }
+  .invoice-page-controls button:not(:disabled):hover { border-color:var(--color-border-strong); background:var(--color-purple-soft); color:var(--color-purple-bright); }
+  .invoice-current-page { min-width:1.75rem; text-align:center; font-variant-numeric:tabular-nums; }
   .invoice-page-controls button:disabled { opacity:.3; cursor:default; }
   .invoice-subline { color:var(--color-muted-dim); font-size:.68rem; margin-top:.15rem; }
   .invoice-tag { display:inline-block; border-radius:.25rem; background:rgba(148,139,153,.14); color:var(--color-muted); font-size:.66rem; padding:.16rem .35rem; }
@@ -458,6 +497,14 @@
   .invoice-tag-cancelled { background:rgba(251,113,133,.16); color:#fb7185; }
   .invoice-tag-danger { background:rgba(251,113,133,.12); color:var(--color-danger); }
   .invoice-more { border:0; background:transparent; color:var(--color-muted); font-size:1.2rem; line-height:1; padding:.2rem .45rem; cursor:pointer; }
+  @media (max-width: 760px) {
+    .invoice-date-menu { grid-template-columns:1fr; width:min(34rem,calc(100vw - 1rem)); }
+    .invoice-date-presets { display:flex; gap:.25rem; overflow-x:auto; border-right:0; border-bottom:1px solid var(--color-border); }
+    .invoice-date-presets p { display:none; }
+    .invoice-date-presets button { flex:none; width:auto; }
+    .invoice-calendar-months { grid-template-columns:1fr; }
+    .invoice-calendar-months section:nth-child(2) { display:none; }
+  }
   .invoice-more:hover { color:var(--color-purple-bright); }
 </style>
 
@@ -465,13 +512,24 @@
 <Modal open={previewOpen} title={previewInvoice ? `Vista previa · ${previewInvoice.series}-${previewInvoice.number}` : "Vista previa de factura"} size="xl" onclose={() => (previewOpen = false)}>
   {#if previewInvoice}
     <div class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-400/20 bg-emerald-400/[0.06] px-4 py-3"><div><p class="font-semibold text-emerald-200">Factura emitida correctamente</p><p class="text-xs text-slate-400">Revísala antes de imprimirla o guardarla como PDF.</p></div><div class="flex flex-wrap gap-2"><Button variant="ghost" onclick={() => previewInvoice && rectify(previewInvoice)}>Crear rectificativa</Button><Button variant="secondary" onclick={() => { if (previewInvoice) { selectedInvoice = previewInvoice; paymentAmount = String(Math.max(0, previewInvoice.total_cents - previewInvoice.paid_cents) / 100); } }}>Registrar cobro</Button><Button variant="primary" onclick={() => previewInvoice && print(previewInvoice)}>Imprimir / guardar PDF</Button></div></div>
-    <div class="mx-auto max-w-3xl rounded-lg bg-white p-7 text-slate-900 shadow-2xl sm:p-10">
-      <div class="flex flex-wrap justify-between gap-8 border-b border-slate-200 pb-7"><div><p class="text-2xl font-bold tracking-tight">{previewInvoice.seller_trade_name}</p><p class="mt-2 text-sm text-slate-500">{previewInvoice.seller_legal_name}<br />NIF: {previewInvoice.seller_nif}</p></div><div class="text-right"><p class="text-sm font-semibold uppercase tracking-[0.18em] text-violet-600">{previewInvoice.kind === "simplified" ? "Factura simplificada" : "Factura"}</p><p class="mt-2 text-xl font-bold">{previewInvoice.series}-{previewInvoice.number}</p><p class="mt-1 text-sm text-slate-500">Emisión: {new Date(previewInvoice.issued_at).toLocaleDateString("es-ES")}<br />Operación: {previewInvoice.operation_date}{#if previewInvoice.due_at}<br />Vencimiento: {previewInvoice.due_at}{/if}</p></div></div>
-      <div class="grid gap-4 border-b border-slate-200 py-6 sm:grid-cols-2"><div><p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Cliente</p><p class="mt-1 font-semibold">{previewInvoice.customer_name}</p>{#if previewInvoice.customer_nif}<p class="text-sm text-slate-500">NIF: {previewInvoice.customer_nif}</p>{/if}{#if previewInvoice.customer_email}<p class="text-sm text-slate-500">{previewInvoice.customer_email}</p>{/if}</div><div class="sm:text-right"><p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Estado</p><p class="mt-1 font-semibold text-emerald-600">Emitida · Pendiente de cobro</p></div></div>
-      <table class="w-full text-sm"><thead><tr class="border-b border-slate-200 text-left text-xs uppercase tracking-wider text-slate-400"><th class="py-3">Concepto</th><th class="py-3 text-right">Cant.</th><th class="py-3 text-right">Precio</th><th class="py-3 text-right">IVA</th><th class="py-3 text-right">Importe</th></tr></thead><tbody>{#each previewInvoice.lines as line}<tr class="border-b border-slate-100"><td class="py-3 font-medium">{line.description}</td><td class="py-3 text-right">{line.quantity}</td><td class="py-3 text-right">{formatEUR(line.unit_price_cents)}</td><td class="py-3 text-right">{line.vat_rate}%</td><td class="py-3 text-right font-medium">{formatEUR(line.total_cents)}</td></tr>{/each}</tbody></table>
-      <div class="ml-auto mt-7 max-w-xs space-y-2 text-sm"><div class="flex justify-between"><span class="text-slate-500">Base imponible</span><strong>{formatEUR(previewInvoice.base_cents)}</strong></div><div class="flex justify-between"><span class="text-slate-500">IVA</span><strong>{formatEUR(previewInvoice.vat_cents)}</strong></div>{#if previewInvoice.irpf_cents}<div class="flex justify-between"><span class="text-slate-500">IRPF ({previewInvoice.irpf_rate}%)</span><strong>-{formatEUR(previewInvoice.irpf_cents)}</strong></div>{/if}<div class="flex justify-between border-t border-slate-300 pt-3 text-lg"><span class="font-semibold">Total</span><strong>{formatEUR(previewInvoice.total_cents)}</strong></div></div>
-      {#if previewInvoice.notes}<p class="mt-8 border-t border-slate-200 pt-4 text-sm text-slate-500">{previewInvoice.notes}</p>{/if}
-    </div>
+    <CommercialDocument
+      company={$activeCompany}
+      documentType={previewInvoice.kind === "simplified" ? "Factura simplificada" : previewInvoice.kind === "rectifying" ? "Factura rectificativa" : "Factura"}
+      number={`${previewInvoice.series}-${previewInvoice.number}`}
+      operationDate={previewInvoice.operation_date}
+      dueDate={previewInvoice.due_at}
+      customerName={previewInvoice.customer_name}
+      customerNif={previewInvoice.customer_nif}
+      customerEmail={previewInvoice.customer_email}
+      introduction={previewInvoice.notes}
+      lines={previewInvoice.lines.map((line) => ({ description: line.description, quantity: line.quantity, unit_price_cents: line.unit_price_cents, vat_rate: line.vat_rate, total_cents: line.total_cents }))}
+      baseCents={previewInvoice.base_cents}
+      vatCents={previewInvoice.vat_cents}
+      irpfCents={previewInvoice.irpf_cents}
+      totalCents={previewInvoice.total_cents}
+      paidCents={previewInvoice.paid_cents}
+      status={previewInvoice.status === "issued" ? "Emitida" : previewInvoice.status === "draft" ? "Borrador" : "Anulada"}
+    />
     <div class="mt-4 flex justify-end"><Button variant="ghost" onclick={() => (previewOpen = false)}>Cerrar vista previa</Button></div>
   {/if}
 </Modal>

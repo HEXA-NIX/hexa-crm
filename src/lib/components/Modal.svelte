@@ -57,7 +57,7 @@
 <svelte:window onkeydown={open ? onKey : undefined} />
 
 {#if open}
-  <div use:portal class="fixed inset-0 z-[9999] flex items-center justify-center overflow-hidden p-3 sm:p-4 md:p-6">
+  <div use:portal class="modal-portal fixed inset-0 z-[9999] flex items-center justify-center overflow-hidden p-3 sm:p-4 md:p-6">
     <button
       class="absolute inset-0 bg-black/75 backdrop-blur-md"
       aria-label="Cerrar"

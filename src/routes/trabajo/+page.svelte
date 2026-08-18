@@ -21,9 +21,10 @@
   import Badge from "$lib/components/Badge.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import Select from "$lib/components/Select.svelte";
+  import DatePicker from "$lib/components/DatePicker.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import AssigneeAvatar from "$lib/components/users/AssigneeAvatar.svelte";
-  import { isTaskDueSoon, isTaskOverdue, sortTasksByDueDate } from "$lib/work/task-dates";
+  import { isTaskDueSoon, isTaskOverdue, sortTasksByDueDate, taskAssigneeId, taskDueDate } from "$lib/work/task-dates";
 
   let items = $state<WorkItem[]>([]);
   let categories = $state<WorkCategory[]>([]);
@@ -447,7 +448,7 @@
       if (filterStatus && item.status !== filterStatus) return false;
       if (filterType && item.type !== filterType) return false;
       if (filterPriority && item.priority !== filterPriority) return false;
-      if (filterAssignee && String(item.assignee_id || "") !== filterAssignee) return false;
+      if (filterAssignee && String(taskAssigneeId(item) || "") !== filterAssignee) return false;
       if (filterProject) {
         if (filterProject === "none") {
           if (item.project_id !== null) return false;
@@ -770,9 +771,9 @@
                         <AssigneeAvatar name={item.assignee_name} avatar={item.assignee_avatar_data_url} status={item.status} />
                       {/if}
 
-                      {#if item.due_date}
+                      {#if taskDueDate(item)}
                         <span class="text-xs tabular {isTaskOverdue(item) ? 'font-semibold text-rose-300' : isTaskDueSoon(item) ? 'font-semibold text-amber-300' : 'text-[var(--color-muted-dim)]'}">
-                          📅 {formatDate(item.due_date)}
+                          📅 {formatDate(taskDueDate(item))}
                         </span>
                       {/if}
                     </div>
@@ -865,21 +866,11 @@
     <div class="grid gap-3 sm:grid-cols-2">
       <div class="space-y-1">
         <label for="task-start-date" class="text-xs font-medium text-[var(--color-muted)]">Fecha de inicio</label>
-        <input
-          id="task-start-date"
-          type="date"
-          bind:value={detailForm.start_date}
-          class="field w-full text-sm"
-        />
+        <DatePicker bind:value={detailForm.start_date} ariaLabel="Fecha de inicio" />
       </div>
       <div class="space-y-1">
         <label for="task-due-date" class="text-xs font-medium text-[var(--color-muted)]">Fecha límite</label>
-        <input
-          id="task-due-date"
-          type="date"
-          bind:value={detailForm.due_date}
-          class="field w-full text-sm"
-        />
+        <DatePicker bind:value={detailForm.due_date} ariaLabel="Fecha límite" />
       </div>
     </div>
 

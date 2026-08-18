@@ -762,6 +762,88 @@ export type WorkProjectDocumentInput = Omit<WorkProjectDocument, "id" | "updated
 
 export type WorkProjectKind = "own" | "client" | "internal";
 
+export type ProjectHealth = "on_track" | "at_risk" | "off_track" | "on_hold";
+export type ProjectManagementStatus = "open" | "mitigated" | "resolved" | "closed";
+
+export type ProjectUpdate = {
+  id: string;
+  health: ProjectHealth;
+  summary: string;
+  achievements: string;
+  blockers: string;
+  next_steps: string;
+  decisions_needed: string;
+  author: string;
+  created_at: string;
+};
+
+export type ProjectOperationalMilestone = {
+  id: string;
+  title: string;
+  kind: "delivery" | "contractual" | "internal";
+  target_date: string | null;
+  owner_id: number | null;
+  status: "pending" | "in_progress" | "done" | "missed";
+  completion_criteria: string;
+};
+
+export type ProjectRisk = {
+  id: string;
+  title: string;
+  probability: "low" | "medium" | "high";
+  impact: "low" | "medium" | "high";
+  owner_id: number | null;
+  mitigation: string;
+  review_date: string | null;
+  status: ProjectManagementStatus;
+};
+
+export type ProjectDecision = {
+  id: string;
+  title: string;
+  context: string;
+  decision: string;
+  owner_id: number | null;
+  due_date: string | null;
+  status: "pending" | "decided" | "discarded";
+  decided_at: string | null;
+};
+
+export type ProjectDependency = {
+  id: string;
+  project_id: number;
+  relation: "blocked_by" | "blocks" | "related";
+  notes: string;
+};
+
+export type ProjectCycle = {
+  id: string;
+  name: string;
+  goal: string;
+  start_date: string;
+  end_date: string;
+  capacity_points: number;
+  status: "planned" | "active" | "completed";
+};
+
+export type ProjectCapacity = {
+  user_id: number;
+  weekly_capacity_hours: number;
+};
+
+export type ProjectManagement = {
+  lead_id: number | null;
+  update_frequency_days: number;
+  task_estimates: Record<string, number>;
+  updates: ProjectUpdate[];
+  milestones: ProjectOperationalMilestone[];
+  risks: ProjectRisk[];
+  decisions: ProjectDecision[];
+  dependencies: ProjectDependency[];
+  cycles: ProjectCycle[];
+  capacity: ProjectCapacity[];
+};
+
 export type ProjectTechnicalProfile = {
   frontend: string[];
   backend: string[];
@@ -831,6 +913,7 @@ export type WorkProject = {
   prd?: string;
   tech_stack?: string[];
   brief?: ProjectBrief;
+  management?: ProjectManagement;
   logo_data_url?: string;
   name: string;
   description: string;
@@ -857,6 +940,7 @@ export type WorkProjectInput = {
   prd?: string;
   tech_stack?: string[];
   brief?: ProjectBriefInput;
+  management?: Partial<ProjectManagement>;
   logo_data_url?: string;
   name: string;
   description?: string;
@@ -918,6 +1002,10 @@ export type WorkItem = {
   priority: WorkPriority;
   start_date: string | null;
   due_date: string | null;
+  /** Responsable efectivo; hereda del padre sin modificar assignee_id. */
+  effective_assignee_id?: number | null;
+  /** Vencimiento efectivo; hereda del padre sin modificar due_date. */
+  effective_due_date?: string | null;
   sort_order: number;
   source_type: string | null;
   source_key: string | null;

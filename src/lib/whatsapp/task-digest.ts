@@ -1,5 +1,5 @@
 import type { WorkItem, WorkProject } from "$lib/types";
-import { isTaskPendingWork } from "$lib/work/task-dates";
+import { isTaskPendingWork, taskDueDate } from "$lib/work/task-dates";
 
 function validDay(value: string | null | undefined): number | null {
   const raw = typeof value === "string" ? value.trim().slice(0, 10) : "";
@@ -14,10 +14,10 @@ export function upcomingTasksForDigest(tasks: WorkItem[], now = new Date(), days
   return tasks
     .filter(isTaskPendingWork)
     .filter((task) => {
-      const due = validDay(task.due_date);
+      const due = validDay(taskDueDate(task));
       return due !== null && due <= end;
     })
-    .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)) || a.title.localeCompare(b.title, "es"));
+    .sort((a, b) => String(taskDueDate(a)).localeCompare(String(taskDueDate(b))) || a.title.localeCompare(b.title, "es"));
 }
 
 export function buildTaskDigestMessages(tasks: WorkItem[], projects: WorkProject[], generatedAt = new Date(), appUrl = ""): string[] {
@@ -38,7 +38,7 @@ export function buildTaskDigestMessages(tasks: WorkItem[], projects: WorkProject
       return Number.isFinite(completedAt) && completedAt >= weekAgo;
     }).length;
     const actionable = dueSoon.filter((task) => task.project_id === projectId);
-    const overdue = actionable.filter((task) => (validDay(task.due_date) ?? today) < today).length;
+    const overdue = actionable.filter((task) => (validDay(taskDueDate(task)) ?? today) < today).length;
     const link = baseUrl ? `${baseUrl}/proyectos/${project.uid}?estado=pendientes` : "";
     return [
       `📁 *${project.name}*`,

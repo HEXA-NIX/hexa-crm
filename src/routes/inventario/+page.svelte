@@ -21,6 +21,7 @@
   import Badge from "$lib/components/Badge.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import Input from "$lib/components/Input.svelte";
+  import DatePicker from "$lib/components/DatePicker.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Select from "$lib/components/Select.svelte";
   import { showToast } from "$lib/stores/ui";
@@ -1271,9 +1272,9 @@
         />
         <div class="flex items-center gap-1.5 text-xs text-[var(--color-muted)]">
           <span>Desde</span>
-          <input type="date" bind:value={movementFromDate} class="field !py-1 !px-2 text-xs" />
+          <DatePicker bind:value={movementFromDate} class="w-40" ariaLabel="Movimientos desde" />
           <span>Hasta</span>
-          <input type="date" bind:value={movementToDate} class="field !py-1 !px-2 text-xs" />
+          <DatePicker bind:value={movementToDate} class="w-40" ariaLabel="Movimientos hasta" />
         </div>
         <div class="ml-auto flex gap-2">
           {#if movementQuery || movementTypeFilter || movementProductFilter || movementLocationFilter || movementFromDate || movementToDate}

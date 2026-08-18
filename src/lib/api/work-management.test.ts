@@ -165,6 +165,61 @@ describe("Trabajo Backend & API Tests", () => {
       expect(items.find((item) => item.id === parent.id)?.completed_at).toBeNull();
     });
 
+    it("inherits the parent assignee and due date when a subtask leaves them empty", async () => {
+      const members = await browserApi.listWorkMembers(adminToken);
+      const admin = members.find((member) => member.display_name === "Administrador") ?? members[0];
+      const parent = await browserApi.upsertWorkItem(
+        {
+          title: "Lanzamiento",
+          assignee_id: admin.id,
+          due_date: "2026-08-20",
+        },
+        adminToken,
+      );
+      const child = await browserApi.upsertWorkItem(
+        { title: "Publicar campaña", parent_id: parent.id },
+        adminToken,
+      );
+
+      expect(child.assignee_id).toBeNull();
+      expect(child.effective_assignee_id).toBe(admin.id);
+      expect(child.assignee_name).toBe(admin.display_name);
+      expect(child.due_date).toBeNull();
+      expect(child.effective_due_date?.slice(0, 10)).toBe("2026-08-20");
+
+      await browserApi.upsertWorkItem(
+        { id: parent.id, title: parent.title, due_date: "2026-08-22" },
+        adminToken,
+      );
+      const inherited = (await browserApi.listWorkItems({}, adminToken))
+        .find((item) => item.id === child.id);
+      expect(inherited?.due_date).toBeNull();
+      expect(inherited?.effective_due_date?.slice(0, 10)).toBe("2026-08-22");
+
+      const filtered = await browserApi.listWorkItems({ assignee_id: admin.id }, adminToken);
+      expect(filtered.some((item) => item.id === child.id)).toBe(true);
+    });
+
+    it("keeps explicit subtask planning values instead of inheriting them", async () => {
+      const members = await browserApi.listWorkMembers(adminToken);
+      const parent = await browserApi.upsertWorkItem(
+        { title: "Pare", assignee_id: members[0].id, due_date: "2026-08-20" },
+        adminToken,
+      );
+      const child = await browserApi.upsertWorkItem(
+        {
+          title: "Filla",
+          parent_id: parent.id,
+          assignee_id: members.at(-1)!.id,
+          due_date: "2026-08-18",
+        },
+        adminToken,
+      );
+
+      expect(child.assignee_id).toBe(members.at(-1)!.id);
+      expect(child.due_date?.slice(0, 10)).toBe("2026-08-18");
+    });
+
     it("prevents nested subtasks", async () => {
       const parent = await browserApi.upsertWorkItem({ title: "Padre" }, adminToken);
       const child = await browserApi.upsertWorkItem(
@@ -466,6 +521,11 @@ describe("Trabajo Backend & API Tests", () => {
       const task = await browserApi.upsertWorkItem({ title: "Tarea de Voura", project_id: project.id }, adminToken);
       expect(task.company_id).toBe(company.id);
       expect((await browserApi.listWorkItems({ project_id: project.id }, adminToken)).some((item) => item.id === task.id)).toBe(true);
+
+      browserApi.set_active_company(project.company_id, adminToken);
+      const tasksFromPortfolio = await browserApi.listWorkItems({ project_id: project.id }, adminToken);
+      expect(tasksFromPortfolio.some((item) => item.id === task.id)).toBe(true);
+      expect((await browserApi.listWorkItems({}, adminToken)).some((item) => item.id === task.id)).toBe(false);
     });
 
     it("permite corregir el tipo de empresa desde su ficha", () => {

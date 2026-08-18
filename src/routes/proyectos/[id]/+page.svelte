@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from "$app/stores";
   import { goto } from "$app/navigation";
-  import { api, supportsOrcaWorker, usesLocalOrcaBridge } from "$lib/api/client";
+  import { api } from "$lib/api/client";
   import { session, isAdmin, currentUser, setActiveCompanyLocal } from "$lib/stores/session";
   import { showToast } from "$lib/stores/ui";
   import type {
@@ -30,13 +30,12 @@
   import Modal from "$lib/components/Modal.svelte";
   import Select from "$lib/components/Select.svelte";
   import Input from "$lib/components/Input.svelte";
+  import DatePicker from "$lib/components/DatePicker.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import RichDescription from "$lib/components/RichDescription.svelte";
   import RichDescriptionEditor from "$lib/components/RichDescriptionEditor.svelte";
   import { countImportedTasks, parseTaskImport } from "$lib/work/task-import";
   import { formatTaskForAi } from "$lib/work/task-ai-copy";
-  import { canDispatchToOrca, ORCA_SOURCE, orcaExecutionLabel, orcaExecutionState, workItemUpdateInput } from "$lib/work/orca-task";
-  import { dispatchToLocalOrca, getLocalOrcaRun } from "$lib/work/orca-bridge";
   import { calculateTaskProgress } from "$lib/projects/task-progress";
   import { projectStatusLabel, projectStatusTone } from "$lib/projects/presentation";
   import { buildProjectEconomicSeries } from "$lib/projects/project-economics";
@@ -46,20 +45,24 @@
   import { availableMilestoneMonths, hasDuplicateMilestoneMonths, nextMilestoneMonth } from "$lib/projects/milestone-months";
   import { projectLogoDataUrl } from "$lib/projects/project-logo";
   import ProjectProgress from "$lib/components/projects/ProjectProgress.svelte";
+  import ProjectManagementCenter from "$lib/components/projects/ProjectManagementCenter.svelte";
   import TechnologyPicker from "$lib/components/projects/TechnologyPicker.svelte";
   import TechnologyBadge from "$lib/components/projects/TechnologyBadge.svelte";
   import AssigneeAvatar from "$lib/components/users/AssigneeAvatar.svelte";
-  import { isTaskDueSoon, isTaskOverdue, isTaskPendingWork, sortTasksByDueDate } from "$lib/work/task-dates";
+  import { isTaskDueSoon, isTaskOverdue, isTaskPendingWork, sortTasksByDueDate, taskAssigneeId, taskDueDate } from "$lib/work/task-dates";
   import { browser } from "$app/environment";
 
   const projectReference = $derived($page.params.id);
-  type ProjectSection = "resumen" | "informacion" | "gestion" | "solicitudes" | "economia";
+  type ProjectSection = "resumen" | "plan" | "trabajo" | "equipo" | "solicitudes" | "documentos" | "economia" | "actividad";
   const projectSections: { id: ProjectSection; label: string }[] = [
     { id: "resumen", label: "Resumen" },
-    { id: "informacion", label: "Información" },
-    { id: "gestion", label: "Gestión" },
+    { id: "plan", label: "Plan" },
+    { id: "trabajo", label: "Trabajo" },
+    { id: "equipo", label: "Equipo" },
     { id: "solicitudes", label: "Solicitudes" },
+    { id: "documentos", label: "Documentos" },
     { id: "economia", label: "Economía" },
+    { id: "actividad", label: "Actividad" },
   ];
   const activeProjectSection = $derived.by<ProjectSection>(() => {
     const requested = $page.url.searchParams.get("seccion");
@@ -186,8 +189,6 @@
   let taskSaving = $state(false);
   let reviewDraft = $state("");
   let reviewSaving = $state(false);
-  let orcaDispatchingTaskId = $state<number | null>(null);
-  let syncingLocalOrcaRuns = $state(false);
   let detailForm = $state({
     title: "",
     description: "",
@@ -423,15 +424,6 @@
     if (browser) localStorage.setItem("hexa-project-view", viewMode);
   });
 
-  $effect(() => {
-    if (!usesLocalOrcaBridge()) return;
-    const hasActiveRuns = tasks.some((task) => [ORCA_SOURCE.queued, ORCA_SOURCE.running].includes(task.source_type as typeof ORCA_SOURCE.queued));
-    if (!hasActiveRuns) return;
-    void syncLocalOrcaRuns();
-    const timer = setInterval(() => void syncLocalOrcaRuns(), 3_000);
-    return () => clearInterval(timer);
-  });
-
   function clearTaskFilters() {
     filterText = "";
     filterStatus = "";
@@ -453,7 +445,7 @@
     const overdue = openTasks.filter((task) => isTaskOverdue(task, today)).length;
     const dueSoon = openTasks.filter((task) => isTaskDueSoon(task, today)).length;
     const urgent = openTasks.filter((task) => task.priority === "urgent").length;
-    const unassigned = openTasks.filter((task) => !task.assignee_id).length;
+    const unassigned = openTasks.filter((task) => !taskAssigneeId(task)).length;
     const targetOverdue = Boolean(
       project?.target_date &&
       project.status !== "done" &&
@@ -499,7 +491,7 @@
       if (filterStatus && filterStatus !== "pending" && task.status !== filterStatus) return false;
       if (filterType && task.type !== filterType) return false;
       if (filterPriority && task.priority !== filterPriority) return false;
-      if (filterAssignee && String(task.assignee_id || "") !== filterAssignee) return false;
+      if (filterAssignee && String(taskAssigneeId(task) || "") !== filterAssignee) return false;
       return true;
     }))
   );
@@ -1263,107 +1255,6 @@
     }
   }
 
-  async function dispatchTaskToOrca(task: WorkItem) {
-    if (!$isAdmin) {
-      showToast("Solo los administradores pueden enviar tareas a Orca", "err");
-      return;
-    }
-    if (!supportsOrcaWorker()) {
-      showToast("Orca requiere la versión web de Hexa", "err");
-      return;
-    }
-    if (!canDispatchToOrca(task)) {
-      showToast("Esta tarea no se puede enviar a Orca en su estado actual", "err");
-      return;
-    }
-    orcaDispatchingTaskId = task.id;
-    try {
-      if (usesLocalOrcaBridge()) {
-        const run = await dispatchToLocalOrca({
-          task,
-          subtasks: taskSubtasks(task.id),
-          project: project ? { name: project.name, description: project.description } : null,
-        });
-        await api.upsertWorkItem(workItemUpdateInput(task, {
-          status: "planned",
-          source_type: ORCA_SOURCE.queued,
-          source_key: run.id,
-          source_href: run.worktree_id,
-        }));
-      } else {
-        await api.upsertWorkItem(workItemUpdateInput(task, {
-          status: "planned",
-          source_type: ORCA_SOURCE.queued,
-          source_key: crypto.randomUUID(),
-          source_href: null,
-        }));
-      }
-      detailModalOpen = false;
-      showToast("Tarea enviada a la cola local de Orca");
-      await loadData();
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : "No se pudo enviar la tarea a Orca", "err");
-    } finally {
-      orcaDispatchingTaskId = null;
-    }
-  }
-
-  async function syncLocalOrcaRuns() {
-    if (syncingLocalOrcaRuns || !usesLocalOrcaBridge()) return;
-    const activeTasks = tasks.filter(
-      (task) => task.parent_id == null && [ORCA_SOURCE.queued, ORCA_SOURCE.running].includes(task.source_type as typeof ORCA_SOURCE.queued) && task.source_key,
-    );
-    if (!activeTasks.length) return;
-    syncingLocalOrcaRuns = true;
-    let changed = false;
-    try {
-      for (const task of activeTasks) {
-        try {
-          const run = await getLocalOrcaRun(task.source_key!);
-          if (run.status === "running" && (task.source_type !== ORCA_SOURCE.running || task.source_href !== run.worktree_id)) {
-            await api.upsertWorkItem(workItemUpdateInput(task, {
-              status: "in_progress",
-              source_type: ORCA_SOURCE.running,
-              source_href: run.worktree_id,
-            }));
-            changed = true;
-          } else if (run.status === "completed") {
-            for (const child of taskSubtasks(task.id).filter((item) => item.status !== "done")) {
-              await api.upsertWorkItem(workItemUpdateInput(child, {
-                status: "done",
-                source_type: ORCA_SOURCE.completed,
-                source_key: run.commit,
-                source_href: run.worktree_id,
-              }));
-            }
-            await api.upsertWorkItem(workItemUpdateInput(task, {
-              status: "done",
-              source_type: ORCA_SOURCE.completed,
-              source_key: run.commit,
-              source_href: run.worktree_id,
-            }));
-            changed = true;
-            showToast(`Orca ha completado «${task.title}»`);
-          } else if (run.status === "failed") {
-            await api.upsertWorkItem(workItemUpdateInput(task, {
-              status: "blocked",
-              source_type: ORCA_SOURCE.failed,
-              source_key: run.error || "La ejecución local de Orca ha fallado",
-              source_href: run.worktree_id,
-            }));
-            changed = true;
-            showToast(`Orca ha bloqueado «${task.title}»`, "err");
-          }
-        } catch {
-          // El worker puede estar reiniciándose o temporalmente desconectado; se reintentará.
-        }
-      }
-      if (changed) await loadData();
-    } finally {
-      syncingLocalOrcaRuns = false;
-    }
-  }
-
   function openEditTaskModal(task: WorkItem) {
     editingTask = task;
     newTaskParent = null;
@@ -1690,7 +1581,8 @@
       {/each}
     </nav>
 
-    {#if activeProjectSection === "informacion"}
+    {#if activeProjectSection === "plan"}
+    <ProjectManagementCenter project={project} {tasks} {members} projects={projectsList} mode="plan" onsaved={(saved) => (project = saved)} />
     <Card lift={false} class="mb-6 border border-[var(--color-border)] bg-black/10 p-4" data-project-technical-brief>
       {@const projectBrief = normalizeProjectBrief(project.brief, project.tech_stack)}
       <div class="flex flex-wrap items-start justify-between gap-3">
@@ -1746,6 +1638,9 @@
       </div>
     </Card>
 
+    {/if}
+
+    {#if activeProjectSection === "documentos"}
     <Card lift={false} class="mb-6 border border-[var(--color-border)] bg-black/10 p-4" data-project-documents>
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
@@ -1785,6 +1680,14 @@
         <p class="mt-3 rounded-xl border border-dashed border-[var(--color-border)] px-4 py-3 text-xs text-[var(--color-muted-dim)]">Todavía no hay documentación vinculada.</p>
       {/if}
     </Card>
+    {/if}
+
+    {#if activeProjectSection === "equipo"}
+      <ProjectManagementCenter project={project} {tasks} {members} projects={projectsList} mode="team" onsaved={(saved) => (project = saved)} />
+    {/if}
+
+    {#if activeProjectSection === "actividad"}
+      <ProjectManagementCenter project={project} {tasks} {members} projects={projectsList} mode="activity" />
     {/if}
 
     {#if activeProjectSection === "solicitudes"}
@@ -1940,15 +1843,16 @@
     {/if}
 
     {#if activeProjectSection === "resumen"}
+    <ProjectManagementCenter project={project} {tasks} {members} projects={projectsList} mode="summary" onsaved={(saved) => (project = saved)} />
     <div class="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      <button type="button" onclick={() => openProjectSection("gestion")} class="rounded-2xl border border-purple-400/20 bg-purple-500/[0.06] p-4 text-left transition hover:border-purple-400/40">
-        <p class="text-2xl font-semibold text-purple-200">{totalTasks - completedTasks}</p><p class="mt-1 text-xs text-[var(--color-muted)]">Tareas pendientes · abrir gestión →</p>
+      <button type="button" onclick={() => openProjectSection("trabajo")} class="rounded-2xl border border-purple-400/20 bg-purple-500/[0.06] p-4 text-left transition hover:border-purple-400/40">
+        <p class="text-2xl font-semibold text-purple-200">{totalTasks - completedTasks}</p><p class="mt-1 text-xs text-[var(--color-muted)]">Tareas pendientes · abrir trabajo →</p>
       </button>
       <button type="button" onclick={() => openProjectSection("solicitudes")} class="rounded-2xl border border-amber-400/20 bg-amber-500/[0.05] p-4 text-left transition hover:border-amber-400/40">
         <p class="text-2xl font-semibold text-amber-200">{(project.requests ?? []).filter((item) => !["rejected", "converted"].includes(item.status)).length}</p><p class="mt-1 text-xs text-[var(--color-muted)]">Solicitudes abiertas · revisar →</p>
       </button>
-      <button type="button" onclick={() => openProjectSection("informacion")} class="rounded-2xl border border-cyan-400/20 bg-cyan-500/[0.05] p-4 text-left transition hover:border-cyan-400/40">
-        <p class="text-2xl font-semibold text-cyan-200">{project.documents.length}</p><p class="mt-1 text-xs text-[var(--color-muted)]">Documentos vinculados · información →</p>
+      <button type="button" onclick={() => openProjectSection("documentos")} class="rounded-2xl border border-cyan-400/20 bg-cyan-500/[0.05] p-4 text-left transition hover:border-cyan-400/40">
+        <p class="text-2xl font-semibold text-cyan-200">{project.documents.length}</p><p class="mt-1 text-xs text-[var(--color-muted)]">Documentos vinculados · abrir →</p>
       </button>
       <button type="button" onclick={() => openProjectSection("economia")} class="rounded-2xl border border-emerald-400/20 bg-emerald-500/[0.05] p-4 text-left transition hover:border-emerald-400/40">
         <p class="text-2xl font-semibold text-emerald-200">{formatEUR(projectType(project.project_type, project.customer_id) === "client" ? projectBilledCents : project.value_cents)}</p><p class="mt-1 text-xs text-[var(--color-muted)]">{projectType(project.project_type, project.customer_id) === "client" ? "Cobrado" : "Valor estimado"} · economía →</p>
@@ -1988,7 +1892,7 @@
     </details>
     {/if}
 
-    {#if activeProjectSection === "gestion"}
+    {#if activeProjectSection === "trabajo"}
     <!-- Project work sections -->
     <div id="project-work-sections" class="mb-3 flex flex-wrap items-end justify-between gap-2">
       <div>
@@ -2148,9 +2052,6 @@
                   <Badge tone={statusBadgeTone(task.status)}>{taskStatusLabel(task.status)}</Badge>
                   <Badge tone={priorityBadgeTone(task.priority)}>{priorityLabel(task.priority)}</Badge>
                   {#if hasSubtaskAtRisk(task.id)}<Badge tone="danger">Subtarea en peligro</Badge>{/if}
-                  {#if orcaExecutionLabel(task)}
-                    <Badge tone={orcaExecutionState(task) === "failed" ? "danger" : orcaExecutionState(task) === "completed" ? "ok" : "ai"}>{orcaExecutionLabel(task)}</Badge>
-                  {/if}
                 </div>
                 {#if task.description}
                   <RichDescription value={task.description} class="mt-1 max-w-3xl line-clamp-2 text-xs text-[var(--color-muted-dim)]" />
@@ -2167,7 +2068,7 @@
 
               <div class="flex shrink-0 flex-wrap items-center gap-2">
                 {#if task.assignee_name}<AssigneeAvatar name={task.assignee_name} avatar={task.assignee_avatar_data_url} status={task.status} />{/if}
-                {#if task.due_date}<span class="text-xs tabular {isTaskOverdue(task) ? 'font-semibold text-rose-300' : isTaskDueSoon(task) ? 'font-semibold text-amber-300' : 'text-[var(--color-muted-dim)]'}">📅 {formatDate(task.due_date)}</span>{/if}
+                {#if taskDueDate(task)}<span class="text-xs tabular {isTaskOverdue(task) ? 'font-semibold text-rose-300' : isTaskDueSoon(task) ? 'font-semibold text-amber-300' : 'text-[var(--color-muted-dim)]'}">📅 {formatDate(taskDueDate(task))}</span>{/if}
                 <button
                   type="button"
                   class="rounded-lg border border-cyan-400/25 px-2.5 py-1.5 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/10"
@@ -2197,7 +2098,7 @@
                       </div>
                       <Badge tone={statusBadgeTone(child.status)}>{taskStatusLabel(child.status)}</Badge>
                       {#if child.assignee_name}<AssigneeAvatar name={child.assignee_name} avatar={child.assignee_avatar_data_url} size="xs" status={child.status} />{/if}
-                      {#if child.due_date}<span class="text-[11px] tabular {isTaskOverdue(child) ? 'font-semibold text-rose-300' : isTaskDueSoon(child) ? 'font-semibold text-amber-300' : 'text-[var(--color-muted-dim)]'}">{formatDate(child.due_date)}</span>{/if}
+                      {#if taskDueDate(child)}<span class="text-[11px] tabular {isTaskOverdue(child) ? 'font-semibold text-rose-300' : isTaskDueSoon(child) ? 'font-semibold text-amber-300' : 'text-[var(--color-muted-dim)]'}">{formatDate(taskDueDate(child))}</span>{/if}
                       <div class="pointer-events-none absolute bottom-[calc(100%+0.5rem)] left-3 z-[100] hidden w-[30rem] max-w-[calc(100vw-3rem)] overflow-hidden rounded-2xl border border-[var(--color-border-strong)] bg-[var(--color-obsidian-elevated)] shadow-[0_24px_70px_rgba(0,0,0,0.65)] group-hover/child:block">
                         <div class="border-b border-[var(--color-border)] bg-[var(--color-obsidian-panel)] px-5 py-4">
                           <div class="mb-1.5 flex items-center gap-2">
@@ -2336,9 +2237,6 @@
                     <div class="flex flex-wrap items-center gap-1.5 pt-1">
                       <Badge tone={priorityBadgeTone(task.priority)}>{priorityLabel(task.priority)}</Badge>
                       {#if hasSubtaskAtRisk(task.id)}<Badge tone="danger">Subtarea en peligro</Badge>{/if}
-                      {#if orcaExecutionLabel(task)}
-                        <Badge tone={orcaExecutionState(task) === "failed" ? "danger" : orcaExecutionState(task) === "completed" ? "ok" : "ai"}>{orcaExecutionLabel(task)}</Badge>
-                      {/if}
                       {#if task.category}
                         <span
                           class="inline-block rounded px-1.5 py-0.5 text-[10px] font-medium"
@@ -2349,10 +2247,10 @@
                       {/if}
                     </div>
 
-                    {#if task.assignee_name || task.due_date}
+                    {#if task.assignee_name || taskDueDate(task)}
                       <div class="flex items-center justify-between text-[10px] text-[var(--color-muted-dim)] pt-1 border-t border-white/5">
                         {#if task.assignee_name}<AssigneeAvatar name={task.assignee_name} avatar={task.assignee_avatar_data_url} size="xs" status={col.status} />{:else}<span></span>{/if}
-                        <span class={isTaskOverdue(task) ? "font-semibold text-rose-300" : isTaskDueSoon(task) ? "font-semibold text-amber-300" : ""}>{task.due_date ? `📅 ${formatDate(task.due_date)}` : ""}</span>
+                        <span class={isTaskOverdue(task) ? "font-semibold text-rose-300" : isTaskDueSoon(task) ? "font-semibold text-amber-300" : ""}>{taskDueDate(task) ? `📅 ${formatDate(taskDueDate(task))}` : ""}</span>
                       </div>
                     {/if}
                   </div>
@@ -2554,21 +2452,11 @@
     <div class="grid gap-3 sm:grid-cols-2">
       <div class="space-y-1">
         <label for="edit-project-start" class="text-xs font-medium text-[var(--color-muted)]">Fecha de inicio</label>
-        <input
-          id="edit-project-start"
-          type="date"
-          bind:value={editProjectForm.start_date}
-          class="field w-full text-sm"
-        />
+        <DatePicker bind:value={editProjectForm.start_date} ariaLabel="Fecha de inicio" />
       </div>
       <div class="space-y-1">
         <label for="edit-project-target" class="text-xs font-medium text-[var(--color-muted)]">Fecha objetivo</label>
-        <input
-          id="edit-project-target"
-          type="date"
-          bind:value={editProjectForm.target_date}
-          class="field w-full text-sm"
-        />
+        <DatePicker bind:value={editProjectForm.target_date} ariaLabel="Fecha objetivo" />
       </div>
     </div>
 
@@ -2783,7 +2671,7 @@
 
     <div class="space-y-1.5">
       <label for="task-import-due-date" class="text-xs font-medium text-[var(--color-muted)]">Fecha de entrega predeterminada</label>
-      <input id="task-import-due-date" type="date" class="field w-full" bind:value={importDueDate} />
+      <DatePicker bind:value={importDueDate} ariaLabel="Fecha de entrega predeterminada" />
       <p class="text-[11px] text-[var(--color-muted-dim)]">
         Se aplicará a las tareas pegadas y a sus subtareas. Puedes sobrescribirla en el texto con una línea indentada «Fecha: AAAA-MM-DD».
       </p>
@@ -2931,20 +2819,6 @@
     }}
     class="space-y-4 pt-1"
   >
-    {#if editingTask && orcaExecutionLabel(editingTask)}
-      <div class="rounded-xl border border-purple-400/25 bg-purple-500/10 px-4 py-3">
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <p class="text-xs font-bold uppercase tracking-wide text-[var(--color-purple-bright)]">{orcaExecutionLabel(editingTask)}</p>
-          {#if editingTask.source_href}
-            <span class="max-w-full truncate text-[10px] text-[var(--color-muted-dim)]" title={editingTask.source_href}>{editingTask.source_href}</span>
-          {/if}
-        </div>
-        {#if orcaExecutionState(editingTask) === "failed" && editingTask.source_key}
-          <p class="mt-2 text-xs leading-relaxed text-rose-200">{editingTask.source_key}</p>
-        {/if}
-      </div>
-    {/if}
-
     {#if newTaskParent}
       <div class="rounded-xl border border-purple-400/30 bg-purple-500/10 px-4 py-3">
         <p class="text-xs font-bold uppercase tracking-wide text-[var(--color-purple-bright)]">↳ Nueva subtarea</p>
@@ -3035,21 +2909,11 @@
     <div class="grid gap-3 sm:grid-cols-2">
       <div class="space-y-1">
         <label for="task-start-date" class="text-xs font-medium text-[var(--color-muted)]">Fecha de inicio</label>
-        <input
-          id="task-start-date"
-          type="date"
-          bind:value={detailForm.start_date}
-          class="field w-full text-sm"
-        />
+        <DatePicker bind:value={detailForm.start_date} ariaLabel="Fecha de inicio" />
       </div>
       <div class="space-y-1">
         <label for="task-due-date" class="text-xs font-medium text-[var(--color-muted)]">Fecha límite</label>
-        <input
-          id="task-due-date"
-          type="date"
-          bind:value={detailForm.due_date}
-          class="field w-full text-sm"
-        />
+        <DatePicker bind:value={detailForm.due_date} ariaLabel="Fecha límite" />
       </div>
     </div>
 
@@ -3088,23 +2952,6 @@
       {#if editingTask}
         <div class="flex flex-wrap items-center gap-2">
           <Button variant="danger" type="button" onclick={handleArchiveTask}>Archivar</Button>
-          {#if $isAdmin && canDispatchToOrca(editingTask)}
-            <Button
-              variant="ai"
-              type="button"
-              onclick={() => dispatchTaskToOrca(editingTask!)}
-              disabled={orcaDispatchingTaskId === editingTask.id}
-              title={supportsOrcaWorker() ? "Crear una ejecución local en Orca" : "Requiere la versión web de Hexa"}
-            >
-              {orcaDispatchingTaskId === editingTask.id ? "Enviando…" : "Enviar a Orca"}
-            </Button>
-          {:else if orcaExecutionLabel(editingTask)}
-            <Badge tone={orcaExecutionState(editingTask) === "failed" ? "danger" : orcaExecutionState(editingTask) === "completed" ? "ok" : "ai"}>{orcaExecutionLabel(editingTask)}</Badge>
-          {:else if $isAdmin && editingTask.parent_id != null}
-            <Button variant="ai" type="button" disabled={true} title="Envía a Orca la tarea principal para incluir todas sus subtareas">
-              Orca · tarea principal
-            </Button>
-          {/if}
         </div>
       {:else}
         <div></div>

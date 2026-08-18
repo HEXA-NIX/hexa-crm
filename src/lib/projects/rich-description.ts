@@ -25,6 +25,14 @@ export function renderRichDescription(value: string) {
   }
 
   for (const line of lines) {
+    const heading = line.match(/^\s*(#{2,3})\s+(.+)$/);
+    if (heading) {
+      closeList();
+      const level = heading[1].length;
+      const className = /tecnolog/i.test(heading[2]) ? ' class="technology-section"' : "";
+      output.push(`<h${level}${className}>${inlineFormat(heading[2])}</h${level}>`);
+      continue;
+    }
     const unordered = line.match(/^\s*[-*]\s+(.+)$/);
     const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
     const nextListType = unordered ? "ul" : ordered ? "ol" : null;
@@ -48,5 +56,13 @@ export function renderRichDescription(value: string) {
   }
 
   closeList();
-  return output.join("");
+  return output.join("")
+    .replace(
+      /(<h3(?: class="[^"]*")?>.*?<\/h3>)(<p>.*?<\/p>)/g,
+      '<div class="rich-phase-block">$1$2</div>',
+    )
+    .replace(
+      /(<h2 class="technology-section">.*?<\/h2>)(<(?:ul|ol)>.*?<\/(?:ul|ol)>)/g,
+      '<div class="rich-technology-block">$1$2</div>',
+    );
 }

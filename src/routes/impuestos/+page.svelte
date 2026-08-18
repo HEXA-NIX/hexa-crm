@@ -9,6 +9,7 @@
   import KpiCard from "$lib/components/KpiCard.svelte";
   import Badge from "$lib/components/Badge.svelte";
   import Button from "$lib/components/Button.svelte";
+  import DatePicker from "$lib/components/DatePicker.svelte";
   import { showToast } from "$lib/stores/ui";
   import { downloadCsv, vatSummaryToCsv } from "$lib/export/csv";
   import SortableHeader from "$lib/components/SortableHeader.svelte";
@@ -124,11 +125,11 @@
 <div class="workspace-toolbar mb-5 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
   <label class="text-sm w-full sm:w-auto">
     <span class="mb-1 block text-[var(--color-muted)]">Desde</span>
-    <input type="date" bind:value={range.from} class="field w-full sm:w-auto" />
+    <DatePicker bind:value={range.from} class="w-full sm:w-48" ariaLabel="Fecha inicial" />
   </label>
   <label class="text-sm w-full sm:w-auto">
     <span class="mb-1 block text-[var(--color-muted)]">Hasta</span>
-    <input type="date" bind:value={range.to} class="field w-full sm:w-auto" />
+    <DatePicker bind:value={range.to} class="w-full sm:w-48" ariaLabel="Fecha final" />
   </label>
   <Button class="w-full sm:w-auto" onclick={load}>Actualizar</Button>
   <Button variant="secondary" class="w-full sm:w-auto" onclick={exportCsv}>Exportar CSV</Button>

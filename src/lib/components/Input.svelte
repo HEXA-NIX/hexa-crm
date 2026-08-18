@@ -1,4 +1,5 @@
 <script lang="ts">
+  import DatePicker from "$lib/components/DatePicker.svelte";
   let {
     label = "",
     type = "text",
@@ -26,7 +27,19 @@
   {#if label}
     <span class="font-medium text-[var(--color-muted)]">{label}</span>
   {/if}
-  <input
+  {#if type === "date" || type === "month"}
+    <DatePicker
+      type={type as "date" | "month"}
+      value={String(value ?? "")}
+      {placeholder}
+      {required}
+      min={min == null ? undefined : String(min)}
+      oninput={(next) => {
+        value = next;
+        oninput?.({ currentTarget: { value: next } } as unknown as Event & { currentTarget: HTMLInputElement });
+      }}
+    />
+  {:else}<input
     {type}
     {placeholder}
     {required}
@@ -35,5 +48,5 @@
     bind:value
     {oninput}
     class="field w-full"
-  />
+  />{/if}
 </label>

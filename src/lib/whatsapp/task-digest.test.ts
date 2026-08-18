@@ -13,11 +13,12 @@ describe("resumen de tareas por WhatsApp", () => {
   it("incluye vencidas y próximos siete días, pero no fechas posteriores", () => {
     const withoutDate = { ...task(4, "Sin fecha", "2026-08-06"), due_date: null };
     const invalidDate = { ...task(5, "Fecha inválida", "2026-08-06"), due_date: " " };
+    const inheritedDate = { ...task(6, "Heredada", "2026-08-06"), due_date: null, effective_due_date: "2026-08-07" };
     const result = upcomingTasksForDigest([
       task(1, "Vencida", "2026-08-04"), task(2, "Próxima", "2026-08-10"), task(3, "Lejana", "2026-08-20"),
-      withoutDate, invalidDate,
+      withoutDate, invalidDate, inheritedDate,
     ], new Date("2026-08-05T12:00:00"));
-    expect(result.map((item) => item.title)).toEqual(["Vencida", "Próxima"]);
+    expect(result.map((item) => item.title)).toEqual(["Vencida", "Heredada", "Próxima"]);
   });
 
   it("resume por proyecto sin enumerar todos los títulos y enlaza a pendientes", () => {

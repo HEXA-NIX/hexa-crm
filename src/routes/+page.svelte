@@ -27,7 +27,7 @@
   import { buildProjectRevenueProjection } from "$lib/projects/revenue-projection";
   import { economicGoalProgress, monthlyEconomicGoal } from "$lib/projects/economic-goal";
   import { buildTaskDigestMessages, upcomingTasksForDigest } from "$lib/whatsapp/task-digest";
-  import { isTaskPendingWork } from "$lib/work/task-dates";
+  import { isTaskPendingWork, taskDueDate } from "$lib/work/task-dates";
 
   let stats = $state<DashboardStats | null>(null);
   let sales = $state<Sale[]>([]);
@@ -228,8 +228,8 @@
   );
   const upcomingDevTasks = $derived(
     openDevTasks
-      .filter((task) => task.due_date)
-      .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)))
+      .filter((task) => taskDueDate(task))
+      .sort((a, b) => String(taskDueDate(a)).localeCompare(String(taskDueDate(b))))
       .slice(0, 6),
   );
   const whatsappDigestTasks = $derived(upcomingTasksForDigest(openDevTasks));
@@ -553,7 +553,7 @@
                 <li class="rounded-xl border border-[var(--color-border)] bg-black/20 px-3 py-2.5">
                   <p class="truncate text-sm font-medium text-[var(--color-text)]">{task.title}</p>
                   <p class="mt-0.5 text-[11px] text-[var(--color-muted-dim)]">
-                    {task.due_date ? new Date(task.due_date).toLocaleDateString("es-ES") : ""}
+                    {taskDueDate(task) ? new Date(taskDueDate(task)!).toLocaleDateString("es-ES") : ""}
                   </p>
                 </li>
               {/each}

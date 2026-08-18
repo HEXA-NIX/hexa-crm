@@ -8,6 +8,7 @@
   import Card from "$lib/components/Card.svelte";
   import Badge from "$lib/components/Badge.svelte";
   import Input from "$lib/components/Input.svelte";
+  import DatePicker from "$lib/components/DatePicker.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import KpiCard from "$lib/components/KpiCard.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
@@ -298,7 +299,7 @@
       </div>
       <label class="text-sm">
         <span class="mb-1 block text-[var(--color-muted)]">Día</span>
-        <input type="date" bind:value={closeDay} class="field" />
+        <DatePicker bind:value={closeDay} class="w-48" ariaLabel="Día del cierre" />
       </label>
     </div>
     <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -401,14 +402,7 @@
     <Input label="Importe (€)" bind:value={form.amount} required />
     <div class="space-y-1.5 text-sm">
       <label for="cash-movement-date" class="font-medium text-[var(--color-muted)]">Fecha del movimiento</label>
-      <input
-        id="cash-movement-date"
-        type="date"
-        bind:value={form.date}
-        max={today}
-        class="field w-full"
-        required
-      />
+      <DatePicker bind:value={form.date} max={today} required ariaLabel="Fecha del movimiento" />
       <p class="text-[11px] text-[var(--color-muted-dim)]">Puedes registrar ingresos y gastos de fechas anteriores.</p>
     </div>
     <Select

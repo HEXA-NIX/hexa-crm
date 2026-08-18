@@ -9,6 +9,18 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+- Los presupuestos se pueden descargar directamente como PDF desde su ficha y desde la vista previa, conservando la plantilla comercial, el logo y los datos de la empresa activa.
+- Presupuestos y facturas comparten una nueva plantilla comercial inspirada en propuestas multipágina: cabecera de marca, alcance estructurado con títulos, subtítulos, tarjetas de fases y fichas de tecnologías utilizadas o previstas, tabla económica, totales y condiciones en estilo editorial oscuro; la vista previa y el PDF impreso cargan automáticamente el nombre, logo y datos fiscales de la empresa activa.
+- Crear, editar y duplicar presupuestos abre ahora un editor modal a pantalla completa, coherente con los flujos de nueva factura y nuevo servicio, sin desplazar el listado de Presupuestos.
+- Todos los campos de fecha y periodo usan un selector HEXA unificado, legible en tema oscuro y claro, con navegación por meses o años, acciones «Hoy» y «Borrar» y sin depender del calendario nativo del navegador.
+- Los campos de fecha muestran iconos legibles en ambos temas y Facturas estrena un selector de rango moderno con accesos rápidos, dos meses, rango resaltado y acciones de borrar, cancelar y aplicar.
+- Los controles de fecha y paginación de Facturas ganan separación, alineación y áreas pulsables consistentes para que las flechas no queden pegadas a textos o bordes.
+- La navegación de Ventas integra Facturas, Presupuestos y Servicios como un submenú dentro de la barra lateral, evitando el panel flotante que ocultaba el contenido.
+- Proyectos se convierte en un centro integral con centro de mando, cronología, carga de equipo, economía y actualizaciones de cartera; cada proyecto incorpora Plan, Trabajo, Equipo, Documentos y Actividad, además de actualizaciones periódicas, hitos operativos, riesgos, decisiones, dependencias, ciclos, capacidad y estimaciones. Se retira el envío manual a Orca de la interfaz de Proyectos para delegar la futura automatización en el orquestador HEXA.
+
+- La cartera carga los contadores desde la empresa de tareas de cada proyecto interno: VOURA vuelve a mostrar sus 376 tareas sin mezclar tenants. Sus tarjetas enseñan además el objetivo del mes previsto (o el próximo hito) y lo ingresado en ese mismo periodo.
+- La recarga directa de `/proyectos/<id>` deja de responder 404/500: la ruta dinámica queda registrada en el servidor Node sin intentar prerenderar identificadores de proyecto.
+- Las subtareas sin responsable o vencimiento propio muestran y usan los valores efectivos de la tarea padre en filtros y avisos, sin asignarlos ni guardarlos como datos propios.
 - Los proyectos internos de empresas del grupo vuelven a permitir crear, editar y visualizar hitos mensuales de facturación prevista; al guardar ya no se eliminan sus previsiones por no ser un «producto propio» del estudio.
 - Se completa la cobertura del modo claro en modales, desplegables, paneles de IA, tarjetas editoriales y superficies de Ventas, Trabajo, Caja y Ajustes; los estados informativos usan tonos oscuros legibles y los botones principales mantienen contraste suficiente.
 - Se incorpora el área administrativa «Personal»: altas y fichas laborales separadas de los usuarios del CRM, vínculo opcional entre ambos, registro de nóminas por periodo y documentación, importes en céntimos y pago conectado con una salida de Caja. Los datos quedan aislados por empresa y restringidos a administradores; el módulo registra la nómina de la asesoría, sin sustituir su cálculo laboral.
