@@ -139,14 +139,20 @@
   function printBudget(budget: Budget) { selected = budget; detailOpen = true; window.setTimeout(() => window.print(), 50); }
   const pdfOptions = (filename: string) => ({ margin: [10, 0, 10, 0], filename, image: { type: "jpeg", quality: 0.98 }, html2canvas: { scale: 2, useCORS: true, backgroundColor: "#090610", logging: false }, jsPDF: { unit: "mm", format: "a4", orientation: "portrait" }, pagebreak: { mode: ["css", "legacy"], avoid: [".rich-phase-block", ".rich-technology-block", "tr", ".commercial-totals", ".commercial-conditions"] } });
   async function paintPdfMargins(worker: ReturnType<(typeof import("html2pdf.js"))["default"]>) {
-    const pdf = await worker.get("pdf") as { internal: { getNumberOfPages(): number; pageSize: { getWidth(): number; getHeight(): number }; pages: string[][] }; setPage(page: number): void; setFillColor(r: number, g: number, b: number): void; rect(x: number, y: number, width: number, height: number, style: string): void };
-    for (let page = 1; page <= pdf.internal.getNumberOfPages(); page += 1) {
+    const pdf = await worker.get("pdf") as { internal: { getNumberOfPages(): number; pageSize: { getWidth(): number; getHeight(): number }; pages: string[][] }; setPage(page: number): void; setFillColor(r: number, g: number, b: number): void; setTextColor(r: number, g: number, b: number): void; setFontSize(size: number): void; text(value: string, x: number, y: number, options?: { align?: "left" | "right" }): void; rect(x: number, y: number, width: number, height: number, style: string): void };
+    const totalPages = pdf.internal.getNumberOfPages();
+    const footerLabel = `${$activeCompany?.trade_name || $activeCompany?.legal_name || "Empresa"} — Propuesta comercial`;
+    for (let page = 1; page <= totalPages; page += 1) {
       pdf.setPage(page);
       const commands = pdf.internal.pages[page];
       const start = commands.length;
       pdf.setFillColor(9, 6, 16);
       pdf.rect(0, 0, pdf.internal.pageSize.getWidth(), pdf.internal.pageSize.getHeight(), "F");
       commands.unshift(...commands.splice(start));
+      pdf.setTextColor(126, 80, 164);
+      pdf.setFontSize(8);
+      pdf.text(footerLabel, 12, pdf.internal.pageSize.getHeight() - 4);
+      pdf.text(`Página ${page} de ${totalPages}`, pdf.internal.pageSize.getWidth() - 12, pdf.internal.pageSize.getHeight() - 4, { align: "right" });
     }
   }
   function pdfFilename(value: string) {
@@ -236,4 +242,15 @@
   .detail-preview{width:100%;height:calc(100dvh - 8rem);min-height:44rem}
   .pdf-sheet :global(.commercial-document){border:0!important;border-radius:0!important;box-shadow:none!important;background:#090610!important}
   .pdf-sheet :global(.commercial-cover){background:#090610!important}
+  .pdf-sheet :global(.commercial-cover){padding:1.55rem 3rem 1.25rem!important}
+  .pdf-sheet :global(.commercial-company){font-size:1.72rem!important}
+  .pdf-sheet :global(.commercial-subject){margin-top:.65rem!important;font-size:1.18rem!important}
+  .pdf-sheet :global(.commercial-logo-frame){width:4.35rem!important;height:4.35rem!important}
+  .pdf-sheet :global(.commercial-meta){margin-top:1.15rem!important;padding-top:.9rem!important}
+  .pdf-sheet :global(.commercial-document>footer){display:none!important}
+  .pdf-sheet :global(.commercial-introduction h2){align-items:flex-start!important;line-height:1.3!important}
+  .pdf-sheet :global(.commercial-introduction h2::before){flex:0 0 .24rem!important;height:1.42rem!important;margin-top:.04rem!important}
+  .pdf-sheet :global(.commercial-introduction ul),.pdf-sheet :global(.commercial-introduction ol){margin:.7rem 0 1rem!important;padding-left:1.35rem!important}
+  .pdf-sheet :global(.commercial-introduction li){padding-left:.18rem!important;line-height:1.55!important}
+  .pdf-sheet :global(.commercial-introduction li::marker){color:#a855f7!important;font-size:.8em}
 </style>
