@@ -66,7 +66,7 @@
         <p class="commercial-kicker">{documentType}</p>
         {#if subject}<h1 class="commercial-subject">{subject}</h1>{/if}
       </div>
-      <img src={company?.logo_data_url || "/logo-mark.svg"} alt="Logo de {companyName}" />
+      <span class="commercial-logo-frame"><img src={company?.logo_data_url || "/logo-mark.svg"} alt="Logo de {companyName}" /></span>
     </div>
     <div class="commercial-meta">
       <div><span>CLIENTE</span><strong>{customerName || "Sin cliente"}</strong>{#if customerNif}<small>NIF: {customerNif}</small>{/if}{#if customerEmail}<small>{customerEmail}</small>{/if}</div>
@@ -118,4 +118,7 @@
   .commercial-introduction :global(.rich-technology-block){break-inside:avoid;page-break-inside:avoid}
   .commercial-introduction :global(h2){break-after:avoid;page-break-after:avoid}
   .commercial-introduction :global(h2 + p),.commercial-introduction :global(h2 + ul),.commercial-introduction :global(h2 + ol){break-before:avoid;page-break-before:avoid}
+  .commercial-logo-frame{display:flex;flex:0 0 auto;width:5.2rem;height:5.2rem;padding:.28rem;border:2px solid #7044a1;border-radius:1.1rem;background:#130d1c;box-shadow:0 0 28px rgba(155,50,255,.22);overflow:hidden}
+  .commercial-logo-frame img{width:100%;height:100%;padding:0;border:0;border-radius:.78rem;object-fit:cover;box-shadow:none}
+  @media(max-width:700px){.commercial-logo-frame{width:4rem;height:4rem}}
 </style>
