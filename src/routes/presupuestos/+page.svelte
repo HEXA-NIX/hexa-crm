@@ -248,9 +248,14 @@
   .pdf-sheet :global(.commercial-logo-frame){width:4.35rem!important;height:4.35rem!important}
   .pdf-sheet :global(.commercial-meta){margin-top:1.15rem!important;padding-top:.9rem!important}
   .pdf-sheet :global(.commercial-document>footer){display:none!important}
-  .pdf-sheet :global(.commercial-introduction h2){align-items:flex-start!important;line-height:1.3!important}
-  .pdf-sheet :global(.commercial-introduction h2::before){flex:0 0 .24rem!important;height:1.42rem!important;margin-top:.04rem!important}
-  .pdf-sheet :global(.commercial-introduction ul),.pdf-sheet :global(.commercial-introduction ol){margin:.7rem 0 1rem!important;padding-left:1.35rem!important}
-  .pdf-sheet :global(.commercial-introduction li){padding-left:.18rem!important;line-height:1.55!important}
-  .pdf-sheet :global(.commercial-introduction li::marker){color:#a855f7!important;font-size:.8em}
+  .pdf-sheet :global(.commercial-section h3){align-items:center!important;gap:.8rem!important;line-height:1.25!important}
+  .pdf-sheet :global(.commercial-section h3 i){flex:0 0 .25rem!important;width:.25rem!important;height:1.42rem!important;border-radius:.08rem}
+  .pdf-sheet :global(.commercial-introduction h2){display:block!important;min-height:1.5rem!important;margin:1.6rem 0 .72rem!important;padding:.06rem 0 .08rem 1rem!important;border-left:.28rem solid #a855f7!important;line-height:1.3!important}
+  .pdf-sheet :global(.commercial-introduction h2::before){display:none!important;content:none!important}
+  .pdf-sheet :global(.commercial-introduction ul){margin:.72rem 0 1.05rem!important;padding-left:1.55rem!important;list-style:none!important}
+  .pdf-sheet :global(.commercial-introduction ul li){position:relative;padding-left:.15rem!important;line-height:1.55!important}
+  .pdf-sheet :global(.commercial-introduction ul li::before){content:"•";position:absolute;left:-1.15rem;top:0;color:#a855f7;font-size:1rem;font-weight:800;line-height:1.55}
+  .pdf-sheet :global(.commercial-introduction ul li::marker){content:""}
+  .pdf-sheet :global(.commercial-introduction ol){margin:.72rem 0 1.05rem!important;padding-left:1.75rem!important}
+  .pdf-sheet :global(.commercial-introduction ol li){padding-left:.15rem!important;line-height:1.55!important}
 </style>
