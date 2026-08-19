@@ -248,8 +248,8 @@
   .pdf-sheet :global(.commercial-logo-frame){width:4.35rem!important;height:4.35rem!important}
   .pdf-sheet :global(.commercial-meta){margin-top:1.15rem!important;padding-top:.9rem!important}
   .pdf-sheet :global(.commercial-document>footer){display:none!important}
-  .pdf-sheet :global(.commercial-section h3){align-items:center!important;gap:.8rem!important;line-height:1.25!important}
-  .pdf-sheet :global(.commercial-section h3 i){flex:0 0 .25rem!important;width:.25rem!important;height:1.42rem!important;border-radius:.08rem}
+  .pdf-sheet :global(.commercial-section>h3),.pdf-sheet :global(.commercial-section-heading>h3){display:block!important;min-height:1.5rem!important;padding:.06rem 0 .08rem 1rem!important;border-left:.28rem solid #a855f7!important;line-height:1.3!important}
+  .pdf-sheet :global(.commercial-section>h3 i),.pdf-sheet :global(.commercial-section-heading>h3 i){display:none!important}
   .pdf-sheet :global(.commercial-introduction h2){display:block!important;min-height:1.5rem!important;margin:1.6rem 0 .72rem!important;padding:.06rem 0 .08rem 1rem!important;border-left:.28rem solid #a855f7!important;line-height:1.3!important}
   .pdf-sheet :global(.commercial-introduction h2::before){display:none!important;content:none!important}
   .pdf-sheet :global(.commercial-introduction ul){margin:.72rem 0 1.05rem!important;padding-left:1.55rem!important;list-style:none!important}
