@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { formatDateES } from "$lib/date";
   import { onMount } from "svelte";
 
   let {
@@ -38,7 +39,7 @@
   const display = $derived.by(() => {
     if (!value) return "";
     if (type === "month") return new Date(`${value}-01T12:00:00`).toLocaleDateString("es-ES", { month: "long", year: "numeric" });
-    return new Date(`${value.slice(0, 10)}T12:00:00`).toLocaleDateString("es-ES");
+    return formatDateES(value, "");
   });
   const days = $derived.by(() => {
     const year = cursor.getFullYear();
