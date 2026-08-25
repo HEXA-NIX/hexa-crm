@@ -5,6 +5,10 @@
   import DatePicker from "$lib/components/DatePicker.svelte";
   import CommercialDocument from "$lib/components/CommercialDocument.svelte";
   import RichDescriptionEditor from "$lib/components/RichDescriptionEditor.svelte";
+  import ProposalTechnologyPicker from "$lib/components/projects/ProposalTechnologyPicker.svelte";
+  import type { ProposalTechnologyForm } from "$lib/components/projects/ProposalTechnologyPicker.svelte";
+  import { parseTechStack } from "$lib/projects/project-brief";
+  import { technologyDefinition, technologyLogoUrl } from "$lib/projects/technology-catalog";
   import { activeCompany } from "$lib/stores/session";
   import { parseProposalContent, serializeProposalContent } from "$lib/documents/proposal-content";
   import { api } from "$lib/api/client";
@@ -12,8 +16,22 @@
   import type { Budget, BudgetStatus, Customer } from "$lib/types";
   import type { VatRate } from "$lib/vat";
 
-  type EditorLine = { concept: string; description: string; quantity: string; price: string; vat: VatRate };
-  const emptyLine = (): EditorLine => ({ concept: "", description: "", quantity: "1", price: "0", vat: 21 });
+  type EditorLine = { concept: string; description: string; quantity: string; price: string; discountType: "percent" | "amount"; discountValue: string; vat: VatRate };
+  const emptyProposalTechnologies = (): ProposalTechnologyForm => ({ frontend: "", backend: "", app: "", database: "", infrastructure: "", deployment: "", integrations: "", plugins: "", ai: "", tools: "" });
+  const technologyLabels: Record<keyof ProposalTechnologyForm, string> = { frontend: "Frontend", backend: "Backend", app: "Aplicaciones", database: "Base de datos", infrastructure: "Infraestructura", deployment: "Despliegue", integrations: "Integraciones", plugins: "Plugins", ai: "Inteligencia artificial", tools: "Herramientas" };
+  const normalizeProposalTechnologyGroups = (groups: Record<string, string[]>): Record<string, string[]> => {
+    if (Object.keys(groups).some((key) => key !== "tools")) return groups;
+    const normalized: Record<string, string[]> = {};
+    for (const name of groups.tools ?? []) {
+      const category = technologyDefinition(name)?.categories[0] ?? "tools";
+      normalized[category] = [...(normalized[category] ?? []), name];
+    }
+    return normalized;
+  };
+  const proposalTechnologyGroups = (form: ProposalTechnologyForm): Record<string, string[]> => Object.fromEntries(Object.entries(form).map(([key, value]) => [key, parseTechStack(value)]).filter(([, items]) => items.length)) as Record<string, string[]>;
+  const proposalTechnologySections = (groups: Record<string, string[]>) => { const normalized = normalizeProposalTechnologyGroups(groups); return Object.entries(technologyLabels).map(([key, label]) => ({ label, items: normalized[key] ?? [] })); };
+  const proposalTechnologyForm = (groups: Record<string, string[]>) => { const normalized = normalizeProposalTechnologyGroups(groups); return Object.fromEntries(Object.keys(technologyLabels).map((key) => [key, (normalized[key] ?? []).join(", ")])) as ProposalTechnologyForm; };
+  const emptyLine = (): EditorLine => ({ concept: "", description: "", quantity: "1", price: "0", discountType: "percent", discountValue: "0", vat: 21 });
   const statusLabels: Record<BudgetStatus, string> = { draft: "Borrador", sent: "Enviado", accepted: "Aceptado", rejected: "Rechazado", expired: "Vencido", invoiced: "Facturado", cancelled: "Cancelado" };
 
   let budgets = $state<Budget[]>([]);
@@ -25,6 +43,7 @@
   let pdfBudget = $state<Budget | null>(null);
   let pdfDraft = $state(false);
   let pdfNode = $state<HTMLElement | null>(null);
+  let pdfTechnologyLogos = $state<Record<string, string>>({});
   let notice = $state("");
   let error = $state("");
   let search = $state("");
@@ -44,11 +63,14 @@
   let dueDate = $state("");
   let projectExplanation = $state("");
   let proposalTitle = $state("");
+  let proposalTechnologies = $state<ProposalTechnologyForm>(emptyProposalTechnologies());
   let paymentMethod = $state("");
   let account = $state("");
   let tags = $state("");
   let notes = $state("");
   let irpfRate = $state("0");
+  let globalDiscountType = $state<"percent" | "amount">("percent");
+  let globalDiscountValue = $state("0");
   let lines = $state<EditorLine[]>([emptyLine()]);
 
   const visibleBudgets = $derived(budgets.filter((budget) => {
@@ -56,15 +78,29 @@
     return (statusFilter === "all" || budget.status === statusFilter) && haystack.includes(search.trim().toLocaleLowerCase());
   }));
   const editorTotals = $derived.by(() => {
-    let base = 0; let vat = 0;
-    for (const line of lines) {
+    const prepared = lines.map((line) => {
       const quantity = Number(line.quantity) || 0;
       const price = Math.round((Number(line.price) || 0) * 100);
-      const rowBase = Math.round(quantity * price);
-      base += rowBase; vat += Math.round(rowBase * line.vat / 100);
-    }
-    const irpf = Math.round(base * (Number(irpfRate) || 0) / 100);
-    return { base, vat, irpf, total: base + vat - irpf };
+      const originalBase = Math.round(quantity * price);
+      const discountValue = Math.max(0, Number(line.discountValue) || 0);
+      const rowDiscount = Math.min(originalBase, line.discountType === "percent" ? Math.round(originalBase * Math.min(100, discountValue) / 100) : Math.round(discountValue * 100));
+      return { base: originalBase - rowDiscount, vatRate: line.vat };
+    });
+    const base = prepared.reduce((sum, line) => sum + line.base, 0);
+    const requestedGlobalDiscount = globalDiscountType === "percent" ? Math.round(base * Math.min(100, Math.max(0, Number(globalDiscountValue) || 0)) / 100) : Math.round(Math.max(0, Number(globalDiscountValue) || 0) * 100);
+    const globalDiscount = Math.min(base, requestedGlobalDiscount);
+    let allocated = 0;
+    let discountedBase = 0;
+    let discountedVat = 0;
+    prepared.forEach((line, index) => {
+      const share = index === prepared.length - 1 ? globalDiscount - allocated : base ? Math.round(globalDiscount * line.base / base) : 0;
+      allocated += share;
+      const lineBase = Math.max(0, line.base - share);
+      discountedBase += lineBase;
+      discountedVat += Math.round(lineBase * line.vatRate / 100);
+    });
+    const irpf = Math.round(discountedBase * (Number(irpfRate) || 0) / 100);
+    return { base: discountedBase, vat: discountedVat, irpf, total: discountedBase + discountedVat - irpf, globalDiscount };
   });
 
   function flash(message: string, isError = false) {
@@ -82,15 +118,15 @@
 
   function resetEditor() {
     editingId = null; series = "E"; number = ""; clientId = ""; operationDate = new Date().toISOString().slice(0, 10); dueDate = "";
-    proposalTitle = ""; projectExplanation = ""; paymentMethod = ""; account = ""; tags = ""; notes = ""; irpfRate = "0"; lines = [emptyLine()];
+    proposalTitle = ""; proposalTechnologies = emptyProposalTechnologies(); projectExplanation = ""; paymentMethod = ""; account = ""; tags = ""; notes = ""; irpfRate = "0"; globalDiscountType = "percent"; globalDiscountValue = "0"; lines = [emptyLine()];
   }
 
   function openNew() { resetEditor(); editorOpen = true; }
   function openEdit(budget: Budget) {
     if (!["draft", "sent"].includes(budget.status)) { flash("Solo se pueden editar presupuestos en borrador o enviados", true); return; }
     editingId = budget.id; series = budget.series; number = budget.number; clientId = budget.customer_id == null ? "" : String(budget.customer_id); operationDate = budget.operation_date; dueDate = budget.due_at ?? "";
-    ({ title: proposalTitle, body: projectExplanation } = parseProposalContent(budget.project_explanation)); paymentMethod = budget.payment_method; account = budget.account; tags = budget.tags.join(", "); notes = budget.notes; irpfRate = String(budget.irpf_rate);
-    lines = budget.lines.map((line) => ({ concept: line.description.split(" — ")[0], description: line.description.split(" — ").slice(1).join(" — "), quantity: String(line.quantity), price: String(line.unit_price_cents / 100), vat: line.vat_rate }));
+    ({ title: proposalTitle, body: projectExplanation } = parseProposalContent(budget.project_explanation)); proposalTechnologies = proposalTechnologyForm(parseProposalContent(budget.project_explanation).technologies); paymentMethod = budget.payment_method; account = budget.account; tags = budget.tags.join(", "); notes = budget.notes; irpfRate = String(budget.irpf_rate); globalDiscountType = budget.global_discount_type ?? "percent"; globalDiscountValue = String(budget.global_discount_value ?? 0);
+    lines = budget.lines.map((line) => ({ concept: line.description.split(" — ")[0], description: line.description.split(" — ").slice(1).join(" — "), quantity: String(line.quantity), price: String(line.unit_price_cents / 100), discountType: line.discount_type ?? "percent", discountValue: String(line.discount_value ?? 0), vat: line.vat_rate }));
     if (!lines.length) lines = [emptyLine()];
     editorOpen = true;
   }
@@ -98,16 +134,40 @@
   function updateLine(index: number, key: keyof EditorLine, value: string) { lines = lines.map((line, i) => i === index ? { ...line, [key]: key === "vat" ? Number(value) as VatRate : value } : line); }
   function addLine() { lines = [...lines, emptyLine()]; }
   function removeLine(index: number) { if (lines.length > 1) lines = lines.filter((_, i) => i !== index); }
+  function editorLineTotal(line: EditorLine) {
+    const original = Math.round((Number(line.quantity) || 0) * (Number(line.price) || 0) * 100);
+    const value = Math.max(0, Number(line.discountValue) || 0);
+    const discount = Math.min(original, line.discountType === "percent" ? Math.round(original * Math.min(100, value) / 100) : Math.round(value * 100));
+    return Math.round((original - discount) * (1 + line.vat / 100));
+  }
+  function previewLines() {
+    const prepared = lines.filter((line) => line.concept || line.description || Number(line.price) > 0).map((line) => {
+      const quantity = Number(line.quantity) || 0;
+      const unitPrice = Math.round((Number(line.price) || 0) * 100);
+      const originalBase = Math.round(quantity * unitPrice);
+      const value = Math.max(0, Number(line.discountValue) || 0);
+      const discount = Math.min(originalBase, line.discountType === "percent" ? Math.round(originalBase * Math.min(100, value) / 100) : Math.round(value * 100));
+      return { description: line.concept || line.description, detail: line.description, quantity, unit_price_cents: unitPrice, vat_rate: line.vat, discount_cents: discount, base_cents: originalBase - discount, global_discount_cents: 0, total_cents: 0 };
+    });
+    const beforeGlobal = prepared.reduce((sum, line) => sum + line.base_cents, 0);
+    let allocated = 0;
+    return prepared.map((line, index) => {
+      const share = index === prepared.length - 1 ? editorTotals.globalDiscount - allocated : beforeGlobal ? Math.round(editorTotals.globalDiscount * line.base_cents / beforeGlobal) : 0;
+      allocated += share;
+      const base_cents = Math.max(0, line.base_cents - share);
+      return { ...line, global_discount_cents: share, base_cents, total_cents: base_cents + Math.round(base_cents * line.vat_rate / 100) };
+    });
+  }
 
   async function save(status: "draft" | "sent") {
     if (saving) return;
     if (!proposalTitle.trim()) { flash("Añade el título principal de la propuesta", true); return; }
     if (!projectExplanation.trim()) { flash("Explica primero el proyecto y su alcance", true); return; }
-    const normalized = lines.filter((line) => line.concept.trim() || line.description.trim() || Number(line.price) > 0).map((line) => ({ description: [line.concept.trim(), line.description.trim()].filter(Boolean).join(" — "), quantity: Number(line.quantity), unit_price_cents: Math.round((Number(line.price) || 0) * 100), vat_rate: line.vat }));
+    const normalized = lines.filter((line) => line.concept.trim() || line.description.trim() || Number(line.price) > 0).map((line) => ({ description: [line.concept.trim(), line.description.trim()].filter(Boolean).join(" — "), quantity: Number(line.quantity), unit_price_cents: Math.round((Number(line.price) || 0) * 100), discount_type: line.discountType, discount_value: Number(line.discountValue) || 0, vat_rate: line.vat }));
     if (!normalized.length) { flash("Añade al menos una línea al presupuesto", true); return; }
     saving = true;
     try {
-      const saved = await api.upsertBudget({ id: editingId, series, number: number || undefined, status, operation_date: operationDate, due_at: dueDate || null, customer_id: clientId ? Number(clientId) : null, project_explanation: serializeProposalContent(proposalTitle, projectExplanation), lines: normalized, irpf_rate: Number(irpfRate) || 0, payment_method: paymentMethod, account, tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean), notes });
+      const saved = await api.upsertBudget({ id: editingId, series, number: number || undefined, status, operation_date: operationDate, due_at: dueDate || null, customer_id: clientId ? Number(clientId) : null, project_explanation: serializeProposalContent(proposalTitle, projectExplanation, proposalTechnologyGroups(proposalTechnologies)), lines: normalized, global_discount_type: globalDiscountType, global_discount_value: Number(globalDiscountValue) || 0, irpf_rate: Number(irpfRate) || 0, payment_method: paymentMethod, account, tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean), notes });
       await load(); selected = saved; editorOpen = false; flash(status === "draft" ? "Borrador guardado en PostgreSQL" : "Presupuesto enviado y guardado en PostgreSQL");
     } catch (e) { flash(e instanceof Error ? e.message : "No se pudo guardar el presupuesto", true); }
     finally { saving = false; }
@@ -135,9 +195,9 @@
     catch (e) { flash(e instanceof Error ? e.message : "No se pudo eliminar", true); }
   }
 
-  function duplicate(budget: Budget) { actionId = null; selected = null; editingId = null; series = budget.series; number = ""; clientId = budget.customer_id == null ? "" : String(budget.customer_id); operationDate = new Date().toISOString().slice(0, 10); dueDate = budget.due_at ?? ""; ({ title: proposalTitle, body: projectExplanation } = parseProposalContent(budget.project_explanation)); paymentMethod = budget.payment_method; account = budget.account; tags = budget.tags.join(", "); notes = budget.notes; irpfRate = String(budget.irpf_rate); lines = budget.lines.map((line) => ({ concept: line.description, description: "", quantity: String(line.quantity), price: String(line.unit_price_cents / 100), vat: line.vat_rate })); editorOpen = true; }
+  function duplicate(budget: Budget) { actionId = null; selected = null; editingId = null; series = budget.series; number = ""; clientId = budget.customer_id == null ? "" : String(budget.customer_id); operationDate = new Date().toISOString().slice(0, 10); dueDate = budget.due_at ?? ""; ({ title: proposalTitle, body: projectExplanation } = parseProposalContent(budget.project_explanation)); proposalTechnologies = proposalTechnologyForm(parseProposalContent(budget.project_explanation).technologies); paymentMethod = budget.payment_method; account = budget.account; tags = budget.tags.join(", "); notes = budget.notes; irpfRate = String(budget.irpf_rate); globalDiscountType = budget.global_discount_type ?? "percent"; globalDiscountValue = String(budget.global_discount_value ?? 0); lines = budget.lines.map((line) => ({ concept: line.description, description: "", quantity: String(line.quantity), price: String(line.unit_price_cents / 100), discountType: line.discount_type ?? "percent", discountValue: String(line.discount_value ?? 0), vat: line.vat_rate })); editorOpen = true; }
   function printBudget(budget: Budget) { selected = budget; detailOpen = true; window.setTimeout(() => window.print(), 50); }
-  const pdfOptions = (filename: string) => ({ margin: [10, 0, 10, 0], filename, image: { type: "jpeg", quality: 0.98 }, html2canvas: { scale: 2, useCORS: true, backgroundColor: "#090610", logging: false }, jsPDF: { unit: "mm", format: "a4", orientation: "portrait" }, pagebreak: { mode: ["css", "legacy"], avoid: [".rich-phase-block", ".rich-technology-block", "tr", ".commercial-totals", ".commercial-conditions"] } });
+  const pdfOptions = (filename: string) => ({ margin: [10, 0, 10, 0], filename, image: { type: "jpeg", quality: 0.98 }, html2canvas: { scale: 2, useCORS: true, imageTimeout: 2500, backgroundColor: "#090610", logging: false }, jsPDF: { unit: "mm", format: "a4", orientation: "portrait" }, pagebreak: { mode: ["css", "legacy"], avoid: [".rich-section-lead", ".rich-phase-block", ".rich-technology-block", ".commercial-introduction ul", ".commercial-introduction ol", ".commercial-technologies", ".commercial-economics", ".commercial-table-wrap", "tr", ".commercial-totals", ".commercial-conditions"] } });
   async function paintPdfMargins(worker: ReturnType<(typeof import("html2pdf.js"))["default"]>) {
     const pdf = await worker.get("pdf") as { internal: { getNumberOfPages(): number; pageSize: { getWidth(): number; getHeight(): number }; pages: string[][] }; setPage(page: number): void; setFillColor(r: number, g: number, b: number): void; setTextColor(r: number, g: number, b: number): void; setFontSize(size: number): void; text(value: string, x: number, y: number, options?: { align?: "left" | "right" }): void; rect(x: number, y: number, width: number, height: number, style: string): void };
     const totalPages = pdf.internal.getNumberOfPages();
@@ -158,13 +218,62 @@
   function pdfFilename(value: string) {
     return `${value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "presupuesto"}.pdf`;
   }
+  const technologyLogoCache = new Map<string, string>();
+  async function rasterTechnologyLogo(name: string): Promise<string> {
+    if (technologyLogoCache.has(name)) return technologyLogoCache.get(name) ?? "";
+    const url = technologyLogoUrl(name);
+    if (!url) return "";
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 2500);
+    try {
+      const response = await fetch(url, { mode: "cors", signal: controller.signal });
+      if (!response.ok) return "";
+      const definition = technologyDefinition(name);
+      const svg = (await response.text()).replace("<svg", `<svg fill="#${definition?.color || "A855F7"}"`);
+      const objectUrl = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+      const source = new Image();
+      await new Promise<void>((resolve, reject) => {
+        source.onload = () => resolve(); source.onerror = () => reject(new Error("No se pudo decodificar el icono")); source.src = objectUrl;
+      });
+      const canvas = document.createElement("canvas"); canvas.width = 48; canvas.height = 48;
+      canvas.getContext("2d")?.drawImage(source, 0, 0, 48, 48); URL.revokeObjectURL(objectUrl);
+      const dataUrl = canvas.toDataURL("image/png"); technologyLogoCache.set(name, dataUrl); return dataUrl;
+    } catch { return ""; }
+    finally { window.clearTimeout(timeout); }
+  }
+  async function prepareTechnologyLogos(budget: Budget | null) {
+    const groups = budget ? parseProposalContent(budget.project_explanation).technologies : proposalTechnologyGroups(proposalTechnologies);
+    const names = [...new Set(Object.values(groups).flat())];
+    pdfTechnologyLogos = Object.fromEntries((await Promise.all(names.map(async (name) => [name, await rasterTechnologyLogo(name)] as const))).filter(([, logo]) => logo));
+  }
+  async function embedPdfImages() {
+    if (!pdfNode) return;
+    const remoteImages = [...pdfNode.querySelectorAll<HTMLImageElement>('img[src^="http"]')];
+    await Promise.all(remoteImages.map(async (image) => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 2000);
+      try {
+        const response = await fetch(image.src, { mode: "cors", signal: controller.signal });
+        if (!response.ok) throw new Error(`Logo ${response.status}`);
+        const blob = await response.blob();
+        image.src = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(blob);
+        });
+      } catch { image.removeAttribute("src"); }
+      finally { window.clearTimeout(timeout); }
+    }));
+  }
   async function downloadPdf(budget: Budget | null = null) {
     if (exportingPdf) return;
-    exportingPdf = true; actionId = null; pdfBudget = budget; pdfDraft = !budget;
+    exportingPdf = true; actionId = null; await prepareTechnologyLogos(budget); pdfBudget = budget; pdfDraft = !budget;
     try {
       await tick();
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       if (!pdfNode) throw new Error("No se pudo preparar el documento");
+      await embedPdfImages();
       const html2pdf = (await import("html2pdf.js")).default;
       const reference = budget ? `presupuesto-${budget.series}-${budget.number}` : `presupuesto-${series}-${number || "borrador"}`;
       const worker = html2pdf().set(pdfOptions(pdfFilename(reference))).from(pdfNode).toPdf();
@@ -177,11 +286,12 @@
   async function generatePdfPreview(budget: Budget | null) {
     previewGenerating = true;
     if (previewPdfUrl) URL.revokeObjectURL(previewPdfUrl);
-    previewPdfUrl = ""; pdfBudget = budget; pdfDraft = !budget;
+    previewPdfUrl = ""; await prepareTechnologyLogos(budget); pdfBudget = budget; pdfDraft = !budget;
     try {
       await tick();
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       if (!pdfNode) throw new Error("No se pudo preparar la vista previa");
+      await embedPdfImages();
       const html2pdf = (await import("html2pdf.js")).default;
       const worker = html2pdf().set(pdfOptions("vista-previa.pdf")).from(pdfNode).toPdf();
       await paintPdfMargins(worker);
@@ -208,7 +318,8 @@
 </section>
 
 <Modal open={editorOpen} title={editingId ? "Editar presupuesto" : "Nuevo presupuesto"} size="full" onclose={() => (editorOpen = false)}>
-  <section class="editor"><div class="editor-head"><div><button class="back" onclick={() => (editorOpen = false)}>‹ Volver</button><h2>{editingId ? "Editar presupuesto" : "Nuevo presupuesto"}</h2></div><div class="editor-actions"><Button variant="ghost" onclick={() => void openPreview()}>Vista previa</Button><Button variant="secondary" disabled={saving} onclick={() => void save("draft")}>Guardar borrador</Button><Button disabled={saving} onclick={() => void save("sent")}>{saving ? "Guardando…" : "Guardar y enviar"}</Button></div></div><div class="surface"><div class="explanation"><h3>Primero: explica el proyecto</h3><p>Esta introducción abre el documento y ayuda al cliente a entender el valor, alcance, fases y condiciones antes de ver los importes.</p><label class="proposal-title-field">Título de la propuesta<input class="field" bind:value={proposalTitle} placeholder="Ej. Motor de captación automatizada para Charging Box" /></label><RichDescriptionEditor id="budget-project-explanation" label="Contenido de la propuesta" bind:value={projectExplanation} rows={12} placeholder="Escribe el contexto y usa Título, Subtítulo o + Fase para estructurar la propuesta…" /></div><div class="meta-grid"><label>Contacto<select class="field" bind:value={clientId}><option value="">Seleccionar contacto</option>{#each customers as customer}<option value={customer.id}>{customer.name}{customer.nif ? ` · ${customer.nif}` : ""}</option>{/each}</select></label><label>Serie<input class="field" bind:value={series} maxlength="8" /></label><label>Número<input class="field" bind:value={number} placeholder="Automático" /></label><label>Fecha<DatePicker bind:value={operationDate} ariaLabel="Fecha del presupuesto" /></label><label>Vencimiento<DatePicker bind:value={dueDate} ariaLabel="Vencimiento del presupuesto" align="right" /></label></div><div class="line-head"><span>Concepto</span><span>Descripción</span><span>Cantidad</span><span>Precio</span><span>IVA</span><span>Total</span><span></span></div>{#each lines as line, index}<div class="line-row"><input class="field" placeholder="Servicio o concepto" value={line.concept} oninput={(event) => updateLine(index, "concept", event.currentTarget.value)} /><input class="field" placeholder="Detalle" value={line.description} oninput={(event) => updateLine(index, "description", event.currentTarget.value)} /><input class="field" type="number" min="0.01" step="0.01" value={line.quantity} oninput={(event) => updateLine(index, "quantity", event.currentTarget.value)} /><input class="field" type="number" min="0" step="0.01" value={line.price} oninput={(event) => updateLine(index, "price", event.currentTarget.value)} /><select class="field" value={line.vat} onchange={(event) => updateLine(index, "vat", event.currentTarget.value)}><option value={21}>21%</option><option value={10}>10%</option><option value={4}>4%</option><option value={0}>0%</option></select><span class="num">{formatEUR(Math.round((Number(line.quantity) || 0) * (Number(line.price) || 0) * 100 * (1 + line.vat / 100)))} </span><button class="remove" aria-label="Eliminar línea" onclick={() => removeLine(index)}>×</button></div>{/each}<Button class="Button" variant="secondary" onclick={addLine}>＋ Añadir línea</Button><div class="totals"><span>Subtotal <strong>{formatEUR(editorTotals.base)}</strong></span><span>IVA <strong>{formatEUR(editorTotals.vat)}</strong></span><label>Retención %<input class="field small" type="number" min="0" max="100" step="0.01" bind:value={irpfRate} /></label><span>Total <strong>{formatEUR(editorTotals.total)}</strong></span></div><div class="bottom-grid"><label>Método de pago<input class="field" bind:value={paymentMethod} placeholder="Transferencia bancaria…" /></label><label>Cuenta contable<input class="field" bind:value={account} placeholder="70000000 Ventas…" /></label><label>Etiquetas<input class="field" bind:value={tags} placeholder="servicio, proyecto…" /></label><label>Notas<input class="field" bind:value={notes} placeholder="Condiciones internas…" /></label></div></div></section>
+  <section class="editor"><div class="editor-head"><div><button class="back" onclick={() => (editorOpen = false)}>‹ Volver</button><h2>{editingId ? "Editar presupuesto" : "Nuevo presupuesto"}</h2></div><div class="editor-actions"><Button variant="ghost" onclick={() => void openPreview()}>Vista previa</Button><Button variant="secondary" disabled={saving} onclick={() => void save("draft")}>Guardar borrador</Button><Button disabled={saving} onclick={() => void save("sent")}>{saving ? "Guardando…" : "Guardar y enviar"}</Button></div></div><div class="surface"><div class="explanation"><h3>Primero: explica el proyecto</h3><p>Esta introducción abre el documento y ayuda al cliente a entender el valor, alcance, fases y condiciones antes de ver los importes.</p><label class="proposal-title-field">Título de la propuesta<input class="field" bind:value={proposalTitle} placeholder="Ej. Motor de captación automatizada para Charging Box" /></label><RichDescriptionEditor id="budget-project-explanation" label="Contenido de la propuesta" bind:value={projectExplanation} rows={12} placeholder="Escribe el contexto y usa Título, Subtítulo o + Fase para estructurar la propuesta…" /></div><div class="meta-grid"><label>Contacto<select class="field" bind:value={clientId}><option value="">Seleccionar contacto</option>{#each customers as customer}<option value={customer.id}>{customer.name}{customer.nif ? ` · ${customer.nif}` : ""}</option>{/each}</select></label><label>Serie<input class="field" bind:value={series} maxlength="8" /></label><label>Número<input class="field" bind:value={number} placeholder="Automático" /></label><label>Fecha<DatePicker bind:value={operationDate} ariaLabel="Fecha del presupuesto" /></label><label>Vencimiento<DatePicker bind:value={dueDate} ariaLabel="Vencimiento del presupuesto" align="right" /></label></div><div class="line-head"><span>Concepto</span><span>Descripción</span><span>Cantidad</span><span>Precio</span><span>Descuento</span><span>Valor</span><span>IVA</span><span>Total</span><span></span></div>{#each lines as line, index}<div class="line-row"><input class="field" placeholder="Servicio o concepto" value={line.concept} oninput={(event) => updateLine(index, "concept", event.currentTarget.value)} /><input class="field" placeholder="Detalle" value={line.description} oninput={(event) => updateLine(index, "description", event.currentTarget.value)} /><input class="field" type="number" min="0.01" step="0.01" value={line.quantity} oninput={(event) => updateLine(index, "quantity", event.currentTarget.value)} /><input class="field" type="number" min="0" step="0.01" value={line.price} oninput={(event) => updateLine(index, "price", event.currentTarget.value)} /><select class="field" value={line.discountType} onchange={(event) => updateLine(index, "discountType", event.currentTarget.value)}><option value="percent">%</option><option value="amount">Importe €</option></select><input class="field" type="number" min="0" max={line.discountType === "percent" ? 100 : undefined} step="0.01" value={line.discountValue} oninput={(event) => updateLine(index, "discountValue", event.currentTarget.value)} /><select class="field" value={line.vat} onchange={(event) => updateLine(index, "vat", event.currentTarget.value)}><option value={21}>21%</option><option value={10}>10%</option><option value={4}>4%</option><option value={0}>0%</option></select><span class="num">{formatEUR(editorLineTotal(line))}</span><button class="remove" aria-label="Eliminar línea" onclick={() => removeLine(index)}>×</button></div>{/each}<Button class="Button" variant="secondary" onclick={addLine}>＋ Añadir línea</Button><div class="totals"><label>Descuento general<select class="field discount-kind" bind:value={globalDiscountType}><option value="percent">%</option><option value="amount">Importe €</option></select><input class="field small" type="number" min="0" max={globalDiscountType === "percent" ? 100 : undefined} step="0.01" bind:value={globalDiscountValue} /></label>{#if editorTotals.globalDiscount > 0}<span>Descuento <strong>−{formatEUR(editorTotals.globalDiscount)}</strong></span>{/if}<span>Subtotal <strong>{formatEUR(editorTotals.base)}</strong></span><span>IVA <strong>{formatEUR(editorTotals.vat)}</strong></span><label>Retención %<input class="field small" type="number" min="0" max="100" step="0.01" bind:value={irpfRate} /></label><span>Total <strong>{formatEUR(editorTotals.total)}</strong></span></div><div class="bottom-grid"><label>Método de pago<input class="field" bind:value={paymentMethod} placeholder="Transferencia bancaria…" /></label><label>Cuenta contable<input class="field" bind:value={account} placeholder="70000000 Ventas…" /></label><label>Etiquetas<input class="field" bind:value={tags} placeholder="servicio, proyecto…" /></label><label>Notas<input class="field" bind:value={notes} placeholder="Condiciones internas…" /></label></div></div></section>
+  <div class="technology-editor"><ProposalTechnologyPicker bind:value={proposalTechnologies} /></div>
 </Modal>
 
 <Modal open={detailOpen && !!selected} title={selected ? `${selected.customer_name || "Presupuesto"} · ${selected.series}-${selected.number}` : "Presupuesto"} size="fluid" onclose={closeDetail}>
@@ -223,9 +334,9 @@
 {#if pdfBudget || pdfDraft}
   <div class="pdf-stage" aria-hidden="true"><div class="pdf-sheet" bind:this={pdfNode}>
     {#if pdfBudget}
-      <CommercialDocument company={$activeCompany} documentType="Propuesta comercial · Presupuesto" subject={parseProposalContent(pdfBudget.project_explanation).title} number={`${pdfBudget.series}-${pdfBudget.number}`} operationDate={pdfBudget.operation_date} dueDate={pdfBudget.due_at} customerName={pdfBudget.customer_name || "Sin cliente"} customerNif={pdfBudget.customer_nif || ""} customerEmail={pdfBudget.customer_email || ""} introduction={parseProposalContent(pdfBudget.project_explanation).body} lines={pdfBudget.lines.map((line) => ({ description: line.description.split(" — ")[0], detail: line.description.split(" — ").slice(1).join(" — "), quantity: line.quantity, unit_price_cents: line.unit_price_cents, vat_rate: line.vat_rate, total_cents: line.total_cents }))} baseCents={pdfBudget.base_cents} vatCents={pdfBudget.vat_cents} irpfCents={pdfBudget.irpf_cents} totalCents={pdfBudget.total_cents} notes={[pdfBudget.payment_method && `Método de pago: ${pdfBudget.payment_method}`, pdfBudget.notes].filter(Boolean).join("\n\n")} status={statusLabels[pdfBudget.status]} />
+      <CommercialDocument company={$activeCompany} documentType="Propuesta comercial · Presupuesto" subject={parseProposalContent(pdfBudget.project_explanation).title} number={`${pdfBudget.series}-${pdfBudget.number}`} operationDate={pdfBudget.operation_date} dueDate={pdfBudget.due_at} customerName={pdfBudget.customer_name || "Sin cliente"} customerNif={pdfBudget.customer_nif || ""} customerEmail={pdfBudget.customer_email || ""} introduction={parseProposalContent(pdfBudget.project_explanation).body} technologyGroups={proposalTechnologySections(parseProposalContent(pdfBudget.project_explanation).technologies)} technologyLogos={pdfTechnologyLogos} lines={pdfBudget.lines.map((line) => ({ description: line.description.split(" — ")[0], detail: line.description.split(" — ").slice(1).join(" — "), quantity: line.quantity, unit_price_cents: line.unit_price_cents, vat_rate: line.vat_rate, base_cents: line.base_cents, discount_cents: line.discount_cents, global_discount_cents: line.global_discount_cents, total_cents: line.total_cents }))} baseCents={pdfBudget.base_cents} vatCents={pdfBudget.vat_cents} irpfCents={pdfBudget.irpf_cents} totalCents={pdfBudget.total_cents} globalDiscountType={pdfBudget.global_discount_type} globalDiscountValue={pdfBudget.global_discount_value} globalDiscountCents={pdfBudget.lines.reduce((sum, line) => sum + (line.global_discount_cents || 0), 0)} notes={[pdfBudget.payment_method && `Método de pago: ${pdfBudget.payment_method}`, pdfBudget.notes].filter(Boolean).join("\n\n")} status={statusLabels[pdfBudget.status]} />
     {:else}
-      <CommercialDocument company={$activeCompany} documentType="Propuesta comercial · Presupuesto" subject={proposalTitle} number={`${series}-${number || "automático"}`} operationDate={operationDate} dueDate={dueDate} customerName={customers.find((customer) => String(customer.id) === clientId)?.name || "Sin cliente"} introduction={projectExplanation} lines={lines.filter((line) => line.concept || line.description || Number(line.price) > 0).map((line) => ({ description: line.concept || line.description, detail: line.description, quantity: Number(line.quantity) || 0, unit_price_cents: Math.round((Number(line.price) || 0) * 100), vat_rate: line.vat, total_cents: Math.round((Number(line.quantity) || 0) * (Number(line.price) || 0) * 100 * (1 + line.vat / 100)) }))} baseCents={editorTotals.base} vatCents={editorTotals.vat} irpfCents={editorTotals.irpf} totalCents={editorTotals.total} notes={[paymentMethod && `Método de pago: ${paymentMethod}`, notes].filter(Boolean).join("\n\n")} status="Vista previa" />
+      <CommercialDocument company={$activeCompany} documentType="Propuesta comercial · Presupuesto" subject={proposalTitle} number={`${series}-${number || "automático"}`} operationDate={operationDate} dueDate={dueDate} customerName={customers.find((customer) => String(customer.id) === clientId)?.name || "Sin cliente"} introduction={projectExplanation} technologyGroups={proposalTechnologySections(proposalTechnologyGroups(proposalTechnologies))} technologyLogos={pdfTechnologyLogos} lines={previewLines()} baseCents={editorTotals.base} vatCents={editorTotals.vat} irpfCents={editorTotals.irpf} totalCents={editorTotals.total} globalDiscountType={globalDiscountType} globalDiscountValue={Number(globalDiscountValue) || 0} globalDiscountCents={editorTotals.globalDiscount} notes={[paymentMethod && `Método de pago: ${paymentMethod}`, notes].filter(Boolean).join("\n\n")} status="Vista previa" />
     {/if}
   </div></div>
 {/if}
@@ -246,16 +357,21 @@
   .pdf-sheet :global(.commercial-company){font-size:1.72rem!important}
   .pdf-sheet :global(.commercial-subject){margin-top:.65rem!important;font-size:1.18rem!important}
   .pdf-sheet :global(.commercial-logo-frame){width:4.35rem!important;height:4.35rem!important}
+  .pdf-sheet :global(.commercial-kicker){display:none!important}
+  .pdf-sheet :global(.commercial-subject){margin-top:.55rem!important}
+  .pdf-sheet :global(.commercial-totals){display:none!important}
   .pdf-sheet :global(.commercial-meta){margin-top:1.15rem!important;padding-top:.9rem!important}
   .pdf-sheet :global(.commercial-document>footer){display:none!important}
   .pdf-sheet :global(.commercial-section>h3),.pdf-sheet :global(.commercial-section-heading>h3){display:flex!important;align-items:center!important;min-height:0!important;padding:0!important;border-left:0!important;background:none!important;gap:1rem!important;line-height:1.3!important}
-  .pdf-sheet :global(.commercial-section>h3 i),.pdf-sheet :global(.commercial-section-heading>h3 i){display:block!important;flex:0 0 .22rem!important;width:.22rem!important;height:.9em!important;border-radius:0!important;background:#a855f7!important}
-  .pdf-sheet :global(.commercial-introduction h2){display:block!important;min-height:1.5rem!important;margin:1.6rem 0 .72rem!important;padding:.06rem 0 .08rem 1rem!important;border-left:.28rem solid #a855f7!important;line-height:1.3!important}
-  .pdf-sheet :global(.commercial-introduction h2::before){display:none!important;content:none!important}
+  .pdf-sheet :global(.commercial-section>h3 i),.pdf-sheet :global(.commercial-section-heading>h3 i){display:block!important;flex:0 0 .22rem!important;width:.22rem!important;height:.9em!important;border-radius:0!important;background:#a855f7!important;transform:translateY(.27em)!important}
+  .pdf-sheet :global(.commercial-introduction h2){display:flex!important;align-items:center!important;min-height:0!important;margin:1.6rem 0 .72rem!important;padding:0!important;border-left:0!important;gap:1rem!important;line-height:1.3!important}
+  .pdf-sheet :global(.commercial-introduction h2::before){display:block!important;flex:0 0 .22rem!important;width:.22rem!important;height:.9em!important;border-radius:0!important;background:#a855f7!important;content:""!important;transform:translateY(.27em)!important}
   .pdf-sheet :global(.commercial-introduction ul){margin:.72rem 0 1.05rem!important;padding-left:1.55rem!important;list-style:none!important}
   .pdf-sheet :global(.commercial-introduction ul li){position:relative;padding-left:.15rem!important;line-height:1.55!important}
   .pdf-sheet :global(.commercial-introduction ul li::before){content:"•";position:absolute;left:-1.15rem;top:0;color:#a855f7;font-size:1rem;font-weight:800;line-height:1.55}
   .pdf-sheet :global(.commercial-introduction ul li::marker){content:""}
   .pdf-sheet :global(.commercial-introduction ol){margin:.72rem 0 1.05rem!important;padding-left:1.75rem!important}
   .pdf-sheet :global(.commercial-introduction ol li){padding-left:.15rem!important;line-height:1.55!important}
+  .line-head,.line-row{grid-template-columns:minmax(9rem,1.3fr) minmax(10rem,1.7fr) 5rem 6.5rem 6.5rem 5.5rem 5rem 7rem 2rem;gap:.45rem}
+  .discount-kind{width:7rem}
 </style>

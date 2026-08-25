@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy, tick } from "svelte";
   import { page } from "$app/stores";
   import { goto } from "$app/navigation";
   import { api } from "$lib/api/client";
@@ -17,6 +18,7 @@
     Customer,
     CashKind,
     CashMovement,
+    Invoice,
     WorkProjectDocumentInput,
     WorkProjectRequest,
     WorkProjectRequestStatus,
@@ -31,6 +33,7 @@
   import Select from "$lib/components/Select.svelte";
   import Input from "$lib/components/Input.svelte";
   import DatePicker from "$lib/components/DatePicker.svelte";
+  import DateRangePicker from "$lib/components/DateRangePicker.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import RichDescription from "$lib/components/RichDescription.svelte";
   import RichDescriptionEditor from "$lib/components/RichDescriptionEditor.svelte";
@@ -46,6 +49,9 @@
   import { projectLogoDataUrl } from "$lib/projects/project-logo";
   import ProjectProgress from "$lib/components/projects/ProjectProgress.svelte";
   import ProjectManagementCenter from "$lib/components/projects/ProjectManagementCenter.svelte";
+  import SprintCenter from "$lib/components/projects/SprintCenter.svelte";
+  import { normalizeProjectManagement } from "$lib/projects/management";
+  import { currentSprint, sprintTasks } from "$lib/projects/sprints";
   import TechnologyPicker from "$lib/components/projects/TechnologyPicker.svelte";
   import TechnologyBadge from "$lib/components/projects/TechnologyBadge.svelte";
   import AssigneeAvatar from "$lib/components/users/AssigneeAvatar.svelte";
@@ -84,16 +90,34 @@
   let projectsList = $state<WorkProject[]>([]);
   let customers = $state<Customer[]>([]);
   let cashMovements = $state<CashMovement[]>([]);
+  let invoices = $state<Invoice[]>([]);
   let loading = $state(true);
+  let loadedDataProjectUid = $state("");
+  let tasksLoaded = $state(false);
+  let categoriesLoaded = $state(false);
+  let membersLoaded = $state(false);
+  let projectsLoaded = $state(false);
+  let customersLoaded = $state(false);
+  let cashMovementsLoaded = $state(false);
+  let invoicesLoaded = $state(false);
+  let sectionDataLoading = $state(false);
+  let projectDescriptionExpanded = $state(false);
 
   let viewMode = $state<"lista" | "kanban">(
     browser && localStorage.getItem("hexa-project-view") === "kanban" ? "kanban" : "lista",
   );
+  let workScope = $state<"sprint" | "backlog">("sprint");
   let draggedTaskId = $state<number | null>(null);
   let dragOverStatus = $state<WorkStatus | null>(null);
   let dragOverParentId = $state<number | null>(null);
   let suppressTaskClick = $state(false);
   let statusUpdatingTaskId = $state<number | null>(null);
+  let kanbanScrollLeft = $state(0);
+  let kanbanAutoScrollFrame: number | null = null;
+  let kanbanAutoScrollSpeed = 0;
+  let kanbanAutoScrollElement: HTMLElement | null = null;
+  let kanbanBoardElement: HTMLElement | null = null;
+  let kanbanDragCancelled = false;
   let collapsedParentIds = $state<Set<number>>(new Set());
   let collapsedInitializedProject = $state("");
 
@@ -368,7 +392,7 @@
       .map((task) => ({ value: String(task.id), label: task.title })),
   ]);
 
-  async function loadData() {
+  async function loadData(refreshSection = true) {
     if (!projectReference) return;
     loading = true;
     try {
@@ -380,33 +404,27 @@
         setActiveCompanyLocal(workspace);
         return;
       }
-      const [itemsList, catList, memList, pList, customerList, movementList] = await Promise.all([
-        api.listWorkItems({ project_id: p.id }),
-        api.listWorkCategories(),
-        api.listWorkMembers(),
-        api.listWorkProjects(),
-        api.listCustomers(hexaCompanyId()),
-        api.listCashMovements(),
-      ]);
-      project = p;
-      tasks = itemsList;
-      if (collapsedInitializedProject !== p.uid) {
-        collapsedParentIds = new Set(
-          itemsList
-            .filter((task) => task.parent_id != null)
-            .map((task) => task.parent_id as number),
-        );
-        collapsedInitializedProject = p.uid;
+      if (loadedDataProjectUid !== p.uid) {
+        tasks = [];
+        categories = [];
+        members = [];
+        projectsList = [];
+        customers = [];
+        cashMovements = [];
+        invoices = [];
+        tasksLoaded = categoriesLoaded = membersLoaded = projectsLoaded = customersLoaded = cashMovementsLoaded = invoicesLoaded = false;
+        loadedDataProjectUid = p.uid;
+        projectDescriptionExpanded = false;
+      } else if (refreshSection) {
+        tasksLoaded = categoriesLoaded = membersLoaded = projectsLoaded = customersLoaded = cashMovementsLoaded = invoicesLoaded = false;
       }
-      categories = catList;
-      members = memList;
-      projectsList = pList;
-      customers = customerList;
-      cashMovements = movementList;
+      project = p;
       if (projectReference !== p.uid) {
         await goto(`/proyectos/${p.uid}${$page.url.search}`, { replaceState: true, noScroll: true });
       }
       if ($page.url.searchParams.get("estado") === "pendientes") filterStatus = "pending";
+      loading = false;
+      void loadSectionData(activeProjectSection, p);
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Error al cargar el proyecto", "err");
     } finally {
@@ -414,10 +432,64 @@
     }
   }
 
+  async function loadSectionData(section: ProjectSection, currentProject = project) {
+    if (!currentProject || sectionDataLoading) return;
+    // El progreso forma parte de la cabecera en todas las secciones.
+    const needsTasks = true;
+    const needsMembers = ["resumen", "plan", "trabajo", "equipo", "actividad", "solicitudes"].includes(section);
+    const needsProjects = ["resumen", "plan", "trabajo", "equipo", "actividad"].includes(section);
+    const needsCategories = section === "trabajo";
+    const needsCustomers = section === "resumen";
+    const needsCash = section === "economia";
+    const requests: Promise<void>[] = [];
+    if (needsTasks && !tasksLoaded) requests.push(api.listWorkItems({ project_id: currentProject.id }).then((value) => {
+      tasks = value;
+      tasksLoaded = true;
+      if (collapsedInitializedProject !== currentProject.uid) {
+        collapsedParentIds = new Set(value.filter((task) => task.parent_id != null).map((task) => task.parent_id as number));
+        collapsedInitializedProject = currentProject.uid;
+      }
+    }));
+    if (needsCategories && !categoriesLoaded) requests.push(api.listWorkCategories().then((value) => { categories = value; categoriesLoaded = true; }));
+    if (needsMembers && !membersLoaded) requests.push(api.listWorkMembers().then((value) => { members = value; membersLoaded = true; }));
+    if (needsProjects && !projectsLoaded) requests.push(api.listWorkProjects().then((value) => { projectsList = value; projectsLoaded = true; }));
+    if (needsCustomers && !customersLoaded) requests.push(api.listCustomers(hexaCompanyId()).then((value) => { customers = value; customersLoaded = true; }));
+    if (needsCash && !cashMovementsLoaded) requests.push(api.listCashMovements().then((value) => { cashMovements = value; cashMovementsLoaded = true; }));
+    if (needsCash && !invoicesLoaded) requests.push(api.listInvoices().then((value) => { invoices = value; invoicesLoaded = true; }));
+    if (!requests.length) return;
+    sectionDataLoading = true;
+    try {
+      await Promise.all(requests);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudieron cargar los datos de esta sección", "err");
+    } finally {
+      sectionDataLoading = false;
+    }
+  }
+
+  const activeSectionDataReady = $derived.by(() => {
+    switch (activeProjectSection) {
+      case "trabajo": return tasksLoaded && categoriesLoaded && membersLoaded && projectsLoaded;
+      case "resumen": return tasksLoaded && membersLoaded && projectsLoaded && customersLoaded;
+      case "plan":
+      case "equipo":
+      case "actividad": return tasksLoaded && membersLoaded && projectsLoaded;
+      case "solicitudes": return tasksLoaded && membersLoaded;
+      case "economia": return cashMovementsLoaded;
+      case "documentos": return true;
+    }
+  });
+
   $effect(() => {
     const _cid = $session.activeCompanyId;
     const _reference = projectReference;
-    loadData();
+    loadData(false);
+  });
+
+  $effect(() => {
+    const section = activeProjectSection;
+    const currentProject = project;
+    if (currentProject) void loadSectionData(section, currentProject);
   });
 
   $effect(() => {
@@ -462,24 +534,36 @@
   const projectCashMovements = $derived(
     cashMovements.filter((movement) => movement.project_id === projectId),
   );
+  const projectIssuedInvoices = $derived(
+    invoices.filter((invoice) => invoice.project_id === projectId && invoice.status === "issued"),
+  );
   const projectBilledCents = $derived(
+    projectIssuedInvoices.reduce((sum, invoice) => sum + invoice.total_cents, 0),
+  );
+  const projectCollectedCents = $derived(
     projectCashMovements
       .filter((movement) => movement.kind === "income")
       .reduce((sum, movement) => sum + movement.amount_cents, 0),
+  );
+  const projectMilestoneTotalCents = $derived(
+    project?.revenue_milestones.reduce((sum, milestone) => sum + milestone.amount_cents, 0) ?? 0,
   );
   const projectSpentCents = $derived(
     projectCashMovements
       .filter((movement) => movement.kind === "expense")
       .reduce((sum, movement) => sum + movement.amount_cents, 0),
   );
-  const economicSeries = $derived(project ? buildProjectEconomicSeries(project, projectCashMovements) : []);
+  const economicSeries = $derived(project ? buildProjectEconomicSeries(project, projectCashMovements, new Date(), invoices) : []);
   const economicChartMax = $derived(Math.max(1, ...economicSeries.flatMap((point) => [point.planned_cents, point.billed_cents])));
   const economicPlannedPoints = $derived(economicSeries.map((point, index) => `${36 + index * (648 / Math.max(1, economicSeries.length - 1))},${112 - (point.planned_cents / economicChartMax) * 76}`).join(" "));
   const economicBilledPoints = $derived(economicSeries.map((point, index) => `${36 + index * (648 / Math.max(1, economicSeries.length - 1))},${112 - (point.billed_cents / economicChartMax) * 76}`).join(" "));
+  const selectedSprint = $derived(project ? currentSprint(normalizeProjectManagement(project.management).cycles) : null);
+  const selectedSprintTaskIds = $derived(new Set(sprintTasks(selectedSprint, tasks).map((task) => task.id)));
 
   // Filter tasks
   const filteredTasks = $derived(
     sortTasksByDueDate(tasks.filter((task) => {
+      if (workScope === "sprint" && selectedSprint && !selectedSprintTaskIds.has(task.id)) return false;
       if (filterText.trim()) {
         const q = filterText.trim().toLowerCase();
         const titleMatch = task.title.toLowerCase().includes(q);
@@ -555,6 +639,17 @@
 
   function taskIsDueSoon(task: WorkItem) {
     return !taskIsDanger(task) && (isTaskDueSoon(task) || hasSubtaskDueSoon(task.id));
+  }
+
+  function sprintExecutionMode(task: WorkItem) {
+    const rootId = task.parent_id ?? task.id;
+    return selectedSprint?.execution_modes?.[String(rootId)] ?? null;
+  }
+
+  function sprintReviewerName(task: WorkItem) {
+    const rootId = task.parent_id ?? task.id;
+    const reviewerId = selectedSprint?.reviewer_ids?.[String(rootId)];
+    return reviewerId ? members.find((member) => member.id === reviewerId)?.display_name ?? "Revisor" : "";
   }
 
   function columnTasks(status: WorkStatus) {
@@ -1364,25 +1459,83 @@
   }
 
   // Change status directly in Kanban
+  function syncParentStatuses(taskList: WorkItem[], parentIds: Array<number | null | undefined>) {
+    const affected = new Set(parentIds.filter((id): id is number => id != null));
+    return taskList.map((item) => {
+      if (!affected.has(item.id)) return item;
+      const children = taskList.filter((child) => child.parent_id === item.id && child.status !== "archived");
+      if (!children.length) return item;
+      const status: WorkStatus = children.every((child) => child.status === "done")
+        ? "done"
+        : children.some((child) => child.status === "blocked")
+          ? "blocked"
+          : children.some((child) => child.status === "validation")
+            ? "validation"
+            : children.some((child) => child.status === "in_progress")
+              ? "in_progress"
+              : children.some((child) => child.status === "planned")
+                ? "planned"
+                : "inbox";
+      return item.status === status ? item : { ...item, status };
+    });
+  }
+
+  function taskCardRect(taskId: number) {
+    return document.querySelector<HTMLElement>(`[data-kanban-task-id="${taskId}"]`)?.getBoundingClientRect();
+  }
+
+  async function animateMovedTask(taskId: number, previousRect?: DOMRect) {
+    await tick();
+    const element = document.querySelector<HTMLElement>(`[data-kanban-task-id="${taskId}"]`);
+    if (!element) return;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const currentRect = element.getBoundingClientRect();
+    if (previousRect && !reducedMotion) {
+      const deltaX = previousRect.left - currentRect.left;
+      const deltaY = previousRect.top - currentRect.top;
+      if (Math.abs(deltaX) > 1 || Math.abs(deltaY) > 1) {
+        element.animate(
+          [
+            { transform: `translate(${deltaX}px, ${deltaY}px)`, opacity: 0.72, boxShadow: "0 0 0 2px rgba(168,85,247,.5)" },
+            { transform: "translate(0, 0)", opacity: 1, boxShadow: "0 0 0 0 rgba(168,85,247,0)" },
+          ],
+          { duration: 420, easing: "cubic-bezier(.22,.8,.3,1)" },
+        );
+      }
+    }
+    const margin = 20;
+    const outsideViewport = currentRect.left < margin || currentRect.right > window.innerWidth - margin
+      || currentRect.top < margin || currentRect.bottom > window.innerHeight - margin;
+    if (outsideViewport) {
+      element.scrollIntoView({ block: "nearest", inline: "nearest", behavior: reducedMotion ? "auto" : "smooth" });
+    }
+  }
+
   async function updateTaskStatus(task: WorkItem, newStatus: WorkStatus) {
     if (task.status === newStatus || statusUpdatingTaskId === task.id) return;
-    const previousStatus = task.status;
+    const previousTasks = tasks;
+    const previousRect = taskCardRect(task.id);
     statusUpdatingTaskId = task.id;
-    tasks = tasks.map((item) =>
-      item.id === task.id ? { ...item, status: newStatus } : item,
+    tasks = syncParentStatuses(
+      tasks.map((item) => item.id === task.id ? { ...item, status: newStatus } : item),
+      [task.parent_id],
     );
+    void animateMovedTask(task.id, previousRect);
     try {
-      await api.upsertWorkItem({
+      const saved = await api.upsertWorkItem({
         id: task.id,
         title: task.title,
         status: newStatus,
       });
-      await loadData();
+      tasks = syncParentStatuses(
+        tasks.map((item) => item.id === saved.id ? { ...item, ...saved } : item),
+        [saved.parent_id],
+      );
+      void animateMovedTask(saved.id);
       showToast(`Estado actualizado a ${taskStatusLabel(newStatus)}`);
     } catch (err) {
-      tasks = tasks.map((item) =>
-        item.id === task.id ? { ...item, status: previousStatus } : item,
-      );
+      tasks = previousTasks;
+      void animateMovedTask(task.id);
       showToast(err instanceof Error ? err.message : "Error al actualizar estado", "err");
     } finally {
       statusUpdatingTaskId = null;
@@ -1396,16 +1549,30 @@
       hasSubtasks(task.id) ||
       statusUpdatingTaskId === task.id
     ) return;
+    const previousTasks = tasks;
+    const previousParentId = task.parent_id;
+    const previousRect = taskCardRect(task.id);
     statusUpdatingTaskId = task.id;
+    tasks = syncParentStatuses(
+      tasks.map((item) => item.id === task.id ? { ...item, parent_id: parent.id, project_id: parent.project_id } : item),
+      [previousParentId, parent.id],
+    );
+    void animateMovedTask(task.id, previousRect);
     try {
-      await api.upsertWorkItem({
+      const saved = await api.upsertWorkItem({
         id: task.id,
         title: task.title,
         parent_id: parent.id,
       });
+      tasks = syncParentStatuses(
+        tasks.map((item) => item.id === saved.id ? { ...item, ...saved } : item),
+        [previousParentId, saved.parent_id],
+      );
+      void animateMovedTask(saved.id);
       showToast(`«${task.title}» ahora es subtarea de «${parent.title}»`);
-      await loadData();
     } catch (err) {
+      tasks = previousTasks;
+      void animateMovedTask(task.id);
       showToast(err instanceof Error ? err.message : "Error al mover la subtarea", "err");
     } finally {
       statusUpdatingTaskId = null;
@@ -1420,13 +1587,85 @@
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", String(task.id));
     draggedTaskId = task.id;
+    kanbanDragCancelled = false;
     suppressTaskClick = true;
+    document.addEventListener("dragover", handleKanbanBoardDragOver, true);
+    document.addEventListener("drag", handleKanbanBoardDragOver, true);
+    document.addEventListener("keydown", handleKanbanDragKeydown, true);
   }
 
-  function handleTaskDragEnd() {
+  function stopKanbanAutoScroll() {
+    kanbanAutoScrollSpeed = 0;
+    kanbanAutoScrollElement = null;
+    if (kanbanAutoScrollFrame !== null) cancelAnimationFrame(kanbanAutoScrollFrame);
+    kanbanAutoScrollFrame = null;
+  }
+
+  function runKanbanAutoScroll() {
+    if (!kanbanAutoScrollElement || kanbanAutoScrollSpeed === 0) {
+      stopKanbanAutoScroll();
+      return;
+    }
+    kanbanAutoScrollElement.scrollLeft += kanbanAutoScrollSpeed;
+    kanbanScrollLeft = kanbanAutoScrollElement.scrollLeft;
+    kanbanAutoScrollFrame = requestAnimationFrame(runKanbanAutoScroll);
+  }
+
+  function handleKanbanBoardDragOver(event: DragEvent) {
+    if (draggedTaskId === null || !kanbanBoardElement) return;
+    if (event.type === "dragover") event.preventDefault();
+    if (event.clientX === 0 && event.clientY === 0) return;
+    const board = kanbanBoardElement;
+    const rect = board.getBoundingClientRect();
+    if (event.clientY < rect.top || event.clientY > rect.bottom) {
+      stopKanbanAutoScroll();
+      return;
+    }
+    const visibleLeft = Math.max(0, rect.left);
+    const visibleRight = Math.min(window.innerWidth, rect.right);
+    const edgeSize = Math.min(140, (visibleRight - visibleLeft) * 0.2);
+    const leftDistance = event.clientX - visibleLeft;
+    const rightDistance = visibleRight - event.clientX;
+    const maxSpeed = 22;
+    kanbanAutoScrollElement = board;
+    kanbanAutoScrollSpeed = leftDistance < edgeSize
+      ? -maxSpeed * (1 - Math.max(0, leftDistance) / edgeSize)
+      : rightDistance < edgeSize
+        ? maxSpeed * (1 - Math.max(0, rightDistance) / edgeSize)
+        : 0;
+    if (kanbanAutoScrollSpeed === 0) {
+      stopKanbanAutoScroll();
+    } else if (kanbanAutoScrollFrame === null) {
+      board.scrollLeft += kanbanAutoScrollSpeed;
+      kanbanScrollLeft = board.scrollLeft;
+      kanbanAutoScrollFrame = requestAnimationFrame(runKanbanAutoScroll);
+    }
+  }
+
+  function handleKanbanDragKeydown(event: KeyboardEvent) {
+    if (event.key !== "Escape" || draggedTaskId === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    kanbanDragCancelled = true;
     draggedTaskId = null;
     dragOverStatus = null;
     dragOverParentId = null;
+    finishKanbanDragTracking();
+  }
+
+  function finishKanbanDragTracking() {
+    stopKanbanAutoScroll();
+    document.removeEventListener("dragover", handleKanbanBoardDragOver, true);
+    document.removeEventListener("drag", handleKanbanBoardDragOver, true);
+    document.removeEventListener("keydown", handleKanbanDragKeydown, true);
+  }
+
+  function handleTaskDragEnd() {
+    finishKanbanDragTracking();
+    draggedTaskId = null;
+    dragOverStatus = null;
+    dragOverParentId = null;
+    kanbanDragCancelled = false;
     setTimeout(() => {
       suppressTaskClick = false;
     }, 0);
@@ -1441,6 +1680,13 @@
 
   function handleTaskDrop(event: DragEvent, status: WorkStatus) {
     event.preventDefault();
+    finishKanbanDragTracking();
+    if (kanbanDragCancelled) {
+      kanbanDragCancelled = false;
+      draggedTaskId = null;
+      dragOverStatus = null;
+      return;
+    }
     const transferredId = Number(event.dataTransfer?.getData("text/plain"));
     const taskId = draggedTaskId ?? (Number.isFinite(transferredId) ? transferredId : null);
     const task = tasks.find((item) => item.id === taskId);
@@ -1480,6 +1726,14 @@
     if (!event.shiftKey) return;
     event.preventDefault();
     event.stopPropagation();
+    finishKanbanDragTracking();
+    if (kanbanDragCancelled) {
+      kanbanDragCancelled = false;
+      draggedTaskId = null;
+      dragOverParentId = null;
+      dragOverStatus = null;
+      return;
+    }
     const transferredId = Number(event.dataTransfer?.getData("text/plain"));
     const taskId = draggedTaskId ?? (Number.isFinite(transferredId) ? transferredId : null);
     const task = tasks.find((item) => item.id === taskId);
@@ -1488,6 +1742,10 @@
     dragOverStatus = null;
     if (task) void updateTaskParent(task, parent);
   }
+
+  onDestroy(() => {
+    if (browser) finishKanbanDragTracking();
+  });
 
 
 </script>
@@ -1544,7 +1802,14 @@
           </div>
 
           {#if project.description}
-            <RichDescription value={project.description} class="mb-4 text-sm leading-relaxed text-[var(--color-muted)]" />
+            <div class="relative mb-3">
+              <div class="overflow-hidden transition-[max-height] duration-500 ease-out {projectDescriptionExpanded ? 'max-h-[80rem]' : 'max-h-[3.25rem]'}">
+                <RichDescription value={project.description} class="text-sm leading-relaxed text-[var(--color-muted)]" />
+              </div>
+              {#if !projectDescriptionExpanded}
+                <div class="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-[var(--color-obsidian-panel)] to-transparent"></div>
+              {/if}
+            </div>
           {/if}
 
           <div class="flex flex-wrap items-center gap-6 text-xs text-[var(--color-muted-dim)]">
@@ -1562,11 +1827,22 @@
               <span>Inicio: <strong class="text-[var(--color-text)]">{formatDate(project.start_date)}</strong></span>
             {/if}
             <span>Objetivo: <strong class="text-[var(--color-text)]">{formatDate(project.target_date)}</strong></span>
+            {#if project.description}
+              <button
+                type="button"
+                class="ml-auto inline-flex items-center gap-1 pl-4 font-medium text-[var(--color-purple-bright)] hover:text-white"
+                aria-expanded={projectDescriptionExpanded}
+                onclick={() => (projectDescriptionExpanded = !projectDescriptionExpanded)}
+              >
+                {projectDescriptionExpanded ? "Ver menos" : "Ver más"}
+                <span class="transition-transform duration-300 {projectDescriptionExpanded ? 'rotate-180' : ''}" aria-hidden="true">⌄</span>
+              </button>
+            {/if}
           </div>
           </div>
         </div>
 
-        <ProjectProgress total={totalTasks} completed={completedTasks} blocked={blockedTasks} progress={progressPercent} />
+        <ProjectProgress total={totalTasks} completed={completedTasks} blocked={blockedTasks} progress={progressPercent} ready={tasksLoaded} />
       </div>
     </Card>
 
@@ -1580,6 +1856,15 @@
         >{section.label}</button>
       {/each}
     </nav>
+
+    {#if !activeSectionDataReady}
+      <Card lift={false} class="mb-6 border border-[var(--color-border)] bg-black/10 p-6" data-project-section-loading>
+        <div class="flex items-center gap-3 text-sm text-[var(--color-muted)]">
+          <span class="h-4 w-4 animate-spin rounded-full border-2 border-purple-400/30 border-t-purple-300" aria-hidden="true"></span>
+          <span>Cargando {projectSections.find((section) => section.id === activeProjectSection)?.label.toLowerCase()}…</span>
+        </div>
+      </Card>
+    {:else}
 
     {#if activeProjectSection === "plan"}
     <ProjectManagementCenter project={project} {tasks} {members} projects={projectsList} mode="plan" onsaved={(saved) => (project = saved)} />
@@ -1755,7 +2040,7 @@
           </div>
           <div class="rounded-xl border border-emerald-400/20 bg-emerald-500/[0.06] p-3">
             <p class="text-xs text-[var(--color-muted)]">Cobrado</p>
-            <p class="mt-1 text-xl font-semibold text-emerald-300">{formatEUR(projectBilledCents)}</p>
+            <p class="mt-1 text-xl font-semibold text-emerald-300">{formatEUR(projectCollectedCents)}</p>
           </div>
           <div class="rounded-xl border border-rose-400/20 bg-rose-500/[0.06] p-3">
             <p class="text-xs text-[var(--color-muted)]">Gastado</p>
@@ -1763,14 +2048,14 @@
           </div>
           <div class="rounded-xl border border-cyan-400/20 bg-cyan-500/[0.06] p-3">
             <p class="text-xs text-[var(--color-muted)]">Resultado de caja</p>
-            <p class="mt-1 text-xl font-semibold text-cyan-300">{formatEUR(projectBilledCents - projectSpentCents)}</p>
+            <p class="mt-1 text-xl font-semibold text-cyan-300">{formatEUR(projectCollectedCents - projectSpentCents)}</p>
           </div>
         </div>
       {:else}
         <div class="rounded-xl border border-purple-400/20 bg-purple-500/[0.06] p-3">
           <p class="text-xs text-[var(--color-muted)]">Estimación total de hitos</p>
           <p class="mt-1 text-xl font-semibold text-radiant">
-            {formatEUR(project.revenue_milestones.reduce((sum, milestone) => sum + milestone.amount_cents, 0))}
+            {formatEUR(projectMilestoneTotalCents)}
           </p>
         </div>
       {/if}
@@ -1855,7 +2140,7 @@
         <p class="text-2xl font-semibold text-cyan-200">{project.documents.length}</p><p class="mt-1 text-xs text-[var(--color-muted)]">Documentos vinculados · abrir →</p>
       </button>
       <button type="button" onclick={() => openProjectSection("economia")} class="rounded-2xl border border-emerald-400/20 bg-emerald-500/[0.05] p-4 text-left transition hover:border-emerald-400/40">
-        <p class="text-2xl font-semibold text-emerald-200">{formatEUR(projectType(project.project_type, project.customer_id) === "client" ? projectBilledCents : project.value_cents)}</p><p class="mt-1 text-xs text-[var(--color-muted)]">{projectType(project.project_type, project.customer_id) === "client" ? "Cobrado" : "Valor estimado"} · economía →</p>
+        <p class="text-2xl font-semibold text-emerald-200">{formatEUR(projectType(project.project_type, project.customer_id) === "client" ? projectBilledCents : projectMilestoneTotalCents)}</p><p class="mt-1 text-xs text-[var(--color-muted)]">{projectType(project.project_type, project.customer_id) === "client" ? "Facturado" : "Hitos previstos"} · economía →</p>
       </button>
     </div>
     <details open class="mb-6 rounded-2xl border border-[var(--color-border)] bg-black/10 p-4">
@@ -1893,17 +2178,18 @@
     {/if}
 
     {#if activeProjectSection === "trabajo"}
+    <SprintCenter project={project} {tasks} {members} onsaved={(saved) => (project = saved)} />
     <!-- Project work sections -->
     <div id="project-work-sections" class="mb-3 flex flex-wrap items-end justify-between gap-2">
       <div>
-        <span class="section-label">APARTADOS DEL PROYECTO</span>
-        <p class="mt-1 text-xs text-[var(--color-muted-dim)]">Organiza aquí el trabajo del proyecto por tareas, hitos e incidencias.</p>
+        <span class="section-label">{workScope === "sprint" && selectedSprint ? selectedSprint.name : "BACKLOG DEL PROYECTO"}</span>
+        <p class="mt-1 text-xs text-[var(--color-muted-dim)]">{workScope === "sprint" && selectedSprint ? "El Kanban muestra únicamente el alcance comprometido del sprint." : "Organiza y refina aquí todo el trabajo antes de llevarlo a un sprint."}</p>
       </div>
-      <span class="text-xs tabular text-[var(--color-muted)]">{tasks.length} apartado{tasks.length === 1 ? "" : "s"}</span>
+      <div class="flex items-center gap-2"><div class="inline-flex rounded-xl border border-[var(--color-border)] bg-black/20 p-1"><button type="button" class="rounded-lg px-3 py-1.5 text-xs {workScope === 'sprint' ? 'bg-purple-500/25 text-purple-100' : 'text-[var(--color-muted)]'}" onclick={() => (workScope = "sprint")} disabled={!selectedSprint}>Sprint actual</button><button type="button" class="rounded-lg px-3 py-1.5 text-xs {workScope === 'backlog' ? 'bg-purple-500/25 text-purple-100' : 'text-[var(--color-muted)]'}" onclick={() => (workScope = "backlog")}>Backlog completo</button></div><span class="text-xs tabular text-[var(--color-muted)]">{filteredTasks.length} tareas</span></div>
     </div>
 
     <!-- Quick Capture Form for this Project -->
-    <Card lift={false} class="mb-6 border border-[var(--color-border)] bg-purple-950/10 p-4">
+    {#if workScope === "backlog" || !selectedSprint}<Card lift={false} class="mb-6 border border-[var(--color-border)] bg-purple-950/10 p-4">
       <form
         onsubmit={(e) => {
           e.preventDefault();
@@ -1921,7 +2207,7 @@
           + Guardar tarea
         </Button>
       </form>
-    </Card>
+    </Card>{/if}
 
     <!-- Workspace Toolbar: Filters & View Mode Toggle -->
     <div class="workspace-toolbar mb-6 flex flex-wrap items-center justify-between gap-3">
@@ -2051,6 +2337,7 @@
                   <h3 class="text-sm font-semibold text-[var(--color-text)] group-hover:text-[var(--color-purple-bright)]">{task.title}</h3>
                   <Badge tone={statusBadgeTone(task.status)}>{taskStatusLabel(task.status)}</Badge>
                   <Badge tone={priorityBadgeTone(task.priority)}>{priorityLabel(task.priority)}</Badge>
+                  {#if sprintExecutionMode(task)}<Badge tone={sprintExecutionMode(task) === "ai" ? "ai" : sprintExecutionMode(task) === "hybrid" ? "info" : "neutral"}>{sprintExecutionMode(task) === "ai" ? "IA" : sprintExecutionMode(task) === "hybrid" ? "IA + persona" : "Persona"}{sprintReviewerName(task) ? ` · revisa ${sprintReviewerName(task)}` : ""}</Badge>{/if}
                   {#if hasSubtaskAtRisk(task.id)}<Badge tone="danger">Subtarea en peligro</Badge>{/if}
                 </div>
                 {#if task.description}
@@ -2130,26 +2417,36 @@
         <p class="mb-3 text-xs text-[var(--color-muted-dim)]">
           Las cabeceras permanecen visibles al desplazarte. En pantalla táctil o pantallas estrechas, desliza horizontalmente para ver todas las columnas, incluida «Hecho».
         </p>
-        <div class="flex snap-x items-stretch gap-4 overflow-x-auto pb-3 xl:grid xl:grid-cols-6 xl:overflow-visible">
+        <div class="sticky top-0 z-[100] mb-3 overflow-hidden rounded-xl bg-[var(--color-obsidian)]/95 py-2 shadow-[0_12px_24px_-18px_rgba(0,0,0,0.95)] backdrop-blur" data-kanban-sticky-headers>
+          <div
+            class="flex w-max gap-4"
+            style:transform={`translateX(-${kanbanScrollLeft}px)`}
+          >
+            {#each visibleKanbanColumns as col}
+              <div class="flex w-[20rem] min-w-[20rem] shrink-0 items-center justify-between rounded-xl border-b border-[var(--color-border-soft)] bg-[var(--color-obsidian-panel)] px-3 py-2">
+                <Badge tone={col.tone}>{col.label}</Badge>
+                <span class="text-xs font-bold text-[var(--color-muted-dim)]">{columnTasks(col.status).length}</span>
+              </div>
+            {/each}
+          </div>
+        </div>
+        <div
+          bind:this={kanbanBoardElement}
+          class="flex w-full min-w-0 max-w-full snap-x items-stretch gap-4 overflow-x-auto pb-4"
+          data-kanban-horizontal-scroll
+          onscroll={(event) => (kanbanScrollLeft = event.currentTarget.scrollLeft)}
+        >
         {#each visibleKanbanColumns as col, colIndex}
           {@const colTasks = columnTasks(col.status)}
           <div
             role="group"
             aria-label={`Columna ${col.label}`}
-            class="relative flex h-full min-h-[300px] min-w-[18rem] snap-start flex-col rounded-2xl border p-3 transition-all hover:z-50 xl:min-w-0 {dragOverStatus === col.status
+            class="relative flex min-h-[300px] w-[20rem] min-w-[20rem] shrink-0 snap-start self-stretch flex-col rounded-2xl border p-3 transition-all hover:z-10 {dragOverStatus === col.status
               ? 'border-[var(--color-purple-bright)] bg-purple-500/10 ring-2 ring-purple-400/20'
               : 'border-[var(--color-border)] bg-black/20'}"
             ondragover={(event) => handleColumnDragOver(event, col.status)}
             ondrop={(event) => handleTaskDrop(event, col.status)}
           >
-            <!-- Column Header -->
-            <div class="sticky top-0 z-40 -mx-1 mb-3 flex items-center justify-between rounded-xl border-b border-[var(--color-border-soft)] bg-[var(--color-obsidian-panel)] px-2 py-2 shadow-[0_12px_24px_-18px_rgba(0,0,0,0.95)]">
-              <div class="flex items-center gap-2">
-                <Badge tone={col.tone}>{col.label}</Badge>
-              </div>
-              <span class="text-xs font-bold text-[var(--color-muted-dim)]">{colTasks.length}</span>
-            </div>
-
             <!-- Column Task Cards -->
             <div class="space-y-2 flex-1">
               {#each colTasks as task (task.id)}
@@ -2158,6 +2455,7 @@
                 {@const completedChildren = allSubtasks.filter((item) => item.status === "done").length}
                 {@const childProgress = allSubtasks.length ? Math.round((completedChildren / allSubtasks.length) * 100) : 0}
                 <Card
+                  data-kanban-task-id={task.id}
                   lift={true}
                   draggable={statusUpdatingTaskId !== task.id && !hasSubtasks(task.id)}
                   aria-label={hasSubtasks(task.id) ? `Tarea ${task.title} con estado automático` : `Arrastrar ${task.parent_id ? "subtarea" : "tarea"} ${task.title}`}
@@ -2236,6 +2534,7 @@
 
                     <div class="flex flex-wrap items-center gap-1.5 pt-1">
                       <Badge tone={priorityBadgeTone(task.priority)}>{priorityLabel(task.priority)}</Badge>
+                      {#if sprintExecutionMode(task)}<Badge tone={sprintExecutionMode(task) === "ai" ? "ai" : sprintExecutionMode(task) === "hybrid" ? "info" : "neutral"}>{sprintExecutionMode(task) === "ai" ? "IA" : sprintExecutionMode(task) === "hybrid" ? "IA + humano" : "Humano"}</Badge>{/if}
                       {#if hasSubtaskAtRisk(task.id)}<Badge tone="danger">Subtarea en peligro</Badge>{/if}
                       {#if task.category}
                         <span
@@ -2260,6 +2559,7 @@
                       <div class="space-y-1 border-l border-purple-400/25 pl-2">
                         {#each subtasks as child (child.id)}
                           <div
+                            data-kanban-task-id={child.id}
                             role="button"
                             tabindex="0"
                             draggable={statusUpdatingTaskId !== child.id}
@@ -2281,7 +2581,7 @@
                           >
                             <span class="text-[9px] text-[var(--color-muted-dim)]" aria-hidden="true">⠇⠇</span>
                             <span class="h-1.5 w-1.5 shrink-0 rounded-full {statusDotClass(child.status)}"></span>
-                            <span class="min-w-0 flex-1 truncate text-[10px] text-[var(--color-muted)] {child.status === 'done' ? 'line-through opacity-60' : ''}">{child.title}</span>
+                            <span class="min-w-[7rem] basis-0 flex-1 truncate text-[10px] text-[var(--color-muted)] {child.status === 'done' ? 'line-through opacity-60' : ''}" title={child.title}>{child.title}</span>
                             {#if child.assignee_name}<AssigneeAvatar name={child.assignee_name} avatar={child.assignee_avatar_data_url} size="xs" status={col.status} />{/if}
                             <div class="pointer-events-none absolute bottom-[calc(100%+0.5rem)] z-[100] hidden w-[30rem] max-w-[calc(100vw-3rem)] overflow-hidden rounded-2xl border border-[var(--color-border-strong)] bg-[var(--color-obsidian-elevated)] shadow-[0_24px_70px_rgba(0,0,0,0.65)] group-hover/subtask:block {colIndex >= 3 ? 'right-0' : 'left-0'}">
                               <div class="border-b border-[var(--color-border)] bg-[var(--color-obsidian-panel)] px-5 py-4">
@@ -2318,6 +2618,7 @@
         {/each}
         </div>
       </div>
+    {/if}
     {/if}
     {/if}
   {/if}
@@ -2449,16 +2750,7 @@
       </div>
     {/if}
 
-    <div class="grid gap-3 sm:grid-cols-2">
-      <div class="space-y-1">
-        <label for="edit-project-start" class="text-xs font-medium text-[var(--color-muted)]">Fecha de inicio</label>
-        <DatePicker bind:value={editProjectForm.start_date} ariaLabel="Fecha de inicio" />
-      </div>
-      <div class="space-y-1">
-        <label for="edit-project-target" class="text-xs font-medium text-[var(--color-muted)]">Fecha objetivo</label>
-        <DatePicker bind:value={editProjectForm.target_date} ariaLabel="Fecha objetivo" />
-      </div>
-    </div>
+    <DateRangePicker label="Periodo del proyecto" bind:start={editProjectForm.start_date} bind:end={editProjectForm.target_date} />
 
     <div class="flex items-center justify-end gap-2 border-t border-[var(--color-border)] pt-4">
       <Button variant="ghost" type="button" onclick={() => (editProjectModalOpen = false)}>
@@ -2906,16 +3198,7 @@
       />
     </div>
 
-    <div class="grid gap-3 sm:grid-cols-2">
-      <div class="space-y-1">
-        <label for="task-start-date" class="text-xs font-medium text-[var(--color-muted)]">Fecha de inicio</label>
-        <DatePicker bind:value={detailForm.start_date} ariaLabel="Fecha de inicio" />
-      </div>
-      <div class="space-y-1">
-        <label for="task-due-date" class="text-xs font-medium text-[var(--color-muted)]">Fecha límite</label>
-        <DatePicker bind:value={detailForm.due_date} ariaLabel="Fecha límite" />
-      </div>
-    </div>
+    <DateRangePicker label="Periodo de la tarea" bind:start={detailForm.start_date} bind:end={detailForm.due_date} />
 
     {#if editingTask && (editingTask.status === "validation" || (editingTask.review_messages?.length ?? 0) > 0)}
       <section class="space-y-3 rounded-xl border border-sky-400/25 bg-sky-500/[0.05] p-4">

@@ -30,6 +30,7 @@ import type {
   BudgetInput,
   BudgetStatus,
   AuthUser,
+  ClientPortalProject,
   CashInput,
   CashMovement,
   Company,
@@ -83,6 +84,7 @@ import type {
   WorkMember,
   WorkProject,
   WorkProjectInput,
+  WorkProjectRequest,
 } from "../types";
 import { buildModel303Draft } from "../taxes/model303";
 import { deriveTaxModels, normalizeTaxSetup } from "../taxes/models";
@@ -642,6 +644,9 @@ export async function initDb() {
   `;
   await sql`ALTER TABLE budgets ADD COLUMN IF NOT EXISTS project_explanation TEXT NOT NULL DEFAULT ''`;
   await sql`ALTER TABLE budgets ADD COLUMN IF NOT EXISTS invoice_id INTEGER REFERENCES invoices(id) ON DELETE SET NULL`;
+  await sql`ALTER TABLE budgets ADD COLUMN IF NOT EXISTS global_discount_type TEXT NOT NULL DEFAULT 'percent'`;
+  await sql`ALTER TABLE budgets ADD COLUMN IF NOT EXISTS global_discount_value NUMERIC(12,2) NOT NULL DEFAULT 0`;
+  await sql`ALTER TABLE budgets ADD COLUMN IF NOT EXISTS discount_cents INTEGER NOT NULL DEFAULT 0`;
   await sql`CREATE INDEX IF NOT EXISTS idx_budgets_company ON budgets(company_id, operation_date DESC, id DESC)`;
   await sql`
     CREATE TABLE IF NOT EXISTS verifactu_records (
@@ -909,6 +914,17 @@ export async function initDb() {
   await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS brief JSONB NOT NULL DEFAULT '{}'::jsonb`;
   await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS management JSONB NOT NULL DEFAULT '{}'::jsonb`;
   await sql`ALTER TABLE work_projects ADD COLUMN IF NOT EXISTS logo_data_url TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS project_id INTEGER REFERENCES work_projects(id) ON DELETE SET NULL`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_invoices_project ON invoices(project_id, issued_at DESC)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS project_client_access (
+      project_id INTEGER NOT NULL REFERENCES work_projects(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (project_id, user_id)
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_project_client_access_user ON project_client_access(user_id, project_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_cash_movements_project ON cash_movements(company_id, project_id)`;
   await sql`
     CREATE TABLE IF NOT EXISTS work_project_revenue_milestones (
@@ -1558,6 +1574,44 @@ async function requireSession(token: string | null): Promise<AuthUser> {
   };
 }
 
+const CLIENT_RPC_COMMANDS = new Set([
+  "logout",
+  "session_me",
+  "complete_forced_password_change",
+  "change_own_pin",
+  "portal_list_projects",
+  "portal_get_project",
+  "portal_create_request",
+  "portal_add_request_message",
+]);
+
+/** Deny client accounts access to every staff RPC unless explicitly exposed. */
+async function assertRpcAccess(command: string, token: string | null): Promise<void> {
+  if (!token || ["public_meta", "login"].includes(command)) return;
+  const user = await requireSession(token);
+  if (user.role === "cliente" && !CLIENT_RPC_COMMANDS.has(command)) {
+    throw new Error("Este perfil solo puede acceder al portal de cliente.");
+  }
+}
+
+async function syncProjectClientAccess(userId: number, role: string, projectIds: unknown, companyId: number): Promise<void> {
+  await sql`DELETE FROM project_client_access WHERE user_id = ${userId}`;
+  if (role !== "cliente") return;
+  const ids = Array.isArray(projectIds)
+    ? [...new Set(projectIds.map(Number).filter((id) => Number.isInteger(id) && id > 0))]
+    : [];
+  for (const projectId of ids) {
+    const rows = await sql`
+      SELECT id FROM work_projects
+      WHERE id = ${projectId}
+        AND (company_id = ${companyId} OR task_company_id = ${companyId})
+        AND status <> 'archived'
+    `;
+    if (!rows.length) throw new Error("El proyecto asignado no está disponible en la empresa activa.");
+    await sql`INSERT INTO project_client_access (project_id,user_id) VALUES (${projectId},${userId})`;
+  }
+}
+
 async function requireAdmin(token: string | null): Promise<AuthUser> {
   const u = await requireSession(token);
   if (u.role !== "admin") throw new Error("Se requieren permisos de administrador");
@@ -1723,6 +1777,7 @@ function formatFiscalProfile(r: any): FiscalProfile {
 function formatInvoice(r: any): Invoice {
   return {
     id: Number(r.id), company_id: Number(r.company_id), sale_id: r.sale_id == null ? null : Number(r.sale_id),
+    project_id: r.project_id == null ? null : Number(r.project_id),
     series: r.series, number: r.number, kind: r.kind, status: r.status,
     issued_at: toIso(r.issued_at), operation_date: toIso(r.operation_date).slice(0, 10), due_at: toIso(r.due_at) || null,
     seller_legal_name: r.seller_legal_name ?? "", seller_nif: r.seller_nif ?? "", seller_trade_name: r.seller_trade_name ?? "",
@@ -1739,6 +1794,7 @@ function formatBudget(r: any): Budget {
     status: r.status as BudgetStatus, operation_date: toIso(r.operation_date).slice(0, 10), due_at: r.due_at ? toIso(r.due_at).slice(0, 10) : null,
     customer_id: r.customer_id == null ? null : Number(r.customer_id), customer_name: r.customer_name ?? "", customer_nif: r.customer_nif ?? "", customer_email: r.customer_email ?? "",
     project_explanation: r.project_explanation ?? "", lines: Array.isArray(r.lines) ? r.lines : [],
+    global_discount_type: r.global_discount_type === "amount" ? "amount" : "percent", global_discount_value: Number(r.global_discount_value ?? 0), discount_cents: Number(r.discount_cents ?? 0),
     base_cents: Number(r.base_cents ?? 0), vat_cents: Number(r.vat_cents ?? 0), irpf_rate: Number(r.irpf_rate ?? 0), irpf_cents: Number(r.irpf_cents ?? 0), total_cents: Number(r.total_cents ?? 0),
     payment_method: r.payment_method ?? "", account: r.account ?? "", tags: Array.isArray(r.tags) ? r.tags : [], notes: r.notes ?? "",
     invoice_id: r.invoice_id == null ? null : Number(r.invoice_id), created_by: Number(r.created_by), created_at: toIso(r.created_at), updated_at: toIso(r.updated_at),
@@ -1756,9 +1812,15 @@ function normalizeBudgetLines(lines: BudgetInput["lines"]): Budget["lines"] {
     if (!description || !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(unit_price_cents) || unit_price_cents < 0 || !isVatRate(vat_rate)) {
       throw new Error("Revisa las líneas, cantidades, importes e IVA del presupuesto");
     }
-    const base_cents = Math.round(quantity * unit_price_cents);
+    const original_base_cents = Math.round(quantity * unit_price_cents);
+    const discount_type = raw?.discount_type === "amount" ? "amount" : "percent";
+    const discount_value = Math.max(0, Number(raw?.discount_value ?? 0));
+    if (!Number.isFinite(discount_value)) throw new Error("El descuento de una línea no es válido");
+    const requestedDiscount = discount_type === "percent" ? Math.round(original_base_cents * Math.min(100, discount_value) / 100) : Math.round(discount_value * 100);
+    const discount_cents = Math.min(original_base_cents, requestedDiscount);
+    const base_cents = original_base_cents - discount_cents;
     const vat_cents = Math.round(base_cents * vat_rate / 100);
-    return { description, quantity, unit_price_cents, vat_rate, base_cents, vat_cents, total_cents: base_cents + vat_cents };
+    return { description, quantity, unit_price_cents, discount_type, discount_value, discount_cents, global_discount_cents: 0, original_base_cents, vat_rate, base_cents, vat_cents, total_cents: base_cents + vat_cents };
   });
 }
 
@@ -1826,6 +1888,7 @@ async function pluginAudit(
 // Core Business Operations
 // -------------------------------------------------------------
 export const postgresApi = {
+  assert_rpc_access: assertRpcAccess,
   async public_meta(): Promise<{ shop_name: string }> {
     const companies = await sql`SELECT trade_name FROM companies WHERE active = TRUE ORDER BY id LIMIT 1`;
     if (companies[0]?.trade_name) return { shop_name: String(companies[0].trade_name) };
@@ -2641,6 +2704,10 @@ export const postgresApi = {
           INNER JOIN company_members cm ON cm.user_id = u.id AND cm.company_id = ${companyId}
           ORDER BY u.id ASC
         `;
+    const access = await sql`
+      SELECT user_id, project_id FROM project_client_access
+      WHERE user_id = ANY(${users.map((u) => Number(u.id))}::int[])
+    `;
     return users.map((u) => ({
       id: u.id,
       username: u.username,
@@ -2653,6 +2720,7 @@ export const postgresApi = {
       must_change_password: !!u.must_change_password,
       temp_password_issued_at: toIso(u.temp_password_issued_at) || null,
       is_master: !!u.is_master,
+      project_ids: access.filter((row) => Number(row.user_id) === Number(u.id)).map((row) => Number(row.project_id)),
     }));
   },
 
@@ -2665,7 +2733,14 @@ export const postgresApi = {
     // disappear on a fresh browser/session.
     const activeCompanyId = await resolveActiveCompanyId(token, actor.id);
     const now = new Date();
-    const role = input.role === "cajero" ? "cajero" : "admin";
+    const role = input.role === "cliente" ? "cliente" : input.role === "cajero" ? "cajero" : "admin";
+    if (role === "cliente") {
+      const companies = await sql`SELECT kind FROM companies WHERE id = ${activeCompanyId}`;
+      if (companies[0]?.kind !== "software_studio") {
+        throw new Error("El rol cliente solo está disponible para empresas Dev.");
+      }
+      if (!input.project_ids?.length) throw new Error("Asigna al menos un proyecto al cliente.");
+    }
     const username = input.username.trim().toLowerCase();
     if (!username) throw new Error("Usuario obligatorio");
     const avatarError = validateUserAvatar(input.avatar_data_url);
@@ -2723,6 +2798,7 @@ export const postgresApi = {
         VALUES (${activeCompanyId}, ${u.id}, ${role})
         ON CONFLICT (company_id, user_id) DO UPDATE SET role = EXCLUDED.role
       `;
+      await syncProjectClientAccess(Number(u.id), role, input.project_ids, activeCompanyId);
       return {
         user: {
           id: u.id,
@@ -2766,6 +2842,7 @@ export const postgresApi = {
       VALUES (${activeCompanyId}, ${u.id}, ${role})
       ON CONFLICT (company_id, user_id) DO UPDATE SET role = EXCLUDED.role
     `;
+    await syncProjectClientAccess(Number(u.id), role, input.project_ids, activeCompanyId);
     return {
       user: {
         id: u.id,
@@ -3600,9 +3677,24 @@ export const postgresApi = {
     const companyId = await resolveActiveCompanyId(token, user.id);
     const projectExplanation = String(input?.project_explanation ?? "").trim();
     if (!projectExplanation) throw new Error("Explica el proyecto y su alcance antes de guardar el presupuesto");
-    const lines = normalizeBudgetLines(input?.lines ?? []);
+    const normalizedLines = normalizeBudgetLines(input?.lines ?? []);
+    const globalDiscountType = input?.global_discount_type === "amount" ? "amount" : "percent";
+    const globalDiscountValue = Math.max(0, Number(input?.global_discount_value ?? 0));
+    if (!Number.isFinite(globalDiscountValue)) throw new Error("El descuento general no es válido");
+    const afterLineDiscounts = normalizedLines.reduce((sum, line) => sum + line.base_cents, 0);
+    const requestedGlobalDiscount = globalDiscountType === "percent" ? Math.round(afterLineDiscounts * Math.min(100, globalDiscountValue) / 100) : Math.round(globalDiscountValue * 100);
+    const globalDiscountCents = Math.min(afterLineDiscounts, requestedGlobalDiscount);
+    let allocatedGlobalDiscount = 0;
+    const lines = normalizedLines.map((line, index) => {
+      const share = index === normalizedLines.length - 1 ? globalDiscountCents - allocatedGlobalDiscount : afterLineDiscounts ? Math.round(globalDiscountCents * line.base_cents / afterLineDiscounts) : 0;
+      allocatedGlobalDiscount += share;
+      const base_cents = Math.max(0, line.base_cents - share);
+      const vat_cents = Math.round(base_cents * line.vat_rate / 100);
+      return { ...line, global_discount_cents: share, base_cents, vat_cents, total_cents: base_cents + vat_cents };
+    });
     const baseCents = lines.reduce((sum, line) => sum + line.base_cents, 0);
     const vatCents = lines.reduce((sum, line) => sum + line.vat_cents, 0);
+    const discountCents = lines.reduce((sum, line) => sum + line.discount_cents + line.global_discount_cents, 0);
     const irpfRate = Math.max(0, Math.min(100, Number(input?.irpf_rate ?? 0)));
     if (!Number.isFinite(irpfRate)) throw new Error("La retención no es válida");
     const irpfCents = Math.round(baseCents * irpfRate / 100);
@@ -3620,7 +3712,7 @@ export const postgresApi = {
     const tags = Array.isArray(input?.tags) ? input.tags.map((tag) => String(tag).trim()).filter(Boolean).slice(0, 50) : [];
     const common = {
       series, status, operationDate, dueAt: input?.due_at ? String(input.due_at).slice(0, 10) : null, customerId, customerName, customerNif, customerEmail,
-      projectExplanation, lines, baseCents, vatCents, irpfRate, irpfCents, totalCents: baseCents + vatCents - irpfCents,
+      projectExplanation, lines, globalDiscountType, globalDiscountValue, discountCents, baseCents, vatCents, irpfRate, irpfCents, totalCents: baseCents + vatCents - irpfCents,
       paymentMethod: String(input?.payment_method ?? "").trim(), account: String(input?.account ?? "").trim(), tags, notes: String(input?.notes ?? "").trim(),
     };
     if (input?.id != null) {
@@ -3628,7 +3720,7 @@ export const postgresApi = {
       if (!currentRows.length) throw new Error("Presupuesto no encontrado");
       const current = formatBudget(currentRows[0]);
       if (!(["draft", "sent"] as string[]).includes(current.status)) throw new Error("Solo se pueden editar presupuestos en borrador o enviados");
-      const rows = await sql`UPDATE budgets SET series=${common.series},status=${common.status},operation_date=${common.operationDate},due_at=${common.dueAt},customer_id=${common.customerId},customer_name=${common.customerName},customer_nif=${common.customerNif},customer_email=${common.customerEmail},project_explanation=${common.projectExplanation},lines=${sql.json(common.lines as any)},base_cents=${common.baseCents},vat_cents=${common.vatCents},irpf_rate=${common.irpfRate},irpf_cents=${common.irpfCents},total_cents=${common.totalCents},payment_method=${common.paymentMethod},account=${common.account},tags=${sql.json(common.tags as any)},notes=${common.notes},updated_at=NOW() WHERE id=${current.id} AND company_id=${companyId} RETURNING *`;
+      const rows = await sql`UPDATE budgets SET series=${common.series},status=${common.status},operation_date=${common.operationDate},due_at=${common.dueAt},customer_id=${common.customerId},customer_name=${common.customerName},customer_nif=${common.customerNif},customer_email=${common.customerEmail},project_explanation=${common.projectExplanation},lines=${sql.json(common.lines as any)},global_discount_type=${common.globalDiscountType},global_discount_value=${common.globalDiscountValue},discount_cents=${common.discountCents},base_cents=${common.baseCents},vat_cents=${common.vatCents},irpf_rate=${common.irpfRate},irpf_cents=${common.irpfCents},total_cents=${common.totalCents},payment_method=${common.paymentMethod},account=${common.account},tags=${sql.json(common.tags as any)},notes=${common.notes},updated_at=NOW() WHERE id=${current.id} AND company_id=${companyId} RETURNING *`;
       return formatBudget(rows[0]);
     }
     let number = String(input?.number ?? "").trim().toUpperCase();
@@ -3637,7 +3729,7 @@ export const postgresApi = {
       const countRows = await sql`SELECT COUNT(*)::int AS count FROM budgets WHERE company_id=${companyId} AND series=${series} AND operation_date >= ${`${year}-01-01`} AND operation_date < ${`${Number(year) + 1}-01-01`}`;
       number = `${series}${year.slice(-2)}${String(Number(countRows[0]?.count ?? 0) + 1).padStart(4, "0")}`;
     }
-    const rows = await sql`INSERT INTO budgets (company_id,series,number,status,operation_date,due_at,customer_id,customer_name,customer_nif,customer_email,project_explanation,lines,base_cents,vat_cents,irpf_rate,irpf_cents,total_cents,payment_method,account,tags,notes,created_by) VALUES (${companyId},${common.series},${number},${common.status},${common.operationDate},${common.dueAt},${common.customerId},${common.customerName},${common.customerNif},${common.customerEmail},${common.projectExplanation},${sql.json(common.lines as any)},${common.baseCents},${common.vatCents},${common.irpfRate},${common.irpfCents},${common.totalCents},${common.paymentMethod},${common.account},${sql.json(common.tags as any)},${common.notes},${user.id}) RETURNING *`;
+    const rows = await sql`INSERT INTO budgets (company_id,series,number,status,operation_date,due_at,customer_id,customer_name,customer_nif,customer_email,project_explanation,lines,global_discount_type,global_discount_value,discount_cents,base_cents,vat_cents,irpf_rate,irpf_cents,total_cents,payment_method,account,tags,notes,created_by) VALUES (${companyId},${common.series},${number},${common.status},${common.operationDate},${common.dueAt},${common.customerId},${common.customerName},${common.customerNif},${common.customerEmail},${common.projectExplanation},${sql.json(common.lines as any)},${common.globalDiscountType},${common.globalDiscountValue},${common.discountCents},${common.baseCents},${common.vatCents},${common.irpfRate},${common.irpfCents},${common.totalCents},${common.paymentMethod},${common.account},${sql.json(common.tags as any)},${common.notes},${user.id}) RETURNING *`;
     return formatBudget(rows[0]);
   },
 
@@ -3680,7 +3772,7 @@ export const postgresApi = {
       const invoiceSeries = profileRows[0]?.invoice_series ?? "F";
       const countRows = await tx`SELECT COUNT(*)::int AS count FROM invoices WHERE company_id=${companyId} AND series=${invoiceSeries} AND issued_at >= ${new Date(`${issuedAt.slice(0, 4)}-01-01T00:00:00Z`)}`;
       const invoiceNumber = `${issuedAt.slice(0, 4)}-${String(Number(countRows[0]?.count ?? 0) + 1).padStart(5, "0")}`;
-      const invoice = buildManualInvoice({ id: 0, company: { id: company.id, code: company.code, legal_name: company.legal_name, trade_name: company.trade_name, nif: company.nif, kind: company.kind, active: company.active, created_at: toIso(company.created_at) }, customer, lines: budget.lines.map((line) => ({ description: line.description, quantity: line.quantity, unit_price_cents: line.unit_price_cents, vat_rate: line.vat_rate })), invoice: { status: "issued", series: invoiceSeries, kind: customer?.nif ? "complete" : "simplified", operation_date: budget.operation_date, due_at: budget.due_at, irpf_rate: budget.irpf_rate, notes: budget.notes }, created_by: user.id, number: invoiceNumber, issued_at: issuedAt, profile: profileRows[0] ? formatFiscalProfile(profileRows[0]) : null });
+      const invoice = buildManualInvoice({ id: 0, company: { id: company.id, code: company.code, legal_name: company.legal_name, trade_name: company.trade_name, nif: company.nif, kind: company.kind, active: company.active, created_at: toIso(company.created_at) }, customer, lines: budget.lines.map((line) => ({ description: line.description, quantity: line.quantity, unit_price_cents: Math.round(line.base_cents / line.quantity), vat_rate: line.vat_rate })), invoice: { status: "issued", series: invoiceSeries, kind: customer?.nif ? "complete" : "simplified", operation_date: budget.operation_date, due_at: budget.due_at, irpf_rate: budget.irpf_rate, notes: budget.notes }, created_by: user.id, number: invoiceNumber, issued_at: issuedAt, profile: profileRows[0] ? formatFiscalProfile(profileRows[0]) : null });
       const invoiceRows = await tx`INSERT INTO invoices (company_id,sale_id,series,number,kind,status,issued_at,operation_date,due_at,seller_legal_name,seller_nif,seller_trade_name,customer_id,customer_name,customer_nif,customer_email,lines,base_cents,vat_cents,irpf_rate,irpf_cents,total_cents,paid_cents,payment_status,notes,created_by) VALUES (${companyId},NULL,${invoice.series},${invoice.number},${invoice.kind},${invoice.status},${invoice.issued_at},${invoice.operation_date},${invoice.due_at},${invoice.seller_legal_name},${invoice.seller_nif},${invoice.seller_trade_name},${invoice.customer_id},${invoice.customer_name},${invoice.customer_nif},${invoice.customer_email},${sql.json(invoice.lines as any)},${invoice.base_cents},${invoice.vat_cents},${invoice.irpf_rate},${invoice.irpf_cents},${invoice.total_cents},0,'pending',${invoice.notes},${user.id}) RETURNING *`;
       const budgetUpdate = await tx`UPDATE budgets SET status='invoiced',invoice_id=${invoiceRows[0].id},converted_at=NOW(),updated_at=NOW() WHERE id=${budget.id} AND company_id=${companyId} RETURNING *`;
       return { budget: formatBudget(budgetUpdate[0]), invoice: formatInvoice(invoiceRows[0]), profile: profileRows[0] ? formatFiscalProfile(profileRows[0]) : null };
@@ -3709,6 +3801,11 @@ export const postgresApi = {
   async issueInvoice(input: InvoiceInput, token: string | null): Promise<Invoice> {
     const user = await requireSession(token);
     const companyId = await resolveActiveCompanyId(token, user.id);
+    const projectId = input.project_id == null ? null : Number(input.project_id);
+    if (projectId != null) {
+      const projects = await sql`SELECT id FROM work_projects WHERE id=${projectId} AND company_id=${companyId} AND project_type='client'`;
+      if (!projects.length) throw new Error("El proyecto de la factura no es válido.");
+    }
     if (input.draft_id) {
       const draftRows = await sql`SELECT * FROM invoices WHERE id=${input.draft_id} AND company_id=${companyId}`;
       if (!draftRows.length) throw new Error("Borrador no encontrado");
@@ -3724,7 +3821,7 @@ export const postgresApi = {
       if (!company) throw new Error("Empresa no encontrada");
       const customer = customerRows[0] ? { id: customerRows[0].id, company_id: companyId, name: customerRows[0].name, email: customerRows[0].email ?? "", phone: customerRows[0].phone ?? "", nif: customerRows[0].nif ?? "", notes: customerRows[0].notes ?? "", created_at: toIso(customerRows[0].created_at) } : (input.customer_name || input.customer_nif || input.customer_email ? { id: 0, company_id: companyId, name: input.customer_name?.trim() || "Cliente contado", email: input.customer_email?.trim() || "", phone: "", nif: input.customer_nif?.trim() || "", notes: "", created_at: new Date().toISOString() } : null);
       const invoice = buildManualInvoice({ id: draft.id, company: { id: company.id, code: company.code, legal_name: company.legal_name, trade_name: company.trade_name, nif: company.nif, kind: company.kind, active: company.active, created_at: toIso(company.created_at) }, customer, lines: input.lines, invoice: { ...input, status: input.status ?? "issued" }, created_by: draft.created_by, number: draft.number, issued_at: (input.status ?? "issued") === "issued" ? new Date().toISOString() : draft.issued_at, profile: profileRows[0] ? formatFiscalProfile(profileRows[0]) : null });
-      const rows = await sql`UPDATE invoices SET kind=${invoice.kind},status=${invoice.status},issued_at=${invoice.issued_at},operation_date=${invoice.operation_date},due_at=${invoice.due_at},customer_id=${invoice.customer_id},customer_name=${invoice.customer_name},customer_nif=${invoice.customer_nif},customer_email=${invoice.customer_email},lines=${sql.json(invoice.lines as any)},base_cents=${invoice.base_cents},vat_cents=${invoice.vat_cents},irpf_rate=${invoice.irpf_rate},irpf_cents=${invoice.irpf_cents},total_cents=${invoice.total_cents},notes=${invoice.notes},updated_at=NOW() WHERE id=${draft.id} AND company_id=${companyId} RETURNING *`;
+      const rows = await sql`UPDATE invoices SET project_id=${projectId},kind=${invoice.kind},status=${invoice.status},issued_at=${invoice.issued_at},operation_date=${invoice.operation_date},due_at=${invoice.due_at},customer_id=${invoice.customer_id},customer_name=${invoice.customer_name},customer_nif=${invoice.customer_nif},customer_email=${invoice.customer_email},lines=${sql.json(invoice.lines as any)},base_cents=${invoice.base_cents},vat_cents=${invoice.vat_cents},irpf_rate=${invoice.irpf_rate},irpf_cents=${invoice.irpf_cents},total_cents=${invoice.total_cents},notes=${invoice.notes},updated_at=NOW() WHERE id=${draft.id} AND company_id=${companyId} RETURNING *`;
       const saved = formatInvoice(rows[0]);
       if (saved.status === "issued") await this.appendVerifactuRecord(saved, profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "alta");
       return saved;
@@ -3762,7 +3859,7 @@ export const postgresApi = {
       const countRows = await sql`SELECT COUNT(*)::int AS count FROM invoices WHERE company_id = ${companyId} AND series = ${series} AND issued_at >= ${new Date(`${year}-01-01T00:00:00Z`)}`;
       const number = `${year}-${String(Number(countRows[0]?.count ?? 0) + 1).padStart(5, "0")}`;
       const invoice = buildManualInvoice({ id: 0, company: { id: company.id, code: company.code, legal_name: company.legal_name, trade_name: company.trade_name, nif: company.nif, kind: company.kind, active: company.active, created_at: toIso(company.created_at) }, customer, lines: input.lines, invoice: input, created_by: user.id, number, issued_at: issuedAt, profile: profileRows[0] ? formatFiscalProfile(profileRows[0]) : null });
-      const rows = await sql`INSERT INTO invoices (company_id,sale_id,series,number,kind,status,issued_at,operation_date,due_at,seller_legal_name,seller_nif,seller_trade_name,customer_id,customer_name,customer_nif,customer_email,lines,base_cents,vat_cents,irpf_rate,irpf_cents,total_cents,paid_cents,payment_status,notes,created_by) VALUES (${companyId},NULL,${invoice.series},${invoice.number},${invoice.kind},${invoice.status},${invoice.issued_at},${invoice.operation_date},${invoice.due_at},${invoice.seller_legal_name},${invoice.seller_nif},${invoice.seller_trade_name},${invoice.customer_id},${invoice.customer_name},${invoice.customer_nif},${invoice.customer_email},${sql.json(invoice.lines as any)},${invoice.base_cents},${invoice.vat_cents},${invoice.irpf_rate},${invoice.irpf_cents},${invoice.total_cents},0,'pending',${invoice.notes},${user.id}) RETURNING *`;
+      const rows = await sql`INSERT INTO invoices (company_id,project_id,sale_id,series,number,kind,status,issued_at,operation_date,due_at,seller_legal_name,seller_nif,seller_trade_name,customer_id,customer_name,customer_nif,customer_email,lines,base_cents,vat_cents,irpf_rate,irpf_cents,total_cents,paid_cents,payment_status,notes,created_by) VALUES (${companyId},${projectId},NULL,${invoice.series},${invoice.number},${invoice.kind},${invoice.status},${invoice.issued_at},${invoice.operation_date},${invoice.due_at},${invoice.seller_legal_name},${invoice.seller_nif},${invoice.seller_trade_name},${invoice.customer_id},${invoice.customer_name},${invoice.customer_nif},${invoice.customer_email},${sql.json(invoice.lines as any)},${invoice.base_cents},${invoice.vat_cents},${invoice.irpf_rate},${invoice.irpf_cents},${invoice.total_cents},0,'pending',${invoice.notes},${user.id}) RETURNING *`;
       const saved = formatInvoice(rows[0]);
       if (saved.status === "issued") await this.appendVerifactuRecord(saved, profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "alta");
       return saved;
@@ -4640,6 +4737,96 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   /* -------------------------------------------------------------
      Módulo Trabajo (Multiempresa) PostgreSQL Implementation
      ------------------------------------------------------------- */
+
+  async portal_list_projects(token: string | null): Promise<ClientPortalProject[]> {
+    const user = await requireSession(token);
+    if (user.role !== "cliente") throw new Error("Se requiere un perfil de cliente.");
+    const rows = await sql`
+      SELECT p.* FROM work_projects p
+      INNER JOIN project_client_access access ON access.project_id = p.id
+      WHERE access.user_id = ${user.id} AND p.status <> 'archived'
+      ORDER BY p.updated_at DESC
+    `;
+    return Promise.all(rows.map((row) => this.portal_get_project(String(row.uid), token)));
+  },
+
+  async portal_get_project(reference: string, token: string | null): Promise<ClientPortalProject> {
+    const user = await requireSession(token);
+    if (user.role !== "cliente") throw new Error("Se requiere un perfil de cliente.");
+    const projectRows = await sql`
+      SELECT p.* FROM work_projects p
+      INNER JOIN project_client_access access ON access.project_id = p.id
+      WHERE access.user_id = ${user.id} AND (p.uid::text = ${String(reference)} OR p.id::text = ${String(reference)})
+      LIMIT 1
+    `;
+    if (!projectRows.length) throw new Error("Proyecto no encontrado o sin acceso.");
+    const row = projectRows[0];
+    const [taskRows, invoiceRows] = await Promise.all([
+      sql`
+        SELECT wi.id,wi.parent_id,wi.title,wi.status,wi.priority,wi.due_date,
+               COALESCE(wi.due_date,parent.due_date) AS effective_due_date
+        FROM work_items wi
+        LEFT JOIN work_items parent ON parent.id=wi.parent_id
+        WHERE wi.project_id=${row.id} AND wi.status <> 'archived'
+        ORDER BY wi.sort_order,wi.created_at
+      `,
+      sql`
+        SELECT id,series,number,kind,status,issued_at,operation_date,due_at,total_cents,paid_cents,payment_status
+        FROM invoices
+        WHERE project_id=${row.id} AND status='issued'
+        ORDER BY issued_at DESC
+      `,
+    ]);
+    const management = normalizeProjectManagement(row.management);
+    return {
+      id: Number(row.id), uid: String(row.uid), name: String(row.name), description: String(row.description ?? ""),
+      status: row.status, start_date: toIso(row.start_date) || null, target_date: toIso(row.target_date) || null,
+      logo_data_url: String(row.logo_data_url ?? ""), milestones: management.milestones,
+      tasks: taskRows.map((task) => ({ id:Number(task.id),parent_id:task.parent_id==null?null:Number(task.parent_id),title:String(task.title),status:task.status,priority:task.priority,due_date:toIso(task.due_date)||null,effective_due_date:toIso(task.effective_due_date)||null })),
+      invoices: invoiceRows.map((invoice) => ({ id:Number(invoice.id),series:String(invoice.series),number:String(invoice.number),kind:invoice.kind,status:invoice.status,issued_at:toIso(invoice.issued_at),operation_date:toIso(invoice.operation_date).slice(0,10),due_at:toIso(invoice.due_at)||null,total_cents:Number(invoice.total_cents),paid_cents:Number(invoice.paid_cents),payment_status:invoice.payment_status })),
+      requests: (Array.isArray(row.requests) ? row.requests : []).filter(
+        (request: WorkProjectRequest) => request.requester_user_id === Number(user.id),
+      ),
+    };
+  },
+
+  async portal_create_request(reference: string, input: Partial<WorkProjectRequest>, token: string | null): Promise<WorkProjectRequest> {
+    const user = await requireSession(token);
+    if (user.role !== "cliente") throw new Error("Se requiere un perfil de cliente.");
+    const allowedTypes = new Set(["suggestion","improvement","issue","feature","question"]);
+    const type = allowedTypes.has(String(input.type)) ? input.type! : "suggestion";
+    const title = String(input.title ?? "").trim().slice(0,180);
+    const description = String(input.description ?? "").trim().slice(0,5000);
+    if (!title || !description) throw new Error("Indica un título y una descripción.");
+    const now = new Date().toISOString();
+    const request: WorkProjectRequest = { id: randomBytes(12).toString("hex"), type, title, description, requester:user.display_name, requester_user_id:Number(user.id), priority:input.priority??"normal", impact:String(input.impact??"").slice(0,1000), status:"new", reviewer_id:null, task_id:null, messages:[], created_at:now, updated_at:now };
+    await sql.begin(async (tx) => {
+      const rows = await tx`SELECT p.id,p.requests FROM work_projects p INNER JOIN project_client_access access ON access.project_id=p.id WHERE access.user_id=${user.id} AND (p.uid::text=${String(reference)} OR p.id::text=${String(reference)}) FOR UPDATE`;
+      if (!rows.length) throw new Error("Proyecto no encontrado o sin acceso.");
+      const requests = Array.isArray(rows[0].requests) ? rows[0].requests : [];
+      await tx`UPDATE work_projects SET requests=${tx.json([...requests,request] as any)},updated_at=NOW() WHERE id=${rows[0].id}`;
+    });
+    return request;
+  },
+
+  async portal_add_request_message(reference: string, requestId: string, text: string, token: string | null): Promise<WorkProjectRequest> {
+    const user = await requireSession(token);
+    if (user.role !== "cliente") throw new Error("Se requiere un perfil de cliente.");
+    const messageText = String(text).trim().slice(0,3000);
+    if (!messageText) throw new Error("Escribe un mensaje.");
+    return sql.begin(async (tx) => {
+      const rows = await tx`SELECT p.id,p.requests FROM work_projects p INNER JOIN project_client_access access ON access.project_id=p.id WHERE access.user_id=${user.id} AND (p.uid::text=${String(reference)} OR p.id::text=${String(reference)}) FOR UPDATE`;
+      if (!rows.length) throw new Error("Proyecto no encontrado o sin acceso.");
+      const requests = (Array.isArray(rows[0].requests) ? rows[0].requests : []) as WorkProjectRequest[];
+      const index = requests.findIndex((entry) => entry.id === String(requestId));
+      if (index < 0) throw new Error("Solicitud no encontrada.");
+      if (requests[index].requester_user_id !== Number(user.id)) throw new Error("Solicitud no encontrada.");
+      const now = new Date().toISOString();
+      requests[index] = { ...requests[index], updated_at:now, messages:[...(requests[index].messages??[]),{ id:randomBytes(10).toString("hex"),author:user.display_name,text:messageText,created_at:now }] };
+      await tx`UPDATE work_projects SET requests=${tx.json(requests as any)},updated_at=NOW() WHERE id=${rows[0].id}`;
+      return requests[index];
+    });
+  },
 
   async listWorkProjects(status_filter?: string, token?: string | null): Promise<WorkProject[]> {
     const user = await requireSession(token ?? null);

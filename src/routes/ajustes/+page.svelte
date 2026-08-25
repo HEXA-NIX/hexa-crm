@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, supportsOrcaWorker, usesLocalOrcaBridge } from "$lib/api/client";
-  import type { AuthUser, Company, CompanyEntityType, Settings, UserInput, UserRole } from "$lib/types";
+  import type { AuthUser, Company, CompanyEntityType, Settings, UserInput, UserRole, WorkProject } from "$lib/types";
   import { VAT_RATES, vatLabel, type VatRate } from "$lib/vat";
   import Button from "$lib/components/Button.svelte";
   import Card from "$lib/components/Card.svelte";
@@ -56,9 +56,11 @@
   let settings = $state<Settings | null>(null);
   let health = $state<{ ok: boolean; models: string[] } | null>(null);
   let users = $state<AuthUser[]>([]);
+  let clientProjects = $state<WorkProject[]>([]);
   let loading = $state(true);
   let defaultVatStr = $state("21");
   let roleStr = $state<string>("cajero");
+  let clientProjectStr = $state("");
   let whatsappStatus = $state<{ connected: boolean; logged_in: boolean; user_phone: string; shared_from_company_id?: number | null; shared_from_company_name?: string | null; webhook_trace?: { at?: string; state?: string; error?: string; event?: string; reason?: string } | null } | null>(null);
   let whatsappLinks = $state<{ company_id: number; trade_name: string; phone: string }[]>([]);
   let selectedWhatsAppCompany = $state("");
@@ -241,6 +243,7 @@
       }
       if ($isAdmin) {
         users = await api.listUsers();
+        clientProjects = (await api.listWorkProjects()).filter((project) => project.status !== "archived");
       }
     } catch (e) {
       showToast(e instanceof Error ? e.message : "Error", "err");
@@ -357,6 +360,7 @@
     editingUser = null;
     userForm = { username: "", display_name: "", phone: "", avatar_data_url: "", role: "cajero", active: true };
     roleStr = "cajero";
+    clientProjectStr = "";
     userModal = true;
   }
 
@@ -371,6 +375,7 @@
       active: u.active,
     };
     roleStr = u.role;
+    clientProjectStr = String(u.project_ids?.[0] ?? "");
     userModal = true;
   }
 
@@ -381,11 +386,27 @@
       display_name: userForm.display_name,
       phone: userForm.phone,
       avatar_data_url: userForm.avatar_data_url,
-      role: (roleStr === "admin" ? "admin" : "cajero") as UserRole,
+      role: (roleStr === "cliente" ? "cliente" : roleStr === "admin" ? "admin" : "cajero") as UserRole,
+      project_ids: roleStr === "cliente" && clientProjectStr ? [Number(clientProjectStr)] : [],
       active: userForm.active,
     };
     try {
       const result = await api.upsertUser(input);
+      let welcomeWarning = "";
+      if (!editingUser && input.role === "cliente" && input.phone?.trim()) {
+        const project = clientProjects.find((entry) => entry.id === input.project_ids?.[0]);
+        const rawPhone = input.phone.trim();
+        const destination = /^\d{9}$/.test(rawPhone.replace(/\D/g, ""))
+          ? `+34${rawPhone.replace(/\D/g, "")}`
+          : rawPhone;
+        const projectName = project?.name ?? "tu proyecto";
+        const message = `¡Bienvenido/a! 👋\n\nTe hemos dado de alta en el proyecto ${projectName}.\n\nDesde tu portal podrás consultar el resumen y el estado del proyecto, sus hitos, las tareas en modo lectura y las facturas que te enviemos. También podrás crear solicitudes y conversar con el equipo sobre bugs, sugerencias, mejoras o preguntas.\n\nPor WhatsApp puedes enviarnos documentos y contactar con el equipo. Para registrar bugs o sugerencias y seguir su estado, utiliza la sección Solicitudes del portal.`;
+        try {
+          await api.whatsappSend(destination, message, true);
+        } catch (cause) {
+          welcomeWarning = cause instanceof Error ? cause.message : "No se pudo enviar el WhatsApp de bienvenida";
+        }
+      }
       if ($currentUser?.id === result.user.id) updateCurrentUser(result.user);
       userModal = false;
       if (result.temporary_password) {
@@ -396,6 +417,7 @@
         showToast(editingUser ? "Usuario actualizado" : "Usuario creado");
       }
       users = await api.listUsers();
+      if (welcomeWarning) showToast(`Usuario creado, pero el WhatsApp no se envió: ${welcomeWarning}`, "err");
     } catch (e) {
       showToast(e instanceof Error ? e.message : "Error", "err");
     }
@@ -1382,8 +1404,18 @@ npm run orca:worker</pre>
       options={[
         { value: "admin", label: "Administrador" },
         { value: "cajero", label: "Cajero" },
+        ...($activeCompany?.kind === "software_studio" ? [{ value: "cliente", label: "Cliente (portal)" }] : []),
       ]}
     />
+    {#if roleStr === "cliente"}
+      <Select
+        label="Proyecto visible"
+        bind:value={clientProjectStr}
+        options={clientProjects.map((project) => ({ value: String(project.id), label: project.name }))}
+        placeholder="Selecciona un proyecto"
+      />
+      <p class="text-xs text-[var(--color-muted)]">Podrá consultar este proyecto y conversar únicamente en sus solicitudes. Las tareas son de solo lectura.</p>
+    {/if}
     {#if !editingUser}
       <p
         class="rounded-xl border border-purple-400/20 bg-purple-500/10 px-3 py-2 text-xs text-[var(--color-muted)]"

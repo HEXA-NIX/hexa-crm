@@ -66,14 +66,41 @@ describe("estructura UI de proyectos", () => {
 
   it("hace visible el apartado de trabajo aunque el proyecto todavía esté vacío", () => {
     expect(DETAIL).toContain('id="project-work-sections"');
-    expect(DETAIL).toContain("APARTADOS DEL PROYECTO");
+    expect(DETAIL).toContain("<SprintCenter");
     expect(DETAIL).toContain("No hay apartados en este proyecto");
   });
 
   it("dispone de una vista explícita para archivadas y Kanban móvil", () => {
     expect(DETAIL).toContain('filterStatus === "archived"');
     expect(DETAIL).toContain("overflow-x-auto");
+    expect(DETAIL).toContain("w-full min-w-0 max-w-full snap-x");
     expect(DETAIL).toContain("pantalla táctil");
+  });
+
+  it("mantiene columnas Kanban legibles y títulos visibles con scroll horizontal", () => {
+    expect(DETAIL).toContain("data-kanban-horizontal-scroll");
+    expect(DETAIL).toContain("data-kanban-sticky-headers");
+    expect(DETAIL).toContain("kanbanScrollLeft");
+    expect(DETAIL).toContain("event.currentTarget.scrollLeft");
+    expect(DETAIL).toContain("overflow-x-auto");
+    expect(DETAIL).toContain("sticky top-0 z-[100]");
+    expect(DETAIL).toContain("w-[20rem] min-w-[20rem] shrink-0");
+    expect(DETAIL).toContain("snap-start self-stretch flex-col");
+    expect(DETAIL).not.toContain("flex h-full min-h-[300px]");
+    expect(DETAIL).toContain("handleKanbanBoardDragOver");
+    expect(DETAIL).toContain('document.addEventListener("dragover", handleKanbanBoardDragOver, true)');
+    expect(DETAIL).toContain('document.addEventListener("drag", handleKanbanBoardDragOver, true)');
+    expect(DETAIL).toContain("bind:this={kanbanBoardElement}");
+    expect(DETAIL).toContain("requestAnimationFrame(runKanbanAutoScroll)");
+    expect(DETAIL).toContain("stopKanbanAutoScroll");
+    expect(DETAIL).toContain("kanbanAutoScrollElement.scrollLeft += kanbanAutoScrollSpeed");
+    expect(DETAIL).toContain("const visibleRight = Math.min(window.innerWidth, rect.right)");
+    expect(DETAIL).not.toContain("handleKanbanBoardDragLeave");
+    expect(DETAIL).toContain("handleKanbanDragKeydown");
+    expect(DETAIL).toContain('event.key !== "Escape"');
+    expect(DETAIL).toContain("kanbanDragCancelled");
+    expect(DETAIL).toContain("min-w-[7rem] basis-0 flex-1 truncate");
+    expect(DETAIL).not.toContain("xl:grid-cols-6");
   });
 
   it("permite ocultar o mostrar todas las subtareas de una vez", () => {
@@ -93,5 +120,38 @@ describe("estructura UI de proyectos", () => {
     expect(DETAIL).toMatch(/data-kanban-subtask-toggle[\s\S]*?toggleParent\(event, task\.id\)/);
     expect(DETAIL).toContain("data-kanban-card-actions");
     expect(DETAIL).toMatch(/data-kanban-card-header[^>]*>[\s\S]*?w-full[\s\S]*?data-kanban-card-actions/);
+  });
+
+  it("mueve tarjetas Kanban sin recargar el proyecto y conserva visible la tarea", () => {
+    const statusFlow = DETAIL.match(/async function updateTaskStatus[\s\S]*?\n  async function updateTaskParent/)?.[0] ?? "";
+    const parentFlow = DETAIL.match(/async function updateTaskParent[\s\S]*?\n  function handleTaskDragStart/)?.[0] ?? "";
+    expect(statusFlow).not.toContain("loadData(");
+    expect(parentFlow).not.toContain("loadData(");
+    expect(DETAIL).toContain("animateMovedTask");
+    expect(DETAIL).toContain("data-kanban-task-id");
+    expect(DETAIL).toContain("scrollIntoView");
+    expect(DETAIL).toContain("prefers-reduced-motion");
+    expect(DETAIL).toContain("element.animate");
+  });
+
+  it("carga los datos bajo demanda según la pestaña activa", () => {
+    expect(DETAIL).toContain("loadSectionData(activeProjectSection, p)");
+    expect(DETAIL).toContain('const needsCategories = section === "trabajo"');
+    expect(DETAIL).toContain('const needsCash = section === "economia"');
+    expect(DETAIL).toMatch(/project = p;[\s\S]*?loading = false;[\s\S]*?loadSectionData/);
+  });
+
+  it("mantiene compacta la descripción del proyecto hasta que se pide verla completa", () => {
+    expect(DETAIL).toContain("projectDescriptionExpanded");
+    expect(DETAIL).toContain('max-h-[3.25rem]');
+    expect(DETAIL).toContain('"Ver menos" : "Ver más"');
+    expect(DETAIL).toContain("bg-gradient-to-t");
+    expect(DETAIL).toContain('class="ml-auto inline-flex');
+  });
+
+  it("no muestra estados vacíos mientras carga los datos de una pestaña", () => {
+    expect(DETAIL).toContain("activeSectionDataReady");
+    expect(DETAIL).toContain("data-project-section-loading");
+    expect(DETAIL).toContain("ready={tasksLoaded}");
   });
 });

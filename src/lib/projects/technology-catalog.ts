@@ -47,5 +47,5 @@ export function technologyDefinition(name: string): TechnologyDefinition | undef
 
 export function technologyLogoUrl(name: string): string | null {
   const item = technologyDefinition(name);
-  return item ? `https://cdn.simpleicons.org/${item.slug}/${item.color}` : null;
+  return item ? `https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/${item.slug}.svg` : null;
 }

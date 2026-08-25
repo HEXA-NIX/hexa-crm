@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { CashMovement, WorkProject } from "../types";
+import type { CashMovement, Invoice, WorkProject } from "../types";
 import { buildProjectEconomicSeries } from "./project-economics";
 
 const baseProject: WorkProject = {
@@ -38,5 +38,15 @@ describe("project economic series", () => {
       ],
     }, [], new Date(2026, 2, 1));
     expect(series.map((point) => point.planned_cents)).toEqual([50_000, 50_000, 120_000]);
+  });
+
+  it("uses issued project invoices as billing and ignores drafts", () => {
+    const invoices = [
+      { project_id: 1, status: "issued", operation_date: "2026-02-10", total_cents: 30_000 },
+      { project_id: 1, status: "draft", operation_date: "2026-02-11", total_cents: 90_000 },
+      { project_id: 2, status: "issued", operation_date: "2026-02-12", total_cents: 80_000 },
+    ] as Invoice[];
+    const series = buildProjectEconomicSeries(baseProject, [], new Date(2026, 2, 1), invoices);
+    expect(series.map((point) => point.billed_cents)).toEqual([0, 30_000, 30_000]);
   });
 });

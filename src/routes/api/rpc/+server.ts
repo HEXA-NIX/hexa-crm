@@ -42,6 +42,8 @@ export const POST: RequestHandler = async ({ request }) => {
       return json({ error: "Comando ausente" }, { status: 400 });
     }
 
+    await postgresApi.assert_rpc_access(String(cmd), token);
+
     let result: any;
 
     switch (cmd) {
@@ -155,6 +157,10 @@ export const POST: RequestHandler = async ({ request }) => {
       case "complete_forced_password_change":
         result = await postgresApi.complete_forced_password_change(args?.current_password as string, args?.new_password as string, token);
         break;
+      case "portal_list_projects": result = await postgresApi.portal_list_projects(token); break;
+      case "portal_get_project": result = await postgresApi.portal_get_project(String(args?.reference ?? ""), token); break;
+      case "portal_create_request": result = await postgresApi.portal_create_request(String(args?.reference ?? ""), args?.input ?? {}, token); break;
+      case "portal_add_request_message": result = await postgresApi.portal_add_request_message(String(args?.reference ?? ""), String(args?.request_id ?? ""), String(args?.text ?? ""), token); break;
       case "list_products":
         result = await postgresApi.list_products(!!args?.active_only, token);
         break;

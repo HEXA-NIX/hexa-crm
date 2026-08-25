@@ -8,6 +8,7 @@ import type {
   AuthUser,
   CashInput,
   CashMovement,
+  ClientPortalProject,
   Company,
   CompanyInput,
   CreateInventoryMovementInput,
@@ -59,6 +60,7 @@ import type {
   WorkMember,
   WorkProject,
   WorkProjectInput,
+  WorkProjectRequest,
 } from "../types";
 import { browserApi } from "./browser-store";
 import { getToken, clearSession } from "../stores/session";
@@ -347,6 +349,10 @@ export const api = {
       current_password: currentPassword,
       new_password: newPassword,
     }),
+  portalListProjects: () => call<ClientPortalProject[]>("portal_list_projects"),
+  portalGetProject: (reference: string) => call<ClientPortalProject>("portal_get_project", { reference }),
+  portalCreateRequest: (reference: string, input: Partial<WorkProjectRequest>) => call<WorkProjectRequest>("portal_create_request", { reference, input }),
+  portalAddRequestMessage: (reference: string, requestId: string, text: string) => call<WorkProjectRequest>("portal_add_request_message", { reference, request_id: requestId, text }),
 
   listProducts: async (activeOnly = true) => remoteOperatorConfig ? (await remoteOperatorApi.products(requireRemoteConfig(), getToken() ?? "")).filter((product) => !activeOnly || product.active) : call<Product[]>("list_products", { active_only: activeOnly }),
   upsertProduct: (input: ProductInput) => remoteOperatorConfig ? remoteOperatorApi.saveProduct(requireRemoteConfig(), getToken() ?? "", input) : call<Product>("upsert_product", { input }),

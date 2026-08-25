@@ -9,6 +9,20 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+- Trabajo incorpora sprints completos para equipos híbridos: backlog y Kanban del sprint separados, refinamiento con controles de preparación, Sprint Poker asistido por IA, planificación de capacidad humana/IA, revisor humano obligatorio para ejecuciones automáticas, activación, revisión, retrospectiva, cierre e historial con puntos y cumplimiento. La duración parte de dos semanas y ofrece accesos de una a cuatro semanas o un intervalo personalizado.
+- El dashboard, la cartera y la economía de cada proyecto calculan de forma coherente la facturación desde las facturas emitidas por fecha de operación, aunque todavía estén pendientes de cobro y no exista un movimiento de ingreso en Caja.
+- El objetivo económico mensual del centro de proyectos se obtiene prioritariamente de los hitos previstos del mes; el objetivo manual de empresa solo se usa cuando no existen hitos aplicables.
+
+- Mover tareas o subtareas entre columnas del Kanban actualiza la tarjeta y el estado automático de su padre sin recargar la ficha completa, anima suavemente el traslado y desplaza el tablero solo cuando la tarjeta destino queda fuera de la zona visible.
+- Al arrastrar una tarea o subtarea hacia un borde lateral, el Kanban se desplaza automáticamente para descubrir y alcanzar columnas que estaban fuera de la pantalla.
+- Pulsar `Escape` durante un arrastre cancela el movimiento de la tarea o subtarea sin guardar ningún cambio.
+- El Kanban conserva un ancho mínimo legible por columna también en portátiles y usa desplazamiento horizontal cuando no caben todas; las subtareas reservan espacio para mostrar al menos una línea de título, las cabeceras permanecen visibles y alineadas al bajar toda la página y todas las columnas alcanzan la altura de la más larga para facilitar cualquier destino al arrastrar.
+- La ficha muestra primero el proyecto base y carga bajo demanda únicamente los datos de la pestaña activa; al navegar reutiliza tareas, equipo, clientes o contabilidad ya consultados sin bloquear Resumen con módulos ajenos.
+- Las pestañas y el progreso global distinguen la carga diferida de un resultado vacío: muestran indicadores de carga y no enseñan temporalmente «Sin tareas», ceros o mensajes equivalentes antes de recibir los datos.
+- La descripción de cabecera del proyecto aparece compactada a dos líneas, con degradado y el control «Ver más / Ver menos» alineado al extremo derecho de la fila de fechas, para mantener las pestañas accesibles en la primera pantalla.
+- Las empresas Dev pueden crear perfiles de cliente vinculados a un proyecto. El portal aislado permite consultar resumen, hitos, facturas enviadas y tareas en modo lectura, y crear o responder únicamente a las solicitudes del propio cliente.
+- Al dar de alta un perfil cliente con teléfono, se envía automáticamente un WhatsApp de bienvenida con el proyecto asignado, las funciones disponibles y el canal adecuado para documentos, bugs y sugerencias.
+- Los presupuestos admiten descuentos por línea y generales, configurables como porcentaje o importe fijo; se reparten por línea antes de calcular el IVA, se conservan al editar o duplicar y aparecen reflejados en el PDF comercial.
 - Los presupuestos se pueden descargar directamente como PDF desde su ficha y desde la vista previa, conservando la plantilla comercial, el logo y los datos de la empresa activa.
 - Presupuestos y facturas comparten una nueva plantilla comercial inspirada en propuestas multipágina: cabecera de marca, alcance estructurado con títulos, subtítulos, tarjetas de fases y fichas de tecnologías utilizadas o previstas, tabla económica, totales y condiciones en estilo editorial oscuro; la vista previa y el PDF impreso cargan automáticamente el nombre, logo y datos fiscales de la empresa activa.
 - Crear, editar y duplicar presupuestos abre ahora un editor modal a pantalla completa, coherente con los flujos de nueva factura y nuevo servicio, sin desplazar el listado de Presupuestos.

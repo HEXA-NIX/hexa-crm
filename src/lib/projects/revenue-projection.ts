@@ -1,4 +1,4 @@
-import type { CashMovement, WorkProject } from "../types";
+import type { CashMovement, Invoice, WorkProject } from "../types";
 
 export type ProjectRevenueMonth = {
   month: string;
@@ -20,6 +20,7 @@ export function buildProjectRevenueProjection(
   referenceDate = new Date(),
   monthsBefore = 5,
   monthsAfter = 6,
+  invoices?: Invoice[],
 ): ProjectRevenueMonth[] {
   const currentMonth = monthKey(referenceDate.getFullYear(), referenceDate.getMonth());
   const ownProjects = projects.filter(
@@ -45,14 +46,18 @@ export function buildProjectRevenueProjection(
       return total + (applicableMilestone?.amount_cents ?? 0);
     }, 0);
 
-    const incomeCents = movements
-      .filter(
-        (movement) =>
-          movement.project_id != null &&
-          movement.kind === "income" &&
-          movement.occurred_at.slice(0, 7) === month,
-      )
-      .reduce((total, movement) => total + movement.amount_cents, 0);
+    const incomeCents = invoices
+      ? invoices
+          .filter((invoice) => invoice.status === "issued" && invoice.operation_date.slice(0, 7) === month)
+          .reduce((total, invoice) => total + invoice.total_cents, 0)
+      : movements
+          .filter(
+            (movement) =>
+              movement.project_id != null &&
+              movement.kind === "income" &&
+              movement.occurred_at.slice(0, 7) === month,
+          )
+          .reduce((total, movement) => total + movement.amount_cents, 0);
 
     const expenseCents = movements
       .filter(

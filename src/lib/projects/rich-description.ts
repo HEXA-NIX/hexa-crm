@@ -64,5 +64,9 @@ export function renderRichDescription(value: string) {
     .replace(
       /(<h2 class="technology-section">.*?<\/h2>)(<(?:ul|ol)>.*?<\/(?:ul|ol)>)/g,
       '<div class="rich-technology-block">$1$2</div>',
+    )
+    .replace(
+      /(<h2(?: class="[^"]*")?>.*?<\/h2>)(<p>.*?<\/p>)/g,
+      '<div class="rich-section-lead">$1$2</div>',
     );
 }

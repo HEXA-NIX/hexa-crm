@@ -1208,7 +1208,7 @@ export const browserApi = {
     const s = await ensureUsers(load());
     requireAdmin(s, token);
 
-    const role: UserRole = input.role === "cajero" ? "cajero" : "admin";
+    const role: UserRole = input.role === "cliente" ? "cliente" : input.role === "cajero" ? "cajero" : "admin";
     const username = input.username.trim().toLowerCase();
     if (!username) throw new Error("Usuario obligatorio");
     const avatarError = validateUserAvatar(input.avatar_data_url);

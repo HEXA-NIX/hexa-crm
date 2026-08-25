@@ -134,6 +134,13 @@
       configureRemoteOperator($session.remote);
       const me = await api.sessionMe();
       if (me) {
+        if (me.role === "cliente") {
+          setSession(me, token, { companies: [], activeCompanyId: null, remote: $session.remote });
+          if (!$page.url.pathname.startsWith("/portal") && typeof window !== "undefined") {
+            window.location.replace("/portal");
+          }
+          return;
+        }
         let companies = $session.companies;
         let activeCompanyId = $session.activeCompanyId;
         try {
@@ -330,6 +337,15 @@
 {:else if $mustChangePassword}
   <ForcePasswordChange />
   <Toast />
+{:else if $session.user?.role === "cliente"}
+  <div class="min-h-dvh bg-[var(--color-obsidian)]">
+    <header class="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-3 sm:px-8">
+      <a href="/portal" class="flex items-center gap-3"><Logo size={36} /><span><strong class="block text-sm">Portal de cliente</strong><small class="text-[var(--color-muted)]">HEXA CRM</small></span></a>
+      <div class="flex items-center gap-3"><span class="hidden text-sm text-[var(--color-muted)] sm:inline">{$session.user.display_name}</span><Button variant="ghost" onclick={closeSession}>Salir</Button></div>
+    </header>
+    <main class="mx-auto max-w-6xl p-4 sm:p-8">{@render children()}</main>
+    <Toast />
+  </div>
 {:else}
     <div class="flex h-dvh max-h-dvh overflow-hidden">
     <!-- Desktop sidebar -->

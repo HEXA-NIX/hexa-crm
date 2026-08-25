@@ -9,6 +9,7 @@
     step = undefined as string | undefined,
     min = undefined as string | number | undefined,
     class: className = "",
+    "aria-label": ariaLabel = undefined as string | undefined,
     oninput,
   }: {
     label?: string;
@@ -19,6 +20,7 @@
     step?: string;
     min?: string | number;
     class?: string;
+    "aria-label"?: string;
     oninput?: (event: Event & { currentTarget: HTMLInputElement }) => void;
   } = $props();
 </script>
@@ -40,6 +42,7 @@
       }}
     />
   {:else}<input
+    aria-label={ariaLabel}
     {type}
     {placeholder}
     {required}

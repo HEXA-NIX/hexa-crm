@@ -1,0 +1,38 @@
+<script lang="ts">
+  import { onMount } from "svelte";
+  import { page } from "$app/stores";
+  import { api } from "$lib/api/client";
+  import { formatEUR } from "$lib/money";
+  import { taskDueDate } from "$lib/work/task-dates";
+  import type { ClientPortalProject, WorkProjectRequestType } from "$lib/types";
+  import Card from "$lib/components/Card.svelte";
+  import Badge from "$lib/components/Badge.svelte";
+  import Button from "$lib/components/Button.svelte";
+  import Input from "$lib/components/Input.svelte";
+  import Select from "$lib/components/Select.svelte";
+
+  const reference = $derived($page.params.id);
+  let project = $state<ClientPortalProject | null>(null), loading=$state(true), error=$state(""), saving=$state(false), messageSaving=$state("");
+  let form=$state({type:"suggestion" as WorkProjectRequestType,title:"",description:""});
+  let replies=$state<Record<string,string>>({});
+  const typeOptions=[{value:"issue",label:"Bug / incidencia"},{value:"suggestion",label:"Sugerencia"},{value:"improvement",label:"Mejora"},{value:"feature",label:"Nueva función"},{value:"question",label:"Pregunta"}];
+  const statusLabel:Record<string,string>={planned:"Planificado",active:"Activo",paused:"Pausado",done:"Finalizado",inbox:"Pendiente",in_progress:"En progreso",validation:"Validación",blocked:"Bloqueado"};
+  async function load(){if(!reference)return;loading=true;try{project=await api.portalGetProject(reference);}catch(cause){error=cause instanceof Error?cause.message:"No se pudo cargar el proyecto.";}finally{loading=false;}}
+  async function submit(){if(!reference||!form.title.trim()||!form.description.trim())return;saving=true;try{await api.portalCreateRequest(reference,form);form={type:"suggestion",title:"",description:""};await load();}catch(cause){error=cause instanceof Error?cause.message:"No se pudo enviar la solicitud.";}finally{saving=false;}}
+  async function reply(requestId:string){const text=replies[requestId]?.trim();if(!reference||!text)return;messageSaving=requestId;try{await api.portalAddRequestMessage(reference,requestId,text);replies[requestId]="";await load();}catch(cause){error=cause instanceof Error?cause.message:"No se pudo enviar el mensaje.";}finally{messageSaving="";}}
+  function date(value:string|null|undefined){return value?new Date(`${value.slice(0,10)}T00:00:00`).toLocaleDateString("es-ES"):"Sin fecha";}
+  onMount(load);
+</script>
+
+{#if loading}<p class="text-sm text-[var(--color-muted)]">Cargando proyecto…</p>
+{:else if error && !project}<Card lift={false} class="border-rose-500/30"><p class="text-rose-200">{error}</p></Card>
+{:else if project}
+<div class="space-y-6">
+  <div><a href="/portal" class="text-xs text-[var(--color-purple-bright)]">← Tus proyectos</a><div class="mt-3 flex items-start justify-between gap-4"><div><h1 class="text-2xl font-semibold">{project.name}</h1><p class="mt-2 max-w-3xl text-sm text-[var(--color-muted)]">{project.description}</p></div><Badge tone={project.status==="done"?"ok":"info"}>{statusLabel[project.status]??project.status}</Badge></div></div>
+  <div class="grid gap-4 sm:grid-cols-3"><Card lift={false}><p class="text-xs text-[var(--color-muted)]">Inicio</p><p class="mt-1 font-semibold">{date(project.start_date)}</p></Card><Card lift={false}><p class="text-xs text-[var(--color-muted)]">Objetivo</p><p class="mt-1 font-semibold">{date(project.target_date)}</p></Card><Card lift={false}><p class="text-xs text-[var(--color-muted)]">Progreso</p><p class="mt-1 font-semibold">{project.tasks.filter(t=>t.status==="done").length}/{project.tasks.length} tareas</p></Card></div>
+  <section><h2 class="mb-3 text-lg font-semibold">Hitos</h2><div class="grid gap-3 md:grid-cols-2">{#each project.milestones as milestone}<Card lift={false}><div class="flex justify-between gap-3"><strong>{milestone.title}</strong><Badge tone={milestone.status==="done"?"ok":milestone.status==="missed"?"danger":"neutral"}>{statusLabel[milestone.status]??milestone.status}</Badge></div><p class="mt-2 text-xs text-[var(--color-muted)]">{date(milestone.target_date)}</p></Card>{:else}<p class="text-sm text-[var(--color-muted)]">No hay hitos publicados.</p>{/each}</div></section>
+  <section><h2 class="mb-3 text-lg font-semibold">Tareas <span class="text-xs font-normal text-[var(--color-muted)]">· Solo lectura</span></h2><Card lift={false} class="p-0"><div class="divide-y divide-[var(--color-border)]">{#each project.tasks as task}<div class="flex items-center justify-between gap-3 px-4 py-3"><div class:pl-5={task.parent_id!=null}><p class="text-sm font-medium">{task.title}</p><p class="text-xs text-[var(--color-muted)]">{date(taskDueDate(task))}</p></div><Badge tone={task.status==="done"?"ok":task.status==="blocked"?"danger":"neutral"}>{statusLabel[task.status]??task.status}</Badge></div>{:else}<p class="p-4 text-sm text-[var(--color-muted)]">No hay tareas publicadas.</p>{/each}</div></Card></section>
+  <section><h2 class="mb-3 text-lg font-semibold">Facturas enviadas</h2><div class="grid gap-3 md:grid-cols-2">{#each project.invoices as invoice}<Card lift={false}><div class="flex justify-between"><strong>{invoice.series}-{invoice.number}</strong><strong>{formatEUR(invoice.total_cents)}</strong></div><p class="mt-2 text-xs text-[var(--color-muted)]">Emitida {date(invoice.issued_at)} · {invoice.payment_status==="paid"?"Pagada":"Pendiente"}</p></Card>{:else}<p class="text-sm text-[var(--color-muted)]">No hay facturas enviadas para este proyecto.</p>{/each}</div></section>
+  <section class="grid gap-5 lg:grid-cols-[1fr_0.8fr]"><div><h2 class="mb-3 text-lg font-semibold">Solicitudes</h2><div class="space-y-3">{#each project.requests as request}<Card lift={false}><div class="flex justify-between gap-3"><strong>{request.title}</strong><Badge tone={request.status==="accepted"?"ok":request.status==="rejected"?"danger":"info"}>{request.status}</Badge></div><p class="mt-2 text-sm text-[var(--color-muted)]">{request.description}</p><p class="mt-2 text-xs text-[var(--color-muted-dim)]">{typeOptions.find(x=>x.value===request.type)?.label??request.type}</p>{#if request.messages?.length}<div class="mt-3 space-y-2 border-t border-[var(--color-border)] pt-3">{#each request.messages as message}<div class="rounded-lg bg-white/5 p-2 text-sm"><strong>{message.author}</strong><p class="mt-1 text-[var(--color-muted)]">{message.text}</p></div>{/each}</div>{/if}<form class="mt-3 flex gap-2" onsubmit={(event)=>{event.preventDefault();void reply(request.id);}}><Input aria-label="Responder" placeholder="Añadir un mensaje" bind:value={replies[request.id]}/><Button type="submit" disabled={messageSaving===request.id}>{messageSaving===request.id?"Enviando…":"Responder"}</Button></form></Card>{:else}<p class="text-sm text-[var(--color-muted)]">No has enviado solicitudes.</p>{/each}</div></div><Card lift={false}><h2 class="font-semibold">Nueva solicitud</h2><form class="mt-4 space-y-3" onsubmit={(event)=>{event.preventDefault();void submit();}}><Select label="Tipo" options={typeOptions} bind:value={form.type}/><Input label="Título" bind:value={form.title} required/><label class="block text-sm">Descripción<textarea class="field mt-1 min-h-32 w-full" bind:value={form.description} required></textarea></label><Button type="submit" disabled={saving}>{saving?"Enviando…":"Enviar solicitud"}</Button></form>{#if error}<p class="mt-3 text-xs text-rose-300">{error}</p>{/if}</Card></section>
+</div>
+{/if}

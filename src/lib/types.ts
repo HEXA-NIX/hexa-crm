@@ -1,7 +1,7 @@
 import type { VatRate } from "./vat";
 
 /** app roles */
-export type UserRole = "admin" | "cajero";
+export type UserRole = "admin" | "cajero" | "cliente";
 
 /** Multi-empresa: kind de negocio (docs/MULTI_COMPANY_ANALYSIS.md) */
 export type CompanyKind = "retail_secondhand" | "software_studio" | "generic";
@@ -368,6 +368,7 @@ export type Invoice = {
   id: number;
   company_id: number;
   sale_id: number | null;
+  project_id?: number | null;
   series: string;
   number: string;
   kind: InvoiceKind;
@@ -400,6 +401,7 @@ export type InvoiceInput = {
   status?: InvoiceStatus;
   draft_id?: number | null;
   sale_id?: number;
+  project_id?: number | null;
   customer_id?: number | null;
   customer_name?: string;
   customer_nif?: string;
@@ -436,6 +438,11 @@ export type BudgetLine = {
   description: string;
   quantity: number;
   unit_price_cents: number;
+  discount_type: "percent" | "amount";
+  discount_value: number;
+  discount_cents: number;
+  global_discount_cents: number;
+  original_base_cents: number;
   vat_rate: VatRate;
   base_cents: number;
   vat_cents: number;
@@ -445,6 +452,8 @@ export type BudgetLineInput = {
   description: string;
   quantity: number;
   unit_price_cents: number;
+  discount_type?: "percent" | "amount";
+  discount_value?: number;
   vat_rate: VatRate;
 };
 export type Budget = {
@@ -461,6 +470,9 @@ export type Budget = {
   customer_email: string;
   project_explanation: string;
   lines: BudgetLine[];
+  global_discount_type: "percent" | "amount";
+  global_discount_value: number;
+  discount_cents: number;
   base_cents: number;
   vat_cents: number;
   irpf_rate: number;
@@ -491,6 +503,8 @@ export type BudgetInput = {
   customer_email?: string;
   project_explanation: string;
   lines: BudgetLineInput[];
+  global_discount_type?: "percent" | "amount";
+  global_discount_value?: number;
   irpf_rate?: number;
   payment_method?: string;
   account?: string;
@@ -691,6 +705,8 @@ export type AuthUser = {
   temp_password_issued_at: string | null;
   /** Puede desplegar y operar todos los tenants, manteniendo una vista de empresas asignadas. */
   is_master?: boolean;
+  /** Proyectos asignados al perfil cuando el rol es cliente. */
+  project_ids?: number[];
 };
 
 export type UserInput = {
@@ -700,6 +716,8 @@ export type UserInput = {
   phone?: string;
   avatar_data_url?: string;
   role: UserRole;
+  /** Proyectos visibles para un usuario cliente. Se ignora para personal interno. */
+  project_ids?: number[];
   /** Optional permanent credential on edit only; create always issues a 14-char temp password. */
   pin?: string | null;
   active?: boolean;
@@ -824,6 +842,21 @@ export type ProjectCycle = {
   end_date: string;
   capacity_points: number;
   status: "planned" | "active" | "completed";
+  stage?: "refinement" | "poker" | "planning" | "active" | "review" | "retrospective" | "completed";
+  task_ids?: number[];
+  poker_points?: Record<string, number>;
+  ai_estimates?: Record<string, { points: number; confidence: "low" | "medium" | "high"; rationale: string }>;
+  execution_modes?: Record<string, "human" | "ai" | "hybrid">;
+  reviewer_ids?: Record<string, number | null>;
+  definition_of_done?: string;
+  human_capacity_hours?: number;
+  ai_concurrency?: number;
+  ai_budget_cents?: number;
+  review_notes?: string;
+  retrospective_went_well?: string;
+  retrospective_improve?: string;
+  retrospective_action?: string;
+  completed_at?: string | null;
 };
 
 export type ProjectCapacity = {
@@ -965,6 +998,8 @@ export type WorkProjectRequest = {
   title: string;
   description: string;
   requester: string;
+  /** Identidad del cliente creador; las solicitudes internas no la incluyen. */
+  requester_user_id?: number;
   priority: WorkPriority;
   impact: string;
   status: WorkProjectRequestStatus;
@@ -1020,10 +1055,27 @@ export type WorkItem = {
   parent_title?: string | null;
 };
 
+export type ClientPortalTask = Pick<WorkItem, "id" | "parent_id" | "title" | "status" | "priority" | "due_date" | "effective_due_date">;
+export type ClientPortalInvoice = Pick<Invoice, "id" | "series" | "number" | "kind" | "status" | "issued_at" | "operation_date" | "due_at" | "total_cents" | "paid_cents" | "payment_status">;
+export type ClientPortalProject = {
+  id: number;
+  uid: string;
+  name: string;
+  description: string;
+  status: WorkProject["status"];
+  start_date: string | null;
+  target_date: string | null;
+  logo_data_url?: string;
+  milestones: ProjectOperationalMilestone[];
+  tasks: ClientPortalTask[];
+  invoices: ClientPortalInvoice[];
+  requests: WorkProjectRequest[];
+};
+
 export type WorkMember = {
   id: number;
   display_name: string;
-  role: "admin" | "cajero";
+  role: UserRole;
 };
 
 export type WorkItemFilters = {

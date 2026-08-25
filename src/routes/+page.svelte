@@ -6,6 +6,7 @@
     CashMovement,
     DashboardStats,
     CompanyFinancialSummary,
+    Invoice,
     Sale,
     Settings,
     WorkItem,
@@ -41,6 +42,7 @@
   let devTasks = $state<WorkItem[]>([]);
   let devCustomers = $state<Customer[]>([]);
   let devCashMovements = $state<CashMovement[]>([]);
+  let devInvoices = $state<Invoice[]>([]);
   let devLoading = $state(false);
   let whatsappDigestSending = $state(false);
   let groupSummary = $state<CompanyFinancialSummary[]>([]);
@@ -58,12 +60,14 @@
       api.listWorkItems(),
       api.listCustomers(),
       api.listCashMovements(),
+      api.listInvoices(),
     ])
-      .then(([projects, tasks, customers, cashMovements]) => {
+      .then(([projects, tasks, customers, cashMovements, invoices]) => {
         devProjects = projects;
         devTasks = tasks;
         devCustomers = customers;
         devCashMovements = cashMovements;
+        devInvoices = invoices;
       })
       .catch((error) => {
         showToast(error instanceof Error ? error.message : "Error al cargar proyectos", "err");
@@ -177,11 +181,10 @@
       .filter((project) => (project.project_type ?? (project.customer_id != null ? "client" : "own")) === "client" && project.status !== "archived")
       .reduce((sum, project) => sum + project.value_cents, 0),
   );
-  const billedProjectCents = $derived(
-    devCashMovements
-      .filter((movement) => movement.project_id != null && movement.kind === "income")
-      .reduce((sum, movement) => sum + movement.amount_cents, 0),
+  const activeCompanyFinancialSummary = $derived(
+    groupSummary.find((company) => company.company_id === $session.activeCompanyId),
   );
+  const billedProjectCents = $derived(activeCompanyFinancialSummary?.issued_total_cents ?? 0);
   const totalExpenseMovements = $derived(
     devCashMovements.filter((movement) => movement.kind === "expense"),
   );
@@ -191,7 +194,7 @@
   );
   const billedMarginCents = $derived(billedProjectCents - totalSpentCents);
   const projectRevenueProjection = $derived(
-    buildProjectRevenueProjection(devProjects, devCashMovements),
+    buildProjectRevenueProjection(devProjects, devCashMovements, new Date(), 5, 6, devInvoices),
   );
   const projectRevenuePositiveMax = $derived(
     Math.max(
@@ -217,7 +220,8 @@
   );
   const currentMonthKey = $derived(new Date().toISOString().slice(0, 7));
   const currentEconomicGoalCents = $derived(
-    monthlyEconomicGoal(settings?.monthly_economic_goals, $session.activeCompanyId, currentMonthKey),
+    (currentRevenueProjection?.projection_cents ?? 0)
+      || monthlyEconomicGoal(settings?.monthly_economic_goals, $session.activeCompanyId, currentMonthKey),
   );
   const currentEconomicGoalProgress = $derived(
     economicGoalProgress(currentRevenueProjection?.income_cents ?? 0, currentEconomicGoalCents),
@@ -337,7 +341,7 @@
       <p class="section-label mb-3">Estado de la cartera</p>
       <div class="pulse-metrics grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
         <KpiCard label="Valor conseguido" value={formatEUR(wonProjectValueCents)} hint={`${activeDevProjects.length} proyectos en cartera`} icon="◫" accent="violet" />
-        <KpiCard label="Facturado" value={formatEUR(billedProjectCents)} hint={`${openDevTasks.length} tareas abiertas`} icon="€" accent="emerald" />
+        <KpiCard label="Facturado total" value={formatEUR(billedProjectCents)} hint={`${formatEUR(activeCompanyFinancialSummary?.issued_paid_cents ?? 0)} cobrado`} icon="€" accent="emerald" />
         <KpiCard label="Gastado" value={formatEUR(totalSpentCents)} hint={`${totalExpenseMovements.length} gastos registrados en Caja`} icon="−" accent="amber" />
         <KpiCard
           label="Margen facturado"
@@ -347,7 +351,7 @@
           accent={billedMarginCents < 0 ? "rose" : "cyan"}
           valueTone={billedMarginCents < 0 ? "danger" : "default"}
         />
-        <KpiCard label="Objetivo mensual" value={currentEconomicGoalCents ? `${currentEconomicGoalProgress}%` : "Sin definir"} hint={currentEconomicGoalCents ? `${formatEUR(currentRevenueProjection?.income_cents ?? 0)} de ${formatEUR(currentEconomicGoalCents)}` : "Defínelo en Proyectos"} icon="◎" accent={currentEconomicGoalProgress >= 100 ? "emerald" : "violet"} />
+        <KpiCard label="Objetivo mensual" value={currentEconomicGoalCents ? `${currentEconomicGoalProgress}%` : "Sin definir"} hint={currentEconomicGoalCents ? `${formatEUR(currentRevenueProjection?.income_cents ?? 0)} de ${formatEUR(currentEconomicGoalCents)}${(currentRevenueProjection?.projection_cents ?? 0) ? " · hitos" : ""}` : "Defínelo en Proyectos"} icon="◎" accent={currentEconomicGoalProgress >= 100 ? "emerald" : "violet"} />
       </div>
 
       {#if devProjects.length === 0}
@@ -361,7 +365,7 @@
       <Card class="relative mt-4 overflow-visible" lift={false}>
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h2 class="section-label !normal-case !tracking-wide !text-sm">Ingresos y proyección propia</h2>
+            <h2 class="section-label !normal-case !tracking-wide !text-sm">Facturación y proyección propia</h2>
             <p class="mt-1 max-w-2xl text-xs text-[var(--color-muted)]">
               Los hitos de cada proyecto propio se mantienen mes a mes hasta que un nuevo hito cambia la estimación.
             </p>
@@ -369,7 +373,7 @@
           <div class="flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px]">
             <span class="inline-flex items-center gap-1.5 text-[var(--color-muted)]">
               <span class="h-2.5 w-2.5 rounded-sm bg-emerald-400"></span>
-              Ingresos reales
+              Facturación real
             </span>
             <span class="inline-flex items-center gap-1.5 text-[var(--color-muted)]">
               <span class="h-2.5 w-2.5 rounded-sm bg-gradient-to-t from-purple-600 to-violet-300"></span>
@@ -384,7 +388,7 @@
 
         <div class="mt-4 grid gap-3 sm:grid-cols-3">
           <div class="rounded-xl border border-[var(--color-border)] bg-black/20 px-3 py-2.5">
-            <p class="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Ingresos este mes</p>
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Facturado este mes</p>
             <p class="mt-1 text-lg font-semibold tabular text-emerald-300">
               {formatEUR(currentRevenueProjection?.income_cents ?? 0)}
             </p>

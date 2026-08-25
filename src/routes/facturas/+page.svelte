@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import QRCode from "qrcode";
   import { api } from "$lib/api/client";
-  import type { Customer, Invoice, Product, Sale, VerifactuRecord } from "$lib/types";
+  import type { Customer, Invoice, Product, Sale, VerifactuRecord, WorkProject } from "$lib/types";
   import { formatEUR } from "$lib/money";
   import Card from "$lib/components/Card.svelte";
   import Button from "$lib/components/Button.svelte";
@@ -61,6 +61,7 @@
   let calendarCursor = $state(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
   let customers = $state<Customer[]>([]);
   let products = $state<Product[]>([]);
+  let clientProjects = $state<WorkProject[]>([]);
   let manualOpen = $state(false);
   let manualSaving = $state(false);
   let manualError = $state("");
@@ -68,7 +69,7 @@
   let previewOpen = $state(false);
   let previewInvoice = $state<Invoice | null>(null);
   let manualDraftId = $state<number | null>(null);
-  let manualForm = $state({ kind: "complete" as "complete" | "simplified", customer_id: "", customer_name: "", customer_nif: "", customer_email: "", operation_date: new Date().toISOString().slice(0, 10), due_at: "", irpf_rate: "", notes: "" });
+  let manualForm = $state({ kind: "complete" as "complete" | "simplified", project_id: "", customer_id: "", customer_name: "", customer_nif: "", customer_email: "", operation_date: new Date().toISOString().slice(0, 10), due_at: "", irpf_rate: "", notes: "" });
   let manualLines = $state<ManualLine[]>([{ product_id: "", description: "", quantity: "1", unit_price: "", vat_rate: "21" }]);
 
   const availableSales = $derived(sales.filter((sale) => sale.status !== "cancelled" && !invoices.some((invoice) => invoice.sale_id === sale.id && invoice.status !== "cancelled")));
@@ -205,8 +206,9 @@
   async function load() {
     loading = true;
     try {
-      const [loadedInvoices, loadedSales, loadedRecords, loadedCustomers, loadedProducts, profiles] = await Promise.all([api.listInvoices(), api.listSales(), api.listVerifactuRecords(), api.listCustomers(), api.listProducts(true), api.listFiscalProfiles()]);
+      const [loadedInvoices, loadedSales, loadedRecords, loadedCustomers, loadedProducts, profiles, loadedProjects] = await Promise.all([api.listInvoices(), api.listSales(), api.listVerifactuRecords(), api.listCustomers(), api.listProducts(true), api.listFiscalProfiles(), api.listWorkProjects()]);
       invoices = loadedInvoices; sales = loadedSales; verifactuRecords = loadedRecords; customers = loadedCustomers; products = loadedProducts; invoiceSeries = profiles[0]?.invoice_series || "F";
+      clientProjects = loadedProjects.filter((project) => project.project_type === "client" && project.status !== "archived");
     }
     catch (error) { showToast(error instanceof Error ? error.message : "No se pudieron cargar las facturas", "err"); }
     finally { loading = false; }
@@ -215,7 +217,7 @@
 
   function openManualInvoice() {
     manualDraftId = null;
-    manualForm = { kind: "complete", customer_id: "", customer_name: "", customer_nif: "", customer_email: "", operation_date: new Date().toISOString().slice(0, 10), due_at: "", irpf_rate: irpfRate, notes: "" };
+    manualForm = { kind: "complete", project_id: "", customer_id: "", customer_name: "", customer_nif: "", customer_email: "", operation_date: new Date().toISOString().slice(0, 10), due_at: "", irpf_rate: irpfRate, notes: "" };
     manualLines = [{ product_id: "", description: "", quantity: "1", unit_price: "", vat_rate: "21" }];
     manualError = "";
     manualOpen = true;
@@ -223,7 +225,7 @@
 
   function editDraft(invoice: Invoice) {
     manualDraftId = invoice.id;
-    manualForm = { kind: invoice.kind === "simplified" ? "simplified" : "complete", customer_id: invoice.customer_id ? String(invoice.customer_id) : "", customer_name: invoice.customer_name === "Cliente contado" ? "" : invoice.customer_name, customer_nif: invoice.customer_nif, customer_email: invoice.customer_email, operation_date: invoice.operation_date, due_at: invoice.due_at ?? "", irpf_rate: invoice.irpf_rate ? String(invoice.irpf_rate) : "", notes: invoice.notes };
+    manualForm = { kind: invoice.kind === "simplified" ? "simplified" : "complete", project_id: invoice.project_id ? String(invoice.project_id) : "", customer_id: invoice.customer_id ? String(invoice.customer_id) : "", customer_name: invoice.customer_name === "Cliente contado" ? "" : invoice.customer_name, customer_nif: invoice.customer_nif, customer_email: invoice.customer_email, operation_date: invoice.operation_date, due_at: invoice.due_at ?? "", irpf_rate: invoice.irpf_rate ? String(invoice.irpf_rate) : "", notes: invoice.notes };
     manualLines = invoice.lines.map((line) => ({ product_id: "", description: line.description, quantity: String(line.quantity), unit_price: String(line.unit_price_cents / 100), vat_rate: String(line.vat_rate) }));
     manualError = "";
     manualOpen = true;
@@ -272,7 +274,7 @@
         const customer = await api.upsertCustomer({ id: customerId, name: manualForm.customer_name.trim(), nif: manualForm.customer_nif.trim(), email: manualForm.customer_email.trim() });
         customerId = customer.id;
       }
-      const invoice = await api.issueInvoice({ draft_id: manualDraftId, status, series: invoiceSeries, kind: manualForm.kind, customer_id: customerId, customer_name: manualForm.customer_name, customer_nif: manualForm.customer_nif, customer_email: manualForm.customer_email, lines, operation_date: manualForm.operation_date || null, due_at: manualForm.due_at || null, irpf_rate: manualForm.irpf_rate ? Number(manualForm.irpf_rate) : undefined, notes: manualForm.notes });
+      const invoice = await api.issueInvoice({ draft_id: manualDraftId, status, series: invoiceSeries, kind: manualForm.kind, project_id: manualForm.project_id ? Number(manualForm.project_id) : null, customer_id: customerId, customer_name: manualForm.customer_name, customer_nif: manualForm.customer_nif, customer_email: manualForm.customer_email, lines, operation_date: manualForm.operation_date || null, due_at: manualForm.due_at || null, irpf_rate: manualForm.irpf_rate ? Number(manualForm.irpf_rate) : undefined, notes: manualForm.notes });
       showToast(status === "draft" ? "Borrador guardado" : `Factura ${invoice.series}-${invoice.number} emitida`);
       manualOpen = false;
       if (status === "issued") { previewInvoice = invoice; previewOpen = true; }
@@ -420,6 +422,9 @@
       <label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">Fecha operación</span><DatePicker bind:value={manualForm.operation_date} /></label>
       <label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">Vencimiento</span><DatePicker bind:value={manualForm.due_at} align="right" /></label>
     </div>
+    {#if clientProjects.length}
+      <label class="text-sm"><span class="mb-1 block text-[var(--color-muted)]">Proyecto del cliente (visible en su portal)</span><select class="field w-full" bind:value={manualForm.project_id}><option value="">Sin proyecto</option>{#each clientProjects as project}<option value={project.id}>{project.name}</option>{/each}</select></label>
+    {/if}
     <div class="grid gap-3 sm:grid-cols-3">
       <label class="text-sm"><span class="mb-1 block text-slate-400">Cliente guardado</span><select class="field w-full" value={manualForm.customer_id} onchange={(event) => selectManualCustomer(event.currentTarget.value)}><option value="">Cliente nuevo / contado</option>{#each customers as customer}<option value={customer.id}>{customer.name}{customer.nif ? ` · ${customer.nif}` : ""}</option>{/each}</select></label>
       <label class="text-sm"><span class="mb-1 block text-slate-400">Nombre / razón social</span><input class="field w-full" bind:value={manualForm.customer_name} /></label>

@@ -17,7 +17,7 @@ describe("renderRichDescription", () => {
 
   it("renders commercial section titles, subtitles and phases", () => {
     expect(renderRichDescription("## Contexto\nDescripción\n### Fase 1 — Diseño · Semanas 1–2\nEntregables")).toBe(
-      '<h2>Contexto</h2><p>Descripción</p><div class="rich-phase-block"><h3>Fase 1 — Diseño · Semanas 1–2</h3><p>Entregables</p></div>',
+      '<div class="rich-section-lead"><h2>Contexto</h2><p>Descripción</p></div><div class="rich-phase-block"><h3>Fase 1 — Diseño · Semanas 1–2</h3><p>Entregables</p></div>',
     );
   });
 });

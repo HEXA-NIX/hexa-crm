@@ -3,7 +3,7 @@
   import { session, isAdmin } from "$lib/stores/session";
   import { showToast } from "$lib/stores/ui";
   import { formatEUR, parseEurosInput } from "$lib/money";
-  import type { CashMovement, Customer, Settings, WorkProject, WorkItem, WorkProjectInput, WorkProjectKind } from "$lib/types";
+  import type { CashMovement, Customer, Invoice, Settings, WorkProject, WorkItem, WorkProjectInput, WorkProjectKind } from "$lib/types";
   import { economicGoalKey, economicGoalProgress, monthlyEconomicGoal } from "$lib/projects/economic-goal";
   import { calculateTaskProgress } from "$lib/projects/task-progress";
   import { projectStatusLabel, projectStatusTone } from "$lib/projects/presentation";
@@ -14,7 +14,7 @@
   import Badge from "$lib/components/Badge.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import Select from "$lib/components/Select.svelte";
-  import DatePicker from "$lib/components/DatePicker.svelte";
+  import DateRangePicker from "$lib/components/DateRangePicker.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import RichDescription from "$lib/components/RichDescription.svelte";
   import RichDescriptionEditor from "$lib/components/RichDescriptionEditor.svelte";
@@ -29,6 +29,7 @@
   let items = $state<WorkItem[]>([]);
   let customers = $state<Customer[]>([]);
   let cashMovements = $state<CashMovement[]>([]);
+  let invoices = $state<Invoice[]>([]);
   let settings = $state<Settings | null>(null);
   let loading = $state(true);
 
@@ -134,10 +135,11 @@
   async function loadData() {
     loading = true;
     try {
-      const [projList, customerList, movementList, loadedSettings] = await Promise.all([
+      const [projList, customerList, movementList, invoiceList, loadedSettings] = await Promise.all([
         api.listWorkProjects(),
         api.listCustomers(hexaCompanyId()),
         api.listCashMovements(),
+        api.listInvoices(),
         api.getSettings(),
       ]);
       projects = projList;
@@ -150,6 +152,7 @@
       )).flat();
       customers = customerList;
       cashMovements = movementList;
+      invoices = invoiceList;
       settings = loadedSettings;
       goalInput = monthlyEconomicGoal(loadedSettings.monthly_economic_goals, $session.activeCompanyId, currentMonth)
         ? String(monthlyEconomicGoal(loadedSettings.monthly_economic_goals, $session.activeCompanyId, currentMonth) / 100).replace(".", ",")
@@ -256,12 +259,17 @@
   });
 
   const currentMonthIncomeCents = $derived(
-    cashMovements
-      .filter((movement) => movement.kind === "income" && movement.project_id != null && movement.occurred_at.slice(0, 7) === currentMonth)
-      .reduce((sum, movement) => sum + movement.amount_cents, 0),
+    invoices
+      .filter((invoice) => invoice.status === "issued" && invoice.operation_date.slice(0, 7) === currentMonth)
+      .reduce((sum, invoice) => sum + invoice.total_cents, 0),
   );
   const currentGoalCents = $derived(
-    monthlyEconomicGoal(settings?.monthly_economic_goals, $session.activeCompanyId, currentMonth),
+    projects
+      .filter((project) => (project.project_type ?? (project.customer_id != null ? "client" : "own")) !== "client")
+      .flatMap((project) => project.revenue_milestones)
+      .filter((milestone) => milestone.target_month === currentMonth)
+      .reduce((sum, milestone) => sum + milestone.amount_cents, 0)
+      || monthlyEconomicGoal(settings?.monthly_economic_goals, $session.activeCompanyId, currentMonth),
   );
   const currentGoalProgress = $derived(economicGoalProgress(currentMonthIncomeCents, currentGoalCents));
   const projectMonthlyEconomics = $derived.by(() => {
@@ -276,9 +284,9 @@
       const goal = project.revenue_milestones
         .filter((milestone) => milestone.target_month === month)
         .reduce((sum, milestone) => sum + milestone.amount_cents, 0);
-      const achieved = cashMovements
-        .filter((movement) => movement.project_id === project.id && movement.kind === "income" && movement.occurred_at.slice(0, 7) === month)
-        .reduce((sum, movement) => sum + movement.amount_cents, 0);
+      const achieved = invoices
+        .filter((invoice) => invoice.project_id === project.id && invoice.status === "issued" && invoice.operation_date.slice(0, 7) === month)
+        .reduce((sum, invoice) => sum + invoice.total_cents, 0);
       map.set(project.id, { month, goal, achieved });
     }
     return map;
@@ -850,16 +858,7 @@
       </div>
     {/if}
 
-    <div class="grid gap-3 sm:grid-cols-2">
-      <div class="space-y-1">
-        <label for="project-start-date" class="text-xs font-medium text-[var(--color-muted)]">Fecha de inicio</label>
-        <DatePicker bind:value={form.start_date} ariaLabel="Fecha de inicio" />
-      </div>
-      <div class="space-y-1">
-        <label for="project-target-date" class="text-xs font-medium text-[var(--color-muted)]">Fecha objetivo</label>
-        <DatePicker bind:value={form.target_date} ariaLabel="Fecha objetivo" />
-      </div>
-    </div>
+    <DateRangePicker label="Periodo del proyecto" bind:start={form.start_date} bind:end={form.target_date} />
 
     <div class="flex items-center justify-end gap-2 border-t border-[var(--color-border)] pt-4">
       <Button variant="ghost" type="button" onclick={() => (modalOpen = false)}>

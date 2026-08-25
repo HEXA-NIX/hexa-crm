@@ -21,7 +21,7 @@
   import Badge from "$lib/components/Badge.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import Select from "$lib/components/Select.svelte";
-  import DatePicker from "$lib/components/DatePicker.svelte";
+  import DateRangePicker from "$lib/components/DateRangePicker.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import AssigneeAvatar from "$lib/components/users/AssigneeAvatar.svelte";
   import { isTaskDueSoon, isTaskOverdue, sortTasksByDueDate, taskAssigneeId, taskDueDate } from "$lib/work/task-dates";
@@ -863,16 +863,7 @@
       />
     </div>
 
-    <div class="grid gap-3 sm:grid-cols-2">
-      <div class="space-y-1">
-        <label for="task-start-date" class="text-xs font-medium text-[var(--color-muted)]">Fecha de inicio</label>
-        <DatePicker bind:value={detailForm.start_date} ariaLabel="Fecha de inicio" />
-      </div>
-      <div class="space-y-1">
-        <label for="task-due-date" class="text-xs font-medium text-[var(--color-muted)]">Fecha límite</label>
-        <DatePicker bind:value={detailForm.due_date} ariaLabel="Fecha límite" />
-      </div>
-    </div>
+    <DateRangePicker label="Periodo de la tarea" bind:start={detailForm.start_date} bind:end={detailForm.due_date} />
 
     {#if editingItem?.status === "done" && editingItem?.completed_at}
       <div class="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-3 text-xs text-emerald-300">
