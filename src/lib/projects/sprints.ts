@@ -17,29 +17,42 @@ export function currentSprint(cycles: ProjectCycle[]) {
 export function sprintTasks(cycle: ProjectCycle | null, tasks: WorkItem[]) {
   if (!cycle) return [];
   const ids = new Set(cycle.task_ids ?? []);
-  return tasks.filter((task) => ids.has(task.id) || (task.parent_id != null && ids.has(task.parent_id)));
+  const selected = tasks.filter((task) => ids.has(task.id) || (task.parent_id != null && ids.has(task.parent_id)));
+  const order = new Map(tasks.map((task, index) => [task.id, index]));
+  return selected.toSorted((left, right) => {
+    const leftRoot = left.parent_id ?? left.id;
+    const rightRoot = right.parent_id ?? right.id;
+    if (leftRoot !== rightRoot) return (order.get(leftRoot) ?? 0) - (order.get(rightRoot) ?? 0);
+    if (left.parent_id == null) return -1;
+    if (right.parent_id == null) return 1;
+    return (order.get(left.id) ?? 0) - (order.get(right.id) ?? 0);
+  });
+}
+
+export function sprintEstimableTasks(cycle: ProjectCycle | null, tasks: WorkItem[]) {
+  const selected = sprintTasks(cycle, tasks);
+  const parents = new Set(selected.filter((task) => task.parent_id != null).map((task) => task.parent_id));
+  return selected.filter((task) => !parents.has(task.id));
 }
 
 export function taskReadiness(task: WorkItem) {
   const missing: string[] = [];
   if (!task.description.trim()) missing.push("descripción/contexto");
-  if (!task.assignee_id && !task.effective_assignee_id) missing.push("responsable");
-  if (!task.due_date && !task.effective_due_date) missing.push("fecha");
   return { ready: missing.length === 0, missing };
 }
 
 export function sprintMetrics(cycle: ProjectCycle, tasks: WorkItem[]) {
-  const selected = sprintTasks(cycle, tasks);
-  const roots = selected.filter((task) => (cycle.task_ids ?? []).includes(task.id));
-  const completed = roots.filter((task) => task.status === "done").length;
-  const points = roots.reduce((sum, task) => sum + (cycle.poker_points?.[String(task.id)] ?? 0), 0);
-  const completedPoints = roots.filter((task) => task.status === "done").reduce((sum, task) => sum + (cycle.poker_points?.[String(task.id)] ?? 0), 0);
-  const aiTasks = roots.filter((task) => ["ai", "hybrid"].includes(cycle.execution_modes?.[String(task.id)] ?? "human")).length;
-  return { total: roots.length, completed, points, completedPoints, aiTasks, progress: roots.length ? Math.round(completed / roots.length * 100) : 0 };
+  const selected = sprintEstimableTasks(cycle, tasks);
+  const completed = selected.filter((task) => task.status === "done").length;
+  const points = selected.reduce((sum, task) => sum + (cycle.poker_points?.[String(task.id)] ?? 0), 0);
+  const completedPoints = selected.filter((task) => task.status === "done").reduce((sum, task) => sum + (cycle.poker_points?.[String(task.id)] ?? 0), 0);
+  const aiTasks = selected.filter((task) => ["ai", "hybrid"].includes(cycle.execution_modes?.[String(task.id)] ?? "human")).length;
+  return { total: selected.length, completed, points, completedPoints, aiTasks, progress: selected.length ? Math.round(completed / selected.length * 100) : 0 };
 }
 
-export function pokerPending(cycle: ProjectCycle) {
-  return (cycle.task_ids ?? []).filter((id) => !((cycle.poker_points?.[String(id)] ?? 0) > 0));
+export function pokerPending(cycle: ProjectCycle, tasks: WorkItem[] = []) {
+  const ids = tasks.length ? sprintEstimableTasks(cycle, tasks).map((task) => task.id) : (cycle.task_ids ?? []);
+  return ids.filter((id) => !((cycle.poker_points?.[String(id)] ?? 0) > 0));
 }
 
 export function suggestAiEstimate(task: WorkItem, childCount = 0) {

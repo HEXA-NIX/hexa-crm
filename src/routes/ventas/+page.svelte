@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { confirmDialog } from "$lib/stores/confirm-dialog";
   import { onMount } from "svelte";
   import { page } from "$app/stores";
   import { api } from "$lib/api/client";
@@ -306,8 +307,9 @@
       return;
     }
     if (
-      !confirm(
+      !await confirmDialog(
         `¿Anular el resto del ticket ${selectedSale.number}? Se restaurará el stock pendiente y se registrará el reembolso en caja.`,
+        { title: "Anular ticket", confirmLabel: "Anular ticket", danger: true },
       )
     ) {
       return;
@@ -344,8 +346,9 @@
       return;
     }
     if (
-      !confirm(
+      !await confirmDialog(
         `¿Devolver ${lines.reduce((a, l) => a + l.qty, 0)} unidad(es) del ticket ${selectedSale.number}?`,
+        { title: "Registrar devolución", confirmLabel: "Registrar devolución", danger: true },
       )
     ) {
       return;

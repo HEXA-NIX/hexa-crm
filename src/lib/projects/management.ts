@@ -16,6 +16,7 @@ export const EMPTY_PROJECT_MANAGEMENT: ProjectManagement = {
   dependencies: [],
   cycles: [],
   capacity: [],
+  grants: [],
 };
 
 export function normalizeProjectManagement(value?: Partial<ProjectManagement> | null): ProjectManagement {
@@ -39,6 +40,7 @@ export function normalizeProjectManagement(value?: Partial<ProjectManagement> | 
       ai_estimates: cycle.ai_estimates && typeof cycle.ai_estimates === "object" ? cycle.ai_estimates : {},
       execution_modes: cycle.execution_modes && typeof cycle.execution_modes === "object" ? cycle.execution_modes : {},
       reviewer_ids: cycle.reviewer_ids && typeof cycle.reviewer_ids === "object" ? cycle.reviewer_ids : {},
+      assignee_ids: cycle.assignee_ids && typeof cycle.assignee_ids === "object" ? cycle.assignee_ids : {},
       definition_of_done: cycle.definition_of_done ?? "Criterios de aceptación cumplidos, pruebas superadas, evidencias adjuntas y revisión aprobada.",
       human_capacity_hours: Math.max(0, Number(cycle.human_capacity_hours) || 0),
       ai_concurrency: Math.max(0, Number(cycle.ai_concurrency) || 0),
@@ -50,6 +52,25 @@ export function normalizeProjectManagement(value?: Partial<ProjectManagement> | 
       completed_at: cycle.completed_at ?? null,
     })) : [],
     capacity: Array.isArray(source.capacity) ? source.capacity : [],
+    grants: Array.isArray(source.grants) ? source.grants.map((grant) => ({
+      ...grant,
+      authority: grant.authority ?? "",
+      beneficiary_company_id: grant.beneficiary_company_id == null ? null : Math.max(1, Math.round(Number(grant.beneficiary_company_id))),
+      managing_company: grant.managing_company ?? "",
+      management_fee_percent: Math.min(100, Math.max(0, Number(grant.management_fee_percent) || 0)),
+      status: grant.status ?? "preparing",
+      funding_type: grant.funding_type ?? "non_repayable",
+      requested_cents: Math.max(0, Number(grant.requested_cents) || 0),
+      awarded_cents: Math.max(0, Number(grant.awarded_cents) || 0),
+      received_cents: Math.max(0, Number(grant.received_cents) || 0),
+      repayable_cents: Math.max(0, Number(grant.repayable_cents) || 0),
+      application_date: grant.application_date ?? null,
+      resolution_date: grant.resolution_date ?? null,
+      received_date: grant.received_date ?? null,
+      repayment_date: grant.repayment_date ?? null,
+      reference: grant.reference ?? "",
+      notes: grant.notes ?? "",
+    })) : [],
   };
 }
 export function latestProjectUpdate(project: WorkProject) {

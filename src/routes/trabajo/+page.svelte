@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { confirmDialog } from "$lib/stores/confirm-dialog";
   import { onMount } from "svelte";
   import { page } from "$app/stores";
   import { goto } from "$app/navigation";
@@ -425,7 +426,7 @@
       showToast("Permiso denegado: solo administradores", "err");
       return;
     }
-    if (!confirm(`¿Archivar la categoría "${cat.name}"?`)) return;
+    if (!await confirmDialog(`La categoría «${cat.name}» dejará de aparecer en las opciones activas.`, { title: "Archivar categoría", confirmLabel: "Archivar", danger: true })) return;
     try {
       await api.archiveWorkCategory(cat.id);
       showToast("Categoría archivada");

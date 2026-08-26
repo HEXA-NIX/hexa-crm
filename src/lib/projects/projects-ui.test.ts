@@ -47,7 +47,14 @@ describe("estructura UI de proyectos", () => {
     expect(DETAIL).toContain("SOLICITUDES Y SUGERENCIAS");
     expect(DETAIL).toContain("saveProjectRequest");
     expect(DETAIL).toContain("convertRequestToTask");
-    expect(DETAIL).toContain("Convertir en tarea");
+    expect(DETAIL).toContain("Enviar al backlog");
+  });
+
+  it("separa la validación interna de la validación del cliente", () => {
+    expect(DETAIL).toContain('status: "client_validation" as const');
+    expect(DETAIL).toContain('label: "Validar cliente"');
+    expect(DETAIL).toContain("submitTaskForClientValidation");
+    expect(DETAIL).toContain("Solo un administrador puede enviar tareas a validar al cliente");
   });
 
   it("preselecciona al usuario de la sesión en el trabajo nuevo", () => {
@@ -73,7 +80,7 @@ describe("estructura UI de proyectos", () => {
   it("dispone de una vista explícita para archivadas y Kanban móvil", () => {
     expect(DETAIL).toContain('filterStatus === "archived"');
     expect(DETAIL).toContain("overflow-x-auto");
-    expect(DETAIL).toContain("w-full min-w-0 max-w-full snap-x");
+    expect(DETAIL).toContain("w-full min-w-0 max-w-full items-stretch");
     expect(DETAIL).toContain("pantalla táctil");
   });
 
@@ -91,10 +98,14 @@ describe("estructura UI de proyectos", () => {
     expect(DETAIL).toContain('document.addEventListener("dragover", handleKanbanBoardDragOver, true)');
     expect(DETAIL).toContain('document.addEventListener("drag", handleKanbanBoardDragOver, true)');
     expect(DETAIL).toContain("bind:this={kanbanBoardElement}");
-    expect(DETAIL).toContain("requestAnimationFrame(runKanbanAutoScroll)");
+    expect(DETAIL).toContain("setInterval(runKanbanAutoScroll, 24)");
+    expect(DETAIL).toContain("draggedTaskId === null ? 'snap-x' : 'snap-none'");
     expect(DETAIL).toContain("stopKanbanAutoScroll");
     expect(DETAIL).toContain("kanbanAutoScrollElement.scrollLeft += kanbanAutoScrollSpeed");
     expect(DETAIL).toContain("const visibleRight = Math.min(window.innerWidth, rect.right)");
+    expect(DETAIL).toContain("event.screenX - window.screenX");
+    expect(DETAIL).toContain("kanbanLastPointerX");
+    expect(DETAIL).not.toContain("event.clientY < rect.top");
     expect(DETAIL).not.toContain("handleKanbanBoardDragLeave");
     expect(DETAIL).toContain("handleKanbanDragKeydown");
     expect(DETAIL).toContain('event.key !== "Escape"');

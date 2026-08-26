@@ -46,7 +46,15 @@ export function buildProjectRevenueProjection(
       return total + (applicableMilestone?.amount_cents ?? 0);
     }, 0);
 
-    const incomeCents = invoices
+    const grantIncomeCents = movements
+      .filter(
+        (movement) =>
+          movement.category === "subvencion_cobrada" &&
+          movement.kind === "income" &&
+          movement.occurred_at.slice(0, 7) === month,
+      )
+      .reduce((total, movement) => total + movement.amount_cents, 0);
+    const incomeCents = (invoices
       ? invoices
           .filter((invoice) => invoice.status === "issued" && invoice.operation_date.slice(0, 7) === month)
           .reduce((total, invoice) => total + invoice.total_cents, 0)
@@ -57,7 +65,8 @@ export function buildProjectRevenueProjection(
               movement.kind === "income" &&
               movement.occurred_at.slice(0, 7) === month,
           )
-          .reduce((total, movement) => total + movement.amount_cents, 0);
+          .filter((movement) => movement.category !== "subvencion_cobrada")
+          .reduce((total, movement) => total + movement.amount_cents, 0)) + grantIncomeCents;
 
     const expenseCents = movements
       .filter(

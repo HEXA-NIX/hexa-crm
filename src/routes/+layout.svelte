@@ -3,6 +3,7 @@
   import { onMount, type Component } from "svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import Toast from "$lib/components/Toast.svelte";
+  import ConfirmDialogHost from "$lib/components/ConfirmDialogHost.svelte";
   import Button from "$lib/components/Button.svelte";
   import Select from "$lib/components/Select.svelte";
   import LoginScreen from "$lib/components/LoginScreen.svelte";
@@ -73,6 +74,10 @@
     "/caja": {
       title: "Caja y presupuesto",
       subtitle: "Saldo, ingresos y gastos",
+    },
+    "/financiacion": {
+      title: "Financiación",
+      subtitle: "Subvenciones, inversores y préstamos de la empresa",
     },
     "/gastos": {
       title: "Facturas recibidas",
@@ -253,10 +258,29 @@
       const c = await api.setActiveCompany(id);
       setActiveCompanyLocal(c);
       showToast(`Empresa activa: ${c.trade_name}`);
-      // A company switch changes the whole tenant context. Start from the
-      // dashboard instead of carrying a project or record URL into a company
-      // where it may not exist.
-      if (typeof window !== "undefined") window.location.assign("/");
+      if (typeof window !== "undefined") {
+        const current = new URL(window.location.href);
+        const projectMatch = current.pathname.match(/^\/proyectos\/([^/]+)$/);
+        let destination = `${current.pathname}${current.search}${current.hash}`;
+        if (projectMatch) {
+          try {
+            // Keep the same project when it is shared with the new company.
+            await api.getWorkProject(decodeURIComponent(projectMatch[1]));
+          } catch {
+            // In a single-project workspace, switching company is effectively
+            // switching project: enter its project directly and keep the tab.
+            try {
+              const available = await api.listWorkProjects();
+              destination = available.length === 1
+                ? `/proyectos/${available[0].uid}${current.search}${current.hash}`
+                : available.length > 1 ? "/proyectos" : "/";
+            } catch {
+              destination = "/";
+            }
+          }
+        }
+        window.location.assign(destination);
+      }
     } catch (err) {
       showToast(err instanceof Error ? err.message : "No se pudo cambiar de empresa", "err");
     } finally {
@@ -531,3 +555,4 @@
     <OnboardingWizard onComplete={() => (showOnboarding = false)} />
   {/if}
 {/if}
+<ConfirmDialogHost />

@@ -202,6 +202,23 @@ export type CashInput = {
   occurred_at?: string | null;
 };
 
+export type ProjectGrantIncomeInput = {
+  project_id: number;
+  beneficiary_company_id: number;
+  grant_id: string;
+  amount_cents: number;
+  description: string;
+  occurred_at?: string | null;
+};
+
+export type CompanyFinancingIncomeInput = {
+  source_type: "investment" | "loan";
+  source_id: string;
+  amount_cents: number;
+  description: string;
+  occurred_at?: string | null;
+};
+
 export type ExpenseStatus = "draft" | "review" | "approved" | "paid" | "rejected";
 export type ExpenseSource = "manual" | "whatsapp" | "upload";
 export type ExpenseAttachment = {
@@ -589,6 +606,10 @@ export type CompanyFinancialSummary = {
   received_total_cents: number;
   received_paid_cents: number;
   cash_income_cents: number;
+  grant_income_cents: number;
+  financing_income_cents: number;
+  investment_income_cents: number;
+  loan_income_cents: number;
   cash_expense_cents: number;
 };
 
@@ -603,6 +624,58 @@ export type Settings = {
   last_backup_at: string | null;
   /** Objetivos de ingresos en céntimos, indexados por `companyId:YYYY-MM`. */
   monthly_economic_goals: Record<string, number>;
+  company_financing: CompanyFinancing;
+};
+
+export type CompanyInvestor = {
+  id: string;
+  name: string;
+  status: "contact" | "negotiating" | "committed" | "invested" | "exited";
+  committed_cents: number;
+  received_cents: number;
+  equity_percent: number;
+  investment_date: string | null;
+  notes: string;
+  round_id?: string | null;
+};
+
+export type CompanyFounder = {
+  id: string;
+  name: string;
+  equity_percent: number;
+  notes: string;
+};
+
+export type CompanyInvestmentRound = {
+  id: string;
+  name: string;
+  status: "planned" | "open" | "closed";
+  valuation_basis: "pre_money" | "post_money";
+  pre_money_cents: number;
+  new_money_cents: number;
+  post_money_cents: number;
+  investment_date: string | null;
+  notes: string;
+};
+
+export type CompanyLoan = {
+  id: string;
+  lender: string;
+  status: "negotiating" | "approved" | "active" | "paid" | "defaulted";
+  principal_cents: number;
+  received_cents: number;
+  outstanding_cents: number;
+  interest_percent: number;
+  start_date: string | null;
+  maturity_date: string | null;
+  notes: string;
+};
+
+export type CompanyFinancing = {
+  founders: CompanyFounder[];
+  investors: CompanyInvestor[];
+  rounds: CompanyInvestmentRound[];
+  loans: CompanyLoan[];
 };
 
 export type PluginKey = "database_bridge" | "stripe_mcp" | "google_drive";
@@ -760,7 +833,7 @@ export type WorkReviewMessage = {
   author_name: string;
   message: string;
   created_at: string;
-  kind: "comment" | "changes_requested" | "approved";
+  kind: "comment" | "changes_requested" | "approved" | "internal_approved" | "client_approved";
 };
 
 export type WorkProjectDocumentKind = "link" | "file" | "note";
@@ -841,13 +914,24 @@ export type ProjectCycle = {
   start_date: string;
   end_date: string;
   capacity_points: number;
-  status: "planned" | "active" | "completed";
+  status: "planned" | "active" | "completed" | "cancelled";
   stage?: "refinement" | "poker" | "planning" | "active" | "review" | "retrospective" | "completed";
   task_ids?: number[];
   poker_points?: Record<string, number>;
-  ai_estimates?: Record<string, { points: number; confidence: "low" | "medium" | "high"; rationale: string }>;
+  ai_estimates?: Record<string, {
+    points: number;
+    confidence: "low" | "medium" | "high";
+    rationale: string;
+    suggested_assignee_id?: number | null;
+    suggested_execution_mode?: "human" | "ai" | "hybrid";
+    suggested_reviewer_id?: number | null;
+    /** Autoridad que calculó la propuesta. El CRM no estima por su cuenta. */
+    source?: "hexa";
+    external_task_id?: string | null;
+  }>;
   execution_modes?: Record<string, "human" | "ai" | "hybrid">;
   reviewer_ids?: Record<string, number | null>;
+  assignee_ids?: Record<string, number | null>;
   definition_of_done?: string;
   human_capacity_hours?: number;
   ai_concurrency?: number;
@@ -864,6 +948,27 @@ export type ProjectCapacity = {
   weekly_capacity_hours: number;
 };
 
+export type ProjectGrant = {
+  id: string;
+  name: string;
+  authority: string;
+  beneficiary_company_id?: number | null;
+  managing_company: string;
+  management_fee_percent: number;
+  status: "preparing" | "negotiating" | "awarded" | "received" | "rejected" | "closed";
+  funding_type: "non_repayable" | "repayable";
+  requested_cents: number;
+  awarded_cents: number;
+  received_cents: number;
+  repayable_cents: number;
+  application_date: string | null;
+  resolution_date: string | null;
+  received_date?: string | null;
+  repayment_date: string | null;
+  reference: string;
+  notes: string;
+};
+
 export type ProjectManagement = {
   lead_id: number | null;
   update_frequency_days: number;
@@ -875,6 +980,7 @@ export type ProjectManagement = {
   dependencies: ProjectDependency[];
   cycles: ProjectCycle[];
   capacity: ProjectCapacity[];
+  grants: ProjectGrant[];
 };
 
 export type ProjectTechnicalProfile = {
@@ -1055,7 +1161,7 @@ export type WorkItem = {
   parent_title?: string | null;
 };
 
-export type ClientPortalTask = Pick<WorkItem, "id" | "parent_id" | "title" | "status" | "priority" | "due_date" | "effective_due_date">;
+export type ClientPortalTask = Pick<WorkItem, "id" | "parent_id" | "title" | "status" | "priority" | "due_date" | "effective_due_date" | "review_messages">;
 export type ClientPortalInvoice = Pick<Invoice, "id" | "series" | "number" | "kind" | "status" | "issued_at" | "operation_date" | "due_at" | "total_cents" | "paid_cents" | "payment_status">;
 export type ClientPortalProject = {
   id: number;

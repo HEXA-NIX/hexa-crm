@@ -15,7 +15,7 @@
     align = "left",
     oninput,
   }: {
-    value?: string;
+    value?: string | null;
     type?: "date" | "month";
     placeholder?: string;
     min?: string;
@@ -29,6 +29,7 @@
   } = $props();
 
   let open = $state(false);
+  let openAbove = $state(false);
   let root = $state<HTMLElement | null>(null);
   let cursor = $state(new Date());
   const weekdays = ["L", "M", "X", "J", "V", "S", "D"];
@@ -60,6 +61,10 @@
     if (disabled) return;
     const parsed = value ? new Date(type === "month" ? `${value}-01T12:00:00` : `${value.slice(0, 10)}T12:00:00`) : new Date();
     if (!Number.isNaN(parsed.getTime())) cursor = parsed;
+    if (!open && root) {
+      const rect = root.getBoundingClientRect();
+      openAbove = window.innerHeight - rect.bottom < (type === "month" ? 260 : 390) && rect.top > 280;
+    }
     open = !open;
   }
   function move(amount: number) {
@@ -88,7 +93,7 @@
   </button>
   {#if required}<input class="hexa-date-required" tabindex="-1" aria-hidden="true" required value={value} />{/if}
   {#if open}
-    <div class="hexa-date-popover" class:align-right={align === "right"} role="dialog" aria-label={ariaLabel}>
+    <div class="hexa-date-popover" class:align-right={align === "right"} class:above={openAbove} role="dialog" aria-label={ariaLabel}>
       <header><button type="button" aria-label={type === "month" ? "Año anterior" : "Mes anterior"} onclick={() => move(-1)}>‹</button><strong>{title}</strong><button type="button" aria-label={type === "month" ? "Año siguiente" : "Mes siguiente"} onclick={() => move(1)}>›</button></header>
       {#if type === "month"}
         <div class="hexa-month-grid">{#each months as month, index}{@const next = `${cursor.getFullYear()}-${String(index + 1).padStart(2, "0")}`}<button type="button" class:selected={value === next} disabled={!allowed(next)} onclick={() => choose(next)}>{month.slice(0, 3)}</button>{/each}</div>
@@ -102,6 +107,7 @@
 </div>
 
 <style>
+  .hexa-date-popover.above{top:auto;bottom:calc(100% + .45rem)}
   .hexa-date{position:relative;width:100%}.hexa-date-trigger{display:flex;width:100%;align-items:center;justify-content:space-between;gap:.75rem;text-align:left}.hexa-date-trigger .placeholder{color:var(--color-muted-dim)}.hexa-date-trigger svg{width:1.15rem;height:1.15rem;flex:none;fill:none;stroke:var(--color-purple-bright);stroke-width:1.7;stroke-linecap:round}.hexa-date-required{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}.hexa-date-popover{position:absolute;left:0;top:calc(100% + .45rem);z-index:1000;width:20rem;max-width:calc(100vw - 2rem);padding:.85rem;border:1px solid var(--color-border-strong);border-radius:.85rem;background:var(--color-obsidian-elevated);box-shadow:0 22px 55px rgba(0,0,0,.48)}.hexa-date-popover.align-right{right:0;left:auto}.hexa-date-popover header{display:grid;grid-template-columns:2rem 1fr 2rem;align-items:center;gap:.5rem;margin-bottom:.8rem}.hexa-date-popover header strong{text-align:center;text-transform:capitalize}.hexa-date-popover button{border:0;background:transparent;color:var(--color-text);cursor:pointer}.hexa-date-popover header button{display:grid;width:2rem;height:2rem;place-items:center;border:1px solid var(--color-border);border-radius:.5rem;font-size:1.2rem}.hexa-date-popover button:hover{background:var(--color-purple-soft);color:var(--color-purple-bright)}.hexa-weekdays,.hexa-days{display:grid;grid-template-columns:repeat(7,1fr);text-align:center}.hexa-weekdays{margin-bottom:.25rem;color:var(--color-muted-dim);font-size:.62rem;font-weight:700}.hexa-days button{aspect-ratio:1;border-radius:50%;font-size:.74rem}.hexa-days button.outside{color:var(--color-muted-dim);opacity:.45}.hexa-days button.today{box-shadow:inset 0 0 0 1px var(--color-purple)}.hexa-days button.selected,.hexa-month-grid button.selected{background:var(--color-purple);color:#fff;font-weight:700}.hexa-days button:disabled,.hexa-month-grid button:disabled{opacity:.2;cursor:not-allowed}.hexa-month-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.35rem}.hexa-month-grid button{padding:.65rem;border-radius:.5rem;text-transform:capitalize}.hexa-date-popover footer{display:flex;justify-content:space-between;margin-top:.75rem;padding-top:.65rem;border-top:1px solid var(--color-border)}.hexa-date-popover footer button{padding:.4rem .55rem;border-radius:.4rem;color:var(--color-purple-bright);font-size:.75rem}@media(max-width:480px){.hexa-date-popover{width:min(20rem,calc(100vw - 2rem))}}
   .hexa-date-trigger:disabled{cursor:default;opacity:.72}
 </style>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { confirmDialog } from "$lib/stores/confirm-dialog";
   import { onMount } from "svelte";
   import { page } from "$app/stores";
   import { api } from "$lib/api/client";
@@ -142,8 +143,9 @@
     }
     const adj = reconcilePreview.suggested_adjustment;
     if (
-      !confirm(
+      !await confirmDialog(
         `¿Registrar ${adj.kind === "expense" ? "faltante" : "sobrante"} de ${formatEUR(adj.amount_cents)} en caja?`,
+        { title: "Confirmar ajuste de caja", confirmLabel: "Registrar ajuste" },
       )
     ) {
       return;

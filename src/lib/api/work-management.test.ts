@@ -690,6 +690,24 @@ describe("Trabajo Backend & API Tests", () => {
         )
       ).toThrow("Los proyectos propios no admiten movimientos de pago.");
 
+      const grantIncome = browserApi.sync_project_grant_income(
+        { project_id: ownProject.id, beneficiary_company_id: ownProject.company_id, grant_id: "grant-1", amount_cents: 150000, description: "Subvención innovación", occurred_at: "2026-08-20" },
+        adminToken,
+      );
+      expect(grantIncome).toMatchObject({ project_id: ownProject.id, kind: "income", amount_cents: 150000, category: "subvencion_cobrada" });
+      browserApi.sync_project_grant_income(
+        { project_id: ownProject.id, beneficiary_company_id: ownProject.company_id, grant_id: "grant-1", amount_cents: 175000, description: "Subvención innovación actualizada", occurred_at: "2026-08-21" },
+        adminToken,
+      );
+      expect(browserApi.list_cash_movements(adminToken).filter((movement) => movement.category === "subvencion_cobrada")).toEqual([
+        expect.objectContaining({ amount_cents: 175000, occurred_at: "2026-08-21" }),
+      ]);
+      browserApi.sync_project_grant_income(
+        { project_id: ownProject.id, beneficiary_company_id: ownProject.company_id, grant_id: "grant-1", amount_cents: 0, description: "", occurred_at: null },
+        adminToken,
+      );
+      expect(browserApi.list_cash_movements(adminToken).some((movement) => movement.category === "subvencion_cobrada")).toBe(false);
+
       const archived = await browserApi.archiveWorkProject(proj.id, adminToken);
       expect(archived.status).toBe("archived");
     });

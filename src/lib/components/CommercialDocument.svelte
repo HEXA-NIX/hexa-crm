@@ -69,6 +69,10 @@
   const companyName = $derived(company?.trade_name || company?.legal_name || "Empresa");
   const companyAddress = $derived([company?.address, [company?.postal_code, company?.city].filter(Boolean).join(" "), company?.province].filter(Boolean).join(" · "));
   const pendingCents = $derived(paidCents == null ? null : Math.max(0, totalCents - paidCents));
+  const originalBaseCents = $derived(lines.reduce((sum, line) => sum + Math.round(line.quantity * line.unit_price_cents), 0));
+  const lineDiscountCents = $derived(lines.reduce((sum, line) => sum + Math.max(0, line.discount_cents ?? 0), 0));
+  const afterLineDiscountCents = $derived(Math.max(0, originalBaseCents - lineDiscountCents));
+  const hasDiscount = $derived(originalBaseCents > baseCents);
   const displayDate = formatDateES;
 </script>
 
@@ -110,9 +114,9 @@
     <div class="commercial-section-heading"><h3><i></i>Propuesta económica</h3></div>
     <div class="commercial-table-wrap">
       <table>
-        <thead><tr><th>Línea de servicio /<br />módulo técnico</th><th>Alcance del entregable</th><th class="numeric">Inversión neta</th></tr></thead>
-        <tbody>{#each lines as line}<tr><td><span class="commercial-cell-content"><strong>{line.description}</strong></span></td><td><span class="commercial-cell-content">{line.detail || "—"}{#if (line.discount_cents || 0) > 0}<small class="commercial-line-discount">Descuento de línea: −{formatEUR(line.discount_cents || 0)}</small>{/if}</span></td><td class="numeric"><span class="commercial-cell-content"><strong>{formatEUR(line.base_cents != null ? line.base_cents + (line.global_discount_cents || 0) : Math.round(line.total_cents / (1 + line.vat_rate / 100)))}</strong></span></td></tr>{/each}</tbody>
-        <tfoot>{#if globalDiscountCents > 0}<tr class="commercial-global-discount"><td colspan="2"><span class="commercial-cell-content">DESCUENTO GENERAL{globalDiscountType === "percent" ? ` (${globalDiscountValue}%)` : ""}</span></td><td class="numeric"><span class="commercial-cell-content">−{formatEUR(globalDiscountCents)}</span></td></tr>{/if}<tr><td colspan="2"><span class="commercial-cell-content">TOTAL INVERSIÓN INICIAL DE LANZAMIENTO</span></td><td class="numeric"><span class="commercial-cell-content">{formatEUR(baseCents)}</span></td></tr></tfoot>
+        <thead><tr><th>Línea de servicio /<br />módulo técnico</th><th>Alcance del entregable</th><th class="numeric">{hasDiscount ? "Antes / ahora" : "Inversión neta"}</th></tr></thead>
+        <tbody>{#each lines as line}{@const originalLineCents = Math.round(line.quantity * line.unit_price_cents)}{@const lineSavingCents = Math.max(0, line.discount_cents ?? 0)}{@const afterLineCents = Math.max(0, originalLineCents - lineSavingCents)}<tr><td><span class="commercial-cell-content"><strong>{line.description}</strong></span></td><td><span class="commercial-cell-content">{line.detail || "—"}{#if lineSavingCents > 0}<small class="commercial-line-discount">Descuento de línea: −{formatEUR(lineSavingCents)}</small>{/if}</span></td><td class="numeric"><span class="commercial-cell-content commercial-price-comparison">{#if lineSavingCents > 0}<small class="commercial-original-price">{formatEUR(originalLineCents)}</small>{/if}<strong>{formatEUR(afterLineCents)}</strong></span></td></tr>{/each}</tbody>
+        <tfoot>{#if hasDiscount}<tr class="commercial-original-total"><td colspan="2"><span class="commercial-cell-content">VALOR DEL PRESUPUESTO SIN DESCUENTO</span></td><td class="numeric"><span class="commercial-cell-content">{formatEUR(originalBaseCents)}</span></td></tr>{#if lineDiscountCents > 0}<tr class="commercial-global-discount"><td colspan="2"><span class="commercial-cell-content">DESCUENTOS POR LÍNEA</span></td><td class="numeric"><span class="commercial-cell-content">−{formatEUR(lineDiscountCents)}</span></td></tr><tr class="commercial-original-total"><td colspan="2"><span class="commercial-cell-content">SUBTOTAL TRAS DESCUENTOS DE LÍNEA</span></td><td class="numeric"><span class="commercial-cell-content">{formatEUR(afterLineDiscountCents)}</span></td></tr>{/if}{#if globalDiscountCents > 0}<tr class="commercial-global-discount"><td colspan="2"><span class="commercial-cell-content">DESCUENTO GENERAL{globalDiscountType === "percent" ? ` · ${globalDiscountValue}%` : ""}</span></td><td class="numeric"><span class="commercial-cell-content">−{formatEUR(globalDiscountCents)}</span></td></tr>{/if}{/if}<tr><td colspan="2"><span class="commercial-cell-content">{hasDiscount ? "TOTAL INVERSIÓN CON DESCUENTO" : "TOTAL INVERSIÓN INICIAL DE LANZAMIENTO"}</span></td><td class="numeric"><span class="commercial-cell-content">{formatEUR(baseCents)}</span></td></tr></tfoot>
       </table>
     </div>
     <div class="commercial-totals">
@@ -154,11 +158,15 @@
   .commercial-table-wrap td{padding:.72rem .8rem;font-size:.78rem;line-height:1.35;vertical-align:middle}
   .commercial-cell-content{display:block;transform:translateY(-.3rem)}
   .commercial-line-discount{display:block;margin-top:.18rem;color:var(--doc-gold);font-size:.68rem}
+  .commercial-price-comparison{display:grid;justify-items:end;gap:.12rem}
+  .commercial-original-price{color:#998ba4;font-size:.68rem;text-decoration:line-through;text-decoration-thickness:1px}
   .commercial-table-wrap tbody td:first-child strong{font-size:.82rem;line-height:1.3}
   .commercial-table-wrap tfoot td{padding:.78rem .8rem;border-top:1px solid var(--doc-border);background:var(--doc-panel-2);color:#fff;font-size:.78rem;font-weight:800}
   .commercial-table-wrap tfoot td:last-child{color:var(--doc-gold);font-size:.92rem}
   .commercial-table-wrap tfoot .commercial-global-discount td{background:#130d1c;color:#cdbfd8;font-size:.74rem}
   .commercial-table-wrap tfoot .commercial-global-discount td:last-child{color:var(--doc-gold);font-size:.8rem}
+  .commercial-table-wrap tfoot .commercial-original-total td{background:#100b16;color:#a99ab6;font-size:.72rem}
+  .commercial-table-wrap tfoot .commercial-original-total td:last-child{color:#cbbfd5;font-size:.78rem;text-decoration:line-through}
   @media print{.commercial-document{max-width:none;border:0;border-radius:0;box-shadow:none;print-color-adjust:exact;-webkit-print-color-adjust:exact}.commercial-cover,.commercial-section{break-inside:avoid}.commercial-table-wrap{overflow:visible}}
   @media(max-width:700px){.commercial-technology-groups{grid-template-columns:1fr}}
   .commercial-introduction :global(.rich-phase-block){box-sizing:border-box;padding-top:1.75rem;break-inside:avoid;page-break-inside:avoid}

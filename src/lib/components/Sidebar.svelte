@@ -64,6 +64,7 @@
     customers: '<circle cx="9" cy="8" r="3"/><path d="M3 19c.5-3 2.5-5 6-5s5.5 2 6 5M16 5a3 3 0 0 1 0 6M17 14c2.5.5 3.5 2 4 5"/>',
     projects: '<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 5V3h8v2M8 10h8M8 14h5"/>',
     taxes: '<path d="M5 3h14v18l-3-2-4 2-4-2-3 2z"/><path d="M8 15l2.5-2.5 2 1.8L16 11l1.5 2"/><path d="M8 8h.01"/>',
+    financing: '<path d="M4 8h16M6 8v10m4-10v10m4-10v10m4-10v10M3 19h18M12 3l9 4H3z"/>',
     settings: '<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.5-2.3 1a7 7 0 0 0-1.7-1L14.5 3h-5L9 6a7 7 0 0 0-1.7 1L5 6 3 9.5 5.1 11a7 7 0 0 0 0 2L3 14.5 5 18l2.3-1a7 7 0 0 0 1.7 1l.5 3h5l.5-3a7 7 0 0 0 1.7-1l2.3 1 2-3.5-2.1-1.5a7 7 0 0 0 .1-1z"/>',
   };
 
@@ -89,6 +90,7 @@
       label: "FINANZAS",
       links: [
         { href: "/caja", label: "Caja", icon: "cash" },
+        { href: "/financiacion", label: "Financiación", icon: "financing" },
         { href: "/ventas", label: "Ventas", icon: "sales" },
         { href: "/gastos", label: "Facturas recibidas", icon: "invoice" },
         { href: "/impuestos", label: "Impuestos", icon: "taxes" },

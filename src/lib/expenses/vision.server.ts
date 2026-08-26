@@ -6,7 +6,9 @@ export async function extractExpenseFromImage(dataUrl: string, caption = "", opt
   const match = /^data:([^;]+);base64,(.+)$/.exec(dataUrl);
   if (!match) throw new Error("La imagen recibida no tiene un formato válido");
   const baseUrl = (options.baseUrl || env.HEXA_OLLAMA_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
-  const model = options.model || env.HEXA_OLLAMA_MODEL || "llama3.2-vision";
+  // OCR needs a multimodal model. Never inherit HEXA_OLLAMA_MODEL here: that
+  // setting is commonly a text-only chat model and silently yields empty data.
+  const model = options.model || env.HEXA_OLLAMA_VISION_MODEL || "llama3.2-vision";
   let response: Response;
   try {
     response = await fetch(`${baseUrl}/api/chat`, {

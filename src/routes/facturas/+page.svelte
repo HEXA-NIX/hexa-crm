@@ -8,12 +8,15 @@
   import Button from "$lib/components/Button.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import DatePicker from "$lib/components/DatePicker.svelte";
+  import MoneyInput from "$lib/components/MoneyInput.svelte";
   import CommercialDocument from "$lib/components/CommercialDocument.svelte";
   import { activeCompany } from "$lib/stores/session";
   import { invoicePrintHtml } from "$lib/documents/commercial-print";
   import SortableHeader from "$lib/components/SortableHeader.svelte";
   import { sortedCopy, type SortDirection } from "$lib/list-sort";
   import { showToast } from "$lib/stores/ui";
+  import { confirmDialog } from "$lib/stores/confirm-dialog";
+  import { formatDateES } from "$lib/date";
 
   type ManualLine = { product_id: string; description: string; quantity: string | number; unit_price: string | number; vat_rate: string | number };
 
@@ -110,6 +113,27 @@
 
   $effect(() => {
     if (invoicePage > invoicePageCount) invoicePage = invoicePageCount;
+  });
+
+  $effect(() => {
+    const visibleIds = paginatedInvoices.map((invoice) => invoice.id).join(",");
+    const openAction = actionInvoiceId;
+    queueMicrotask(() => {
+      if (!visibleIds) return;
+      document.querySelectorAll<HTMLTableRowElement>(".invoice-table tbody tr").forEach((row) => {
+        for (const index of [0, 2, 3, 12]) {
+          const cell = row.cells.item(index);
+          const value = cell?.textContent?.trim() ?? "";
+          if (cell && value !== "—" && /^\d{4}-\d{2}-\d{2}/.test(value)) cell.textContent = formatDateES(value);
+        }
+      });
+      if (openAction) document.querySelectorAll<HTMLButtonElement>(".invoice-actions-menu button").forEach((button) => {
+        if (button.textContent?.trim() === "Crear rectificativa") {
+          button.textContent = "Anular factura";
+          button.classList.add("danger");
+        }
+      });
+    });
   });
 
   function sortInvoices(key: typeof invoiceSortKey) {
@@ -308,14 +332,14 @@
   }
 
   async function rectify(invoice: Invoice) {
-    if (!confirm(`¿Crear un abono que rectifique ${invoice.series}-${invoice.number}?`)) return;
+    if (!await confirmDialog(`La factura ${invoice.series}-${invoice.number} quedará anulada mediante un abono rectificativo, conservando la trazabilidad fiscal.`, { title: "Anular factura", confirmLabel: "Anular factura", danger: true })) return;
     try { await api.issueInvoice({ rectifies_invoice_id: invoice.id, series: invoice.series, operation_date: operationDate, kind: "rectifying" }); showToast("Abono emitido"); await load(); }
     catch (error) { showToast(error instanceof Error ? error.message : "No se pudo crear el abono", "err"); }
   }
 
   async function cancel(invoice: Invoice) {
     if (invoice.status === "issued") { await rectify(invoice); return; }
-    if (!confirm(`¿Anular la factura ${invoice.series}-${invoice.number}?`)) return;
+    if (!await confirmDialog(`Se anulará la factura ${invoice.series}-${invoice.number}.`, { title: "Anular factura", confirmLabel: "Anular factura", danger: true })) return;
     try { await api.cancelInvoice(invoice.id); await load(); showToast("Factura anulada"); }
     catch (error) { showToast(error instanceof Error ? error.message : "No se pudo anular", "err"); }
   }
@@ -399,7 +423,7 @@
   <div class="invoice-pagination"><span>{displayedInvoices.length ? `${(invoicePage - 1) * invoicePageSize + 1} - ${Math.min(invoicePage * invoicePageSize, displayedInvoices.length)}` : "0"} de {displayedInvoices.length}</span><select class="invoice-page-size" aria-label="Filas por página" bind:value={invoicePageSize} onchange={() => (invoicePage = 1)}><option value={50}>50</option><option value={25}>25</option><option value={100}>100</option></select><div class="invoice-page-controls"><button type="button" aria-label="Página anterior" disabled={invoicePage === 1} onclick={() => changeInvoicePage(invoicePage - 1)}><span aria-hidden="true">‹</span></button><span class="invoice-current-page">{invoicePage}</span><button type="button" aria-label="Página siguiente" disabled={invoicePage === invoicePageCount} onclick={() => changeInvoicePage(invoicePage + 1)}><span aria-hidden="true">›</span></button></div></div>
 
   <Modal open={!!selectedInvoice} title={selectedInvoice ? `Registrar cobro · ${selectedInvoice.series}-${selectedInvoice.number}` : "Registrar cobro"} size="sm" onclose={() => { selectedInvoice = null; paymentError = ""; }}>
-    {#if selectedInvoice}<div class="space-y-4"><div class="rounded-xl border border-emerald-400/20 bg-emerald-400/[0.06] p-3"><p class="text-sm text-slate-400">Pendiente de cobro</p><p class="mt-1 text-2xl font-semibold text-emerald-200">{formatEUR(selectedInvoice.total_cents - selectedInvoice.paid_cents)}</p></div><label class="block text-sm"><span class="mb-1 block text-slate-400">Importe (€)</span><input class="field w-full" type="number" min="0.01" step="0.01" bind:value={paymentAmount} /></label><label class="block text-sm"><span class="mb-1 block text-slate-400">Método</span><select class="field w-full" bind:value={paymentMethod}><option value="bank_transfer">Transferencia</option><option value="card">Tarjeta</option><option value="cash">Efectivo</option><option value="other">Otro</option></select></label>{#if paymentError}<p class="rounded-lg border border-rose-400/25 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert">{paymentError}</p>{/if}<div class="flex justify-end gap-2"><Button variant="ghost" onclick={() => (selectedInvoice = null)}>Cancelar</Button><Button disabled={paying} onclick={addPayment}>{paying ? "Guardando…" : "Guardar cobro"}</Button></div></div>{/if}
+    {#if selectedInvoice}<div class="space-y-4"><div class="rounded-xl border border-emerald-400/20 bg-emerald-400/[0.06] p-3"><p class="text-sm text-slate-400">Pendiente de cobro</p><p class="mt-1 text-2xl font-semibold text-emerald-200">{formatEUR(selectedInvoice.total_cents - selectedInvoice.paid_cents)}</p></div><label class="block text-sm"><span class="mb-1 block text-slate-400">Importe (€)</span><MoneyInput bind:value={paymentAmount} ariaLabel="Importe (€)" /></label><label class="block text-sm"><span class="mb-1 block text-slate-400">Método</span><select class="field w-full" bind:value={paymentMethod}><option value="bank_transfer">Transferencia</option><option value="card">Tarjeta</option><option value="cash">Efectivo</option><option value="other">Otro</option></select></label>{#if paymentError}<p class="rounded-lg border border-rose-400/25 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert">{paymentError}</p>{/if}<div class="flex justify-end gap-2"><Button variant="ghost" onclick={() => (selectedInvoice = null)}>Cancelar</Button><Button disabled={paying} onclick={addPayment}>{paying ? "Guardando…" : "Guardar cobro"}</Button></div></div>{/if}
   </Modal>
 </section>
 
@@ -432,7 +456,7 @@
       <label class="text-sm"><span class="mb-1 block text-slate-400">Email</span><input type="email" class="field w-full" bind:value={manualForm.customer_email} /></label>
       <div class="flex items-end"><Button variant="secondary" class="w-full text-xs" disabled={creatingCustomer || !manualForm.customer_name.trim()} onclick={createManualCustomer}>{creatingCustomer ? "Guardando…" : manualForm.customer_id ? "Actualizar cliente" : "+ Añadir cliente"}</Button></div>
     </div>
-    <div class="rounded-2xl border border-white/10 bg-white/[0.02] p-4"><div class="mb-3 flex flex-wrap items-center justify-between gap-2"><div><h3 class="font-semibold">Conceptos de la factura</h3><p class="text-xs text-slate-400">Añade productos del catálogo o escribe un servicio personalizado. El total se calcula automáticamente.</p></div><Button variant="secondary" class="text-xs" onclick={addManualLine}>+ Añadir línea</Button></div><div class="hidden gap-2 px-1 pb-2 text-[11px] uppercase tracking-wide text-slate-500 lg:grid lg:grid-cols-[13rem_minmax(0,1fr)_5rem_7rem_6rem_6rem_auto]"><span>Producto / servicio</span><span>Descripción</span><span>Cant.</span><span>Precio (€)</span><span>IVA</span><span>Importe</span><span></span></div><div class="space-y-3">{#each manualLines as line, index}<div class="rounded-xl border border-white/10 bg-black/10 p-3"><div class="grid items-end gap-2 lg:grid-cols-[13rem_minmax(0,1fr)_5rem_7rem_6rem_6rem_auto]"><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Producto / servicio</span><select class="field w-full" value={line.product_id} onchange={(event) => selectManualProduct(index, event.currentTarget.value)}><option value="">Personalizado</option>{#each products as product}<option value={product.id}>{product.name}</option>{/each}</select></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Descripción</span><input class="field w-full" placeholder="Descripción del concepto" bind:value={line.description} /></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Cantidad</span><input type="number" min="0.01" step="0.01" class="field w-full" bind:value={line.quantity} /></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Precio (€)</span><input type="number" min="0" step="0.01" class="field w-full" bind:value={line.unit_price} /></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">IVA</span><select class="field w-full" bind:value={line.vat_rate}><option value="21">21%</option><option value="10">10%</option><option value="4">4%</option><option value="0">0%</option></select></label><div class="text-right text-sm font-semibold tabular"><span class="mb-1 block text-slate-400 lg:hidden">Importe</span>{formatEUR((Math.round(numberValue(line.quantity) * numberValue(line.unit_price) * 100) || 0) + Math.round((Math.round(numberValue(line.quantity) * numberValue(line.unit_price) * 100) || 0) * numberValue(line.vat_rate) / 100))}</div><Button variant="ghost" class="text-xs" disabled={manualLines.length === 1} onclick={() => removeManualLine(index)}>Quitar</Button></div></div>{/each}</div><div class="mt-4 flex flex-wrap justify-end gap-x-6 gap-y-1 border-t border-white/10 pt-3 text-sm"><span>Base: <strong>{formatEUR(manualTotals.base)}</strong></span><span>IVA: <strong>{formatEUR(manualTotals.vat)}</strong></span><span class="text-base">Total: <strong>{formatEUR(manualTotals.total)}</strong></span></div></div>
+    <div class="rounded-2xl border border-white/10 bg-white/[0.02] p-4"><div class="mb-3 flex flex-wrap items-center justify-between gap-2"><div><h3 class="font-semibold">Conceptos de la factura</h3><p class="text-xs text-slate-400">Añade productos del catálogo o escribe un servicio personalizado. El total se calcula automáticamente.</p></div><Button variant="secondary" class="text-xs" onclick={addManualLine}>+ Añadir línea</Button></div><div class="hidden gap-2 px-1 pb-2 text-[11px] uppercase tracking-wide text-slate-500 lg:grid lg:grid-cols-[13rem_minmax(0,1fr)_5rem_7rem_6rem_6rem_auto]"><span>Producto / servicio</span><span>Descripción</span><span>Cant.</span><span>Precio (€)</span><span>IVA</span><span>Importe</span><span></span></div><div class="space-y-3">{#each manualLines as line, index}<div class="rounded-xl border border-white/10 bg-black/10 p-3"><div class="grid items-end gap-2 lg:grid-cols-[13rem_minmax(0,1fr)_5rem_7rem_6rem_6rem_auto]"><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Producto / servicio</span><select class="field w-full" value={line.product_id} onchange={(event) => selectManualProduct(index, event.currentTarget.value)}><option value="">Personalizado</option>{#each products as product}<option value={product.id}>{product.name}</option>{/each}</select></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Descripción</span><input class="field w-full" placeholder="Descripción del concepto" bind:value={line.description} /></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Cantidad</span><input type="number" min="0.01" step="0.01" class="field w-full" bind:value={line.quantity} /></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">Precio (€)</span><MoneyInput bind:value={line.unit_price} ariaLabel="Precio (€)" /></label><label class="text-sm"><span class="mb-1 block text-slate-400 lg:hidden">IVA</span><select class="field w-full" bind:value={line.vat_rate}><option value="21">21%</option><option value="10">10%</option><option value="4">4%</option><option value="0">0%</option></select></label><div class="text-right text-sm font-semibold tabular"><span class="mb-1 block text-slate-400 lg:hidden">Importe</span>{formatEUR((Math.round(numberValue(line.quantity) * numberValue(line.unit_price) * 100) || 0) + Math.round((Math.round(numberValue(line.quantity) * numberValue(line.unit_price) * 100) || 0) * numberValue(line.vat_rate) / 100))}</div><Button variant="ghost" class="text-xs" disabled={manualLines.length === 1} onclick={() => removeManualLine(index)}>Quitar</Button></div></div>{/each}</div><div class="mt-4 flex flex-wrap justify-end gap-x-6 gap-y-1 border-t border-white/10 pt-3 text-sm"><span>Base: <strong>{formatEUR(manualTotals.base)}</strong></span><span>IVA: <strong>{formatEUR(manualTotals.vat)}</strong></span><span class="text-base">Total: <strong>{formatEUR(manualTotals.total)}</strong></span></div></div>
     <div class="grid gap-3 sm:grid-cols-3"><label class="text-sm"><span class="mb-1 block text-slate-400">IRPF %</span><input type="number" min="0" max="100" step="0.01" class="field w-full" bind:value={manualForm.irpf_rate} /></label><label class="text-sm sm:col-span-2"><span class="mb-1 block text-slate-400">Notas</span><input class="field w-full" placeholder="Condiciones de pago, referencia…" bind:value={manualForm.notes} /></label></div>
     {#if manualError}<p class="rounded-xl border border-rose-400/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-200" role="alert">{manualError}</p>{/if}
     <div class="flex flex-wrap justify-end gap-2"><Button variant="ghost" onclick={() => (manualOpen = false)}>Cancelar</Button><Button variant="secondary" disabled={manualSaving} onclick={() => saveManualInvoice("draft")}>{manualSaving ? "Guardando…" : "Guardar borrador"}</Button><Button variant="primary" disabled={manualSaving} onclick={() => saveManualInvoice("issued")}>{manualSaving ? "Guardando…" : "Emitir factura"}</Button></div>
@@ -476,7 +500,7 @@
   .invoice-popover button.invoice-date-clear { color:var(--color-muted); }
   .invoice-popover button.invoice-date-apply { background:var(--color-purple); color:white; font-weight:700; }
   .invoice-popover button.invoice-date-apply:disabled { opacity:.4; cursor:not-allowed; }
-  .invoice-actions-menu { right:0; top:calc(100% + .35rem); min-width:12rem; }
+  .invoice-actions-menu { right:0; top:auto; bottom:calc(100% + .35rem); min-width:12rem; }
   .invoice-popover button { display:block; width:100%; border:0; border-radius:.35rem; background:transparent; color:var(--color-text); padding:.62rem .65rem; text-align:left; cursor:pointer; font-size:.84rem; }
   .invoice-popover button:hover, .invoice-popover button.active { background:var(--color-purple-soft); color:var(--color-purple-bright); }
   .invoice-popover button.danger { color:var(--color-danger); }
@@ -484,6 +508,7 @@
   .invoice-popover button.has-arrow span { font-size:1.35rem; line-height:1; }
   .invoice-popover button.invoice-back { color:var(--color-purple); font-weight:600; margin-bottom:.25rem; }
   .invoice-table { border-collapse:separate; border-spacing:0; }
+  .invoice-table th:nth-child(6), .invoice-table td:nth-child(6) { display:none; }
   .invoice-table th { background:var(--color-obsidian-elevated); color:var(--color-muted-dim); font-size:.66rem; font-weight:600; letter-spacing:.04em; padding:.65rem .7rem; white-space:nowrap; }
   .invoice-table td { border-top:1px solid var(--color-border-soft); color:var(--color-text); padding:.72rem .7rem; white-space:nowrap; }
   .invoice-table tbody tr:hover { background:var(--color-purple-mist); }

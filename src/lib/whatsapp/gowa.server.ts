@@ -192,8 +192,10 @@ export async function gowaGetChatMessages(deviceId: string, chatJid: string): Pr
 export async function gowaDownloadMessageMedia(deviceId: string, messageId: string, phone: string): Promise<{ data_url: string; mime_type: string; name: string }> {
   const downloaded = await requestBinary(`/message/${encodeURIComponent(messageId)}/download?phone=${encodeURIComponent(phone)}`, { "X-Device-Id": deviceId });
   const mime = downloaded.mimeType.split(";")[0] || "application/octet-stream";
-  const extension = mime.split("/")[1]?.replace("jpeg", "jpg") || "bin";
-  return { data_url: `data:${mime};base64,${Buffer.from(downloaded.bytes).toString("base64")}`, mime_type: mime, name: downloaded.fileName || `whatsapp-${messageId}.${extension}` };
+  const extension = mime === "application/pdf" ? "pdf" : mime.split("/")[1]?.replace("jpeg", "jpg") || "bin";
+  const rawName = downloaded.fileName || `whatsapp-${messageId}`;
+  const name = /\.[a-z0-9]{2,8}$/i.test(rawName) ? rawName : `${rawName}.${extension}`;
+  return { data_url: `data:${mime};base64,${Buffer.from(downloaded.bytes).toString("base64")}`, mime_type: mime, name };
 }
 
 export async function gowaLatestMedia(deviceId: string): Promise<{ media: { data_url: string; mime_type: string; name: string }; caption: string; from: string; message_id: string }> {

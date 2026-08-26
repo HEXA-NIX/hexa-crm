@@ -21,6 +21,12 @@ describe("centro de gestión de proyectos", () => {
     expect(management.update_frequency_days).toBe(7);
     expect(management.updates).toEqual([]);
     expect(management.capacity).toEqual([]);
+    expect(management.grants).toEqual([]);
+  });
+
+  it("normaliza importes y condiciones de subvenciones antiguas", () => {
+    const management = normalizeProjectManagement({ grants: [{ id:"g1", name:"Kit", authority:"", managing_company:"Gestora", management_fee_percent:10, status:"awarded", funding_type:"repayable", requested_cents:1000, awarded_cents:800, received_cents:0, repayable_cents:800, application_date:null, resolution_date:null, repayment_date:null, reference:"", notes:"" }] });
+    expect(management.grants[0]).toMatchObject({ status:"awarded", funding_type:"repayable", awarded_cents:800, repayable_cents:800, managing_company:"Gestora", management_fee_percent:10 });
   });
 
   it("marca en riesgo un proyecto activo sin actualización periódica", () => {

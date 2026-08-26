@@ -8,6 +8,8 @@ import type {
   AuthUser,
   CashInput,
   CashMovement,
+  ProjectGrantIncomeInput,
+  CompanyFinancingIncomeInput,
   ClientPortalProject,
   Company,
   CompanyInput,
@@ -170,6 +172,8 @@ async function callLocal<T>(cmd: string, args: Record<string, any>, token: strin
     case "return_sale_lines": return browserApi.return_sale_lines(args.id, args.lines ?? [], token) as T;
     case "list_cash_movements": return browserApi.list_cash_movements(token) as T;
     case "create_cash_movement": return browserApi.create_cash_movement(args.input, token) as T;
+    case "sync_project_grant_income": return browserApi.sync_project_grant_income(args.input, token) as T;
+    case "sync_company_financing_income": return browserApi.sync_company_financing_income(args.input, token) as T;
     case "get_cash_balance": return browserApi.get_cash_balance(token) as T;
     case "vat_summary": return browserApi.vat_summary(args.from, args.to, token) as T;
     case "list_fiscal_profiles": return browserApi.list_fiscal_profiles(token) as T;
@@ -193,6 +197,7 @@ async function callLocal<T>(cmd: string, args: Record<string, any>, token: strin
     case "restore_backup": return browserApi.restore_backup(args.raw, token) as Promise<T>;
     case "list_work_items": return browserApi.listWorkItems(args.filters, token) as Promise<T>;
     case "upsert_work_item": return browserApi.upsertWorkItem(args.input, token) as Promise<T>;
+    case "submit_task_for_client_validation": throw new Error("La validación de cliente por WhatsApp requiere el CRM central");
     case "list_expense_documents": return browserApi.list_expense_documents(token) as T;
     case "upsert_expense_document": return browserApi.upsert_expense_document(args.input, token) as T;
     case "approve_expense_document": return browserApi.approve_expense_document(args.id, token) as T;
@@ -204,6 +209,7 @@ async function callLocal<T>(cmd: string, args: Record<string, any>, token: strin
     case "upsert_budget": throw new Error("Los presupuestos requieren PostgreSQL; no se usa localStorage");
     case "update_budget_status": throw new Error("Los presupuestos requieren PostgreSQL; no se usa localStorage");
     case "convert_budget_to_invoice": throw new Error("Los presupuestos requieren PostgreSQL; no se usa localStorage");
+    case "reopen_invoiced_budget": throw new Error("Los presupuestos requieren PostgreSQL; no se usa localStorage");
     case "delete_budget": throw new Error("Los presupuestos requieren PostgreSQL; no se usa localStorage");
     case "list_invoice_payments": return browserApi.list_invoice_payments(args.invoice_id, token) as T;
     case "add_invoice_payment": return browserApi.add_invoice_payment(args.input, token) as T;
@@ -353,6 +359,7 @@ export const api = {
   portalGetProject: (reference: string) => call<ClientPortalProject>("portal_get_project", { reference }),
   portalCreateRequest: (reference: string, input: Partial<WorkProjectRequest>) => call<WorkProjectRequest>("portal_create_request", { reference, input }),
   portalAddRequestMessage: (reference: string, requestId: string, text: string) => call<WorkProjectRequest>("portal_add_request_message", { reference, request_id: requestId, text }),
+  portalValidateTask: (reference: string, taskId: number, decision: "approved" | "changes_requested", message = "") => call<ClientPortalProject>("portal_validate_task", { reference, task_id: taskId, decision, message }),
 
   listProducts: async (activeOnly = true) => remoteOperatorConfig ? (await remoteOperatorApi.products(requireRemoteConfig(), getToken() ?? "")).filter((product) => !activeOnly || product.active) : call<Product[]>("list_products", { active_only: activeOnly }),
   upsertProduct: (input: ProductInput) => remoteOperatorConfig ? remoteOperatorApi.saveProduct(requireRemoteConfig(), getToken() ?? "", input) : call<Product>("upsert_product", { input }),
@@ -376,8 +383,11 @@ export const api = {
     remoteOperatorConfig ? remoteWriteUnavailable() : call<Sale>("return_sale_lines", { id, lines }),
   listCashMovements: () => remoteOperatorConfig ? remoteWriteUnavailable() : call<CashMovement[]>("list_cash_movements"),
   createCashMovement: (input: CashInput) => remoteOperatorConfig ? remoteWriteUnavailable() : call<CashMovement>("create_cash_movement", { input }),
+  syncProjectGrantIncome: (input: ProjectGrantIncomeInput) => remoteOperatorConfig ? remoteWriteUnavailable() : call<CashMovement | null>("sync_project_grant_income", { input }),
+  syncCompanyFinancingIncome: (input: CompanyFinancingIncomeInput) => remoteOperatorConfig ? remoteWriteUnavailable() : call<CashMovement | null>("sync_company_financing_income", { input }),
   listExpenseDocuments: () => call<ExpenseDocument[]>("list_expense_documents"),
   upsertExpenseDocument: (input: ExpenseDocumentInput) => call<ExpenseDocument>("upsert_expense_document", { input }),
+  reanalyzeExpenseDocument: (id: number) => call<ExpenseDocument>("reanalyze_expense_document", { id }),
   approveExpenseDocument: (id: number) => call<ExpenseDocument>("approve_expense_document", { id }),
   listInvoices: () => call<Invoice[]>("list_invoices"),
   issueInvoice: (input: InvoiceInput) => call<Invoice>("issue_invoice", { input }),
@@ -387,6 +397,7 @@ export const api = {
   upsertBudget: (input: BudgetInput) => call<Budget>("upsert_budget", { input }),
   updateBudgetStatus: (id: number, status: BudgetStatus) => call<Budget>("update_budget_status", { id, status }),
   convertBudgetToInvoice: (id: number) => call<{ budget: Budget; invoice: Invoice }>("convert_budget_to_invoice", { id }),
+  reopenInvoicedBudget: (id: number) => call<Budget>("reopen_invoiced_budget", { id }),
   deleteBudget: (id: number) => call<void>("delete_budget", { id }),
   listInvoicePayments: (invoiceId: number) => call<InvoicePayment[]>("list_invoice_payments", { invoice_id: invoiceId }),
   addInvoicePayment: (input: InvoicePaymentInput) => call<InvoicePayment>("add_invoice_payment", { input }),
@@ -496,6 +507,8 @@ export const api = {
     remoteOperatorConfig ? remoteWriteUnavailable() : call<WorkItem[]>("list_work_items", { filters }),
   upsertWorkItem: (input: WorkItemInput) =>
     remoteOperatorConfig ? remoteWriteUnavailable() : call<WorkItem>("upsert_work_item", { input }),
+  submitTaskForClientValidation: (taskId: number) =>
+    remoteOperatorConfig ? remoteWriteUnavailable() : call<WorkItem & { client_notification?: { notified: number; failed: number; warning?: string } }>("submit_task_for_client_validation", { task_id: taskId }),
   archiveWorkItem: (id: number) =>
     remoteOperatorConfig ? remoteWriteUnavailable() : call<WorkItem>("archive_work_item", { id }),
   listWorkCategories: () =>

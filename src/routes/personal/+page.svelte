@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { confirmDialog } from "$lib/stores/confirm-dialog";
   import { onMount } from "svelte";
   import { api } from "$lib/api/client";
   import type { AuthUser, Employee, EmployeeInput, Payroll, PayrollInput } from "$lib/types";
@@ -12,7 +13,7 @@
   import Select from "$lib/components/Select.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import Badge from "$lib/components/Badge.svelte";
-  import DateRangePicker from "$lib/components/DateRangePicker.svelte";
+  import DatePicker from "$lib/components/DatePicker.svelte";
 
   let employees = $state<Employee[]>([]);
   let payrolls = $state<Payroll[]>([]);
@@ -92,7 +93,7 @@
   }
 
   async function pay(payroll: Payroll) {
-    if (!confirm(`¿Registrar el pago de ${formatEUR(payroll.net_cents)} en Caja?`)) return;
+    if (!await confirmDialog(`Se registrará el pago de ${formatEUR(payroll.net_cents)} como salida en Caja.`, { title: "Pagar nómina", confirmLabel: "Registrar pago" })) return;
     try {
       const employee = employees.find((item) => item.id === payroll.employee_id);
       const movement = await api.createCashMovement({ kind: "expense", amount_cents: payroll.net_cents, category: "nominas", description: `Nómina ${payroll.period} · ${employee?.first_name ?? ""} ${employee?.last_name ?? ""}`.trim() });
@@ -163,7 +164,8 @@
   <div class="space-y-5">
     <div class="grid gap-4 sm:grid-cols-2"><Input label="Nombre" bind:value={employeeForm.first_name} required /><Input label="Apellidos" bind:value={employeeForm.last_name} required /><Input label="NIF/NIE" bind:value={employeeForm.tax_id} /><Input label="N.º Seguridad Social" bind:value={employeeForm.social_security_number} /><Input label="Correo" type="email" bind:value={employeeForm.email} /><Input label="Teléfono" bind:value={employeeForm.phone} /></div>
     <div class="grid gap-4 sm:grid-cols-2"><Input label="Puesto" bind:value={employeeForm.position} /><Input label="Tipo de contrato" bind:value={employeeForm.contract_type} /><Input label="Jornada" bind:value={employeeForm.work_schedule} /><Input label="Convenio colectivo" bind:value={employeeForm.collective_agreement} /><Input label="Grupo profesional" bind:value={employeeForm.professional_group} /><Select label="Usuario del CRM (opcional)" value={employeeForm.user_id == null ? '' : String(employeeForm.user_id)} onvaluechange={(v) => employeeForm.user_id = v ? Number(v) : null} options={[{value: '', label: 'Sin vincular'}, ...users.map(u => ({value: String(u.id), label: u.display_name}))]} /></div>
-    <div class="grid gap-4 sm:grid-cols-2"><DateRangePicker label="Periodo del contrato" bind:start={employeeForm.start_date} bind:end={employeeForm.end_date} /><div class="grid gap-4 sm:grid-cols-2"><Input label="Bruto anual (€)" value={euros(employeeForm.annual_gross_cents)} oninput={(e) => employeeForm.annual_gross_cents = cents(e.currentTarget.value)} /><Select label="Pagas al año" value={String(employeeForm.payments_per_year ?? 12)} onvaluechange={(v) => employeeForm.payments_per_year = Number(v)} options={[{value:'12',label:'12 pagas'},{value:'14',label:'14 pagas'}]} /></div></div>
+    <div class="grid gap-4 sm:grid-cols-2"><label class="grid gap-1.5 text-sm"><span class="font-medium text-[var(--color-muted)]">Fecha de alta</span><DatePicker bind:value={employeeForm.start_date} ariaLabel="Fecha de alta" /></label><label class="grid gap-1.5 text-sm"><span class="font-medium text-[var(--color-muted)]">Fecha de fin <small class="font-normal">(opcional)</small></span><DatePicker bind:value={employeeForm.end_date} min={employeeForm.start_date || undefined} ariaLabel="Fecha de fin opcional" /></label></div>
+    <div class="grid gap-4 sm:grid-cols-2"><Input label="Bruto anual (€)" value={euros(employeeForm.annual_gross_cents)} oninput={(e) => employeeForm.annual_gross_cents = cents(e.currentTarget.value)} /><Select label="Pagas al año" value={String(employeeForm.payments_per_year ?? 12)} onvaluechange={(v) => employeeForm.payments_per_year = Number(v)} options={[{value:'12',label:'12 pagas'},{value:'14',label:'14 pagas'}]} /></div>
     <div class="grid gap-4 sm:grid-cols-2"><Input label="IBAN" bind:value={employeeForm.iban} /><Select label="Estado" bind:value={employeeForm.status} options={[{value:'active',label:'Activo'},{value:'leave',label:'Baja'},{value:'ended',label:'Finalizado'}]} /></div>
     <label class="flex flex-col gap-1.5 text-sm"><span class="font-medium text-[var(--color-muted)]">Notas internas</span><textarea class="field min-h-24" bind:value={employeeForm.notes}></textarea></label>
     <div class="flex justify-end gap-3"><Button variant="secondary" onclick={() => employeeOpen = false}>Cancelar</Button><Button disabled={saving} onclick={saveEmployee}>{saving ? "Guardando…" : "Guardar empleado"}</Button></div>

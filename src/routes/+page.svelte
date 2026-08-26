@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { confirmDialog } from "$lib/stores/confirm-dialog";
   import { onMount } from "svelte";
   import { api } from "$lib/api/client";
   import type {
@@ -184,7 +185,19 @@
   const activeCompanyFinancialSummary = $derived(
     groupSummary.find((company) => company.company_id === $session.activeCompanyId),
   );
-  const billedProjectCents = $derived(activeCompanyFinancialSummary?.issued_total_cents ?? 0);
+  const collectedGrantCents = $derived(
+    devCashMovements
+      .filter((movement) => movement.kind === "income" && movement.category === "subvencion_cobrada")
+      .reduce((sum, movement) => sum + movement.amount_cents, 0),
+  );
+  const receivedFinancingCents = $derived(
+    devCashMovements
+      .filter((movement) => movement.kind === "income" && ["inversion_recibida", "prestamo_recibido"].includes(movement.category))
+      .reduce((sum, movement) => sum + movement.amount_cents, 0),
+  );
+  const receivedInvestmentCents = $derived(devCashMovements.filter((movement) => movement.kind === "income" && movement.category === "inversion_recibida").reduce((sum, movement) => sum + movement.amount_cents, 0));
+  const receivedLoanCents = $derived(devCashMovements.filter((movement) => movement.kind === "income" && movement.category === "prestamo_recibido").reduce((sum, movement) => sum + movement.amount_cents, 0));
+  const billedProjectCents = $derived((activeCompanyFinancialSummary?.issued_total_cents ?? 0) + collectedGrantCents);
   const totalExpenseMovements = $derived(
     devCashMovements.filter((movement) => movement.kind === "expense"),
   );
@@ -276,7 +289,7 @@
       import.meta.env.VITE_PUBLIC_APP_URL || window.location.origin,
     );
     const projectCount = new Set(whatsappDigestTasks.map((task) => task.project_id).filter(Boolean)).size;
-    if (!confirm(`Se enviará un resumen de ${projectCount} proyecto${projectCount === 1 ? "" : "s"} al WhatsApp del admin. ¿Continuar?`)) return;
+    if (!await confirmDialog(`Se enviará un resumen de ${projectCount} proyecto${projectCount === 1 ? "" : "s"} al WhatsApp del admin.`, { title: "Enviar resumen por WhatsApp", confirmLabel: "Enviar resumen" })) return;
     whatsappDigestSending = true;
     try {
       for (const message of messages) await api.whatsappSend(phone, message, true);
@@ -297,9 +310,13 @@
   </div>
 {:else if stats}
   {#if groupSummary.length > 1}
-    {@const groupIssued = groupSummary.reduce((sum, company) => sum + company.issued_total_cents, 0)}
+    {@const groupIssued = groupSummary.reduce((sum, company) => sum + company.issued_total_cents + company.grant_income_cents + company.investment_income_cents + company.loan_income_cents, 0)}
+    {@const groupInvestment = groupSummary.reduce((sum, company) => sum + company.investment_income_cents, 0)}
+    {@const groupLoans = groupSummary.reduce((sum, company) => sum + company.loan_income_cents, 0)}
     {@const groupPending = groupSummary.reduce((sum, company) => sum + company.issued_pending_cents, 0)}
-    {@const groupReceived = groupSummary.reduce((sum, company) => sum + company.received_total_cents, 0)}
+    {@const groupReceived = groupSummary.reduce((sum, company) => sum + company.issued_paid_cents + company.grant_income_cents + company.investment_income_cents + company.loan_income_cents, 0)}
+    {@const groupSpent = groupSummary.reduce((sum, company) => sum + company.cash_expense_cents, 0)}
+    {@const groupAvailable = groupReceived - groupSpent}
     <Card class="mb-5 border border-purple-400/20 bg-purple-500/[0.04]" lift={false}>
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
@@ -307,16 +324,20 @@
           <h2 class="text-lg font-semibold text-[var(--color-text)]">Todas tus empresas</h2>
           <p class="mt-1 text-xs text-[var(--color-muted)]">Consulta consolidada de lectura. La contabilidad sigue separada por empresa.</p>
         </div>
-        <div class="grid grid-cols-3 gap-3 text-right text-xs">
-          <div><p class="text-[var(--color-muted-dim)]">Emitido</p><p class="mt-1 font-semibold tabular text-emerald-300">{formatEUR(groupIssued)}</p></div>
+        <div class="grid grid-cols-7 gap-3 text-right text-xs">
+          <div><p class="text-[var(--color-muted-dim)]">Ingresos totales</p><p class="mt-1 font-semibold tabular text-emerald-300">{formatEUR(groupIssued)}</p></div>
+          <div><p class="text-[var(--color-muted-dim)]">Inversión</p><p class="mt-1 font-semibold tabular text-purple-200">{formatEUR(groupInvestment)}</p></div>
+          <div><p class="text-[var(--color-muted-dim)]">Préstamos</p><p class="mt-1 font-semibold tabular text-cyan-200">{formatEUR(groupLoans)}</p></div>
           <div><p class="text-[var(--color-muted-dim)]">Pendiente</p><p class="mt-1 font-semibold tabular text-amber-200">{formatEUR(groupPending)}</p></div>
           <div><p class="text-[var(--color-muted-dim)]">Recibido</p><p class="mt-1 font-semibold tabular text-cyan-200">{formatEUR(groupReceived)}</p></div>
+          <div><p class="text-[var(--color-muted-dim)]">Gastado</p><p class="mt-1 font-semibold tabular text-rose-200">{formatEUR(groupSpent)}</p></div>
+          <div><p class="text-[var(--color-muted-dim)]">Disponible</p><p class={`mt-1 font-semibold tabular ${groupAvailable < 0 ? "text-rose-300" : "text-emerald-300"}`}>{formatEUR(groupAvailable)}</p></div>
         </div>
       </div>
       <div class="mt-4 overflow-x-auto">
         <table class="w-full min-w-[620px] text-left text-xs">
-          <thead><tr class="border-b border-[var(--color-border)] text-[var(--color-muted-dim)]"><th class="pb-2 font-medium">Empresa</th><th class="pb-2 text-right font-medium">Emitido</th><th class="pb-2 text-right font-medium">Cobrado</th><th class="pb-2 text-right font-medium">Pendiente</th><th class="pb-2 text-right font-medium">Recibido</th></tr></thead>
-          <tbody>{#each groupSummary as company}<tr class="border-b border-white/[0.04] last:border-0"><td class="py-2.5"><span class="font-medium text-[var(--color-text)]">{company.trade_name}</span><span class="ml-2 text-[10px] uppercase tracking-wider text-[var(--color-muted-dim)]">{company.code}</span></td><td class="py-2.5 text-right tabular">{formatEUR(company.issued_total_cents)}</td><td class="py-2.5 text-right tabular text-emerald-300">{formatEUR(company.issued_paid_cents)}</td><td class="py-2.5 text-right tabular text-amber-200">{formatEUR(company.issued_pending_cents)}</td><td class="py-2.5 text-right tabular">{formatEUR(company.received_total_cents)}</td></tr>{/each}</tbody>
+          <thead><tr class="border-b border-[var(--color-border)] text-[var(--color-muted-dim)]"><th class="pb-2 font-medium">Empresa</th><th class="pb-2 text-right font-medium">Facturado</th><th class="pb-2 text-right font-medium">Subvenciones</th><th class="pb-2 text-right font-medium">Inversión</th><th class="pb-2 text-right font-medium">Préstamos</th><th class="pb-2 text-right font-medium">Ingresos</th><th class="pb-2 text-right font-medium">Pendiente</th><th class="pb-2 text-right font-medium">Recibido</th><th class="pb-2 text-right font-medium">Gastado</th><th class="pb-2 text-right font-medium">Disponible</th></tr></thead>
+          <tbody>{#each groupSummary as company}{@const companyReceived=company.issued_paid_cents+company.grant_income_cents+company.investment_income_cents+company.loan_income_cents}{@const companyAvailable=companyReceived-company.cash_expense_cents}<tr class="border-b border-white/[0.04] last:border-0"><td class="py-2.5"><span class="font-medium text-[var(--color-text)]">{company.trade_name}</span><span class="ml-2 text-[10px] uppercase tracking-wider text-[var(--color-muted-dim)]">{company.code}</span></td><td class="py-2.5 text-right tabular">{formatEUR(company.issued_total_cents)}</td><td class="py-2.5 text-right tabular text-purple-200">{formatEUR(company.grant_income_cents)}</td><td class="py-2.5 text-right tabular text-purple-200">{formatEUR(company.investment_income_cents)}</td><td class="py-2.5 text-right tabular text-cyan-200">{formatEUR(company.loan_income_cents)}</td><td class="py-2.5 text-right tabular text-emerald-300">{formatEUR(company.issued_total_cents + company.grant_income_cents + company.investment_income_cents + company.loan_income_cents)}</td><td class="py-2.5 text-right tabular text-amber-200">{formatEUR(company.issued_pending_cents)}</td><td class="py-2.5 text-right tabular">{formatEUR(companyReceived)}</td><td class="py-2.5 text-right tabular text-rose-200">{formatEUR(company.cash_expense_cents)}</td><td class={`py-2.5 text-right font-semibold tabular ${companyAvailable < 0 ? "text-rose-300" : "text-emerald-300"}`}>{formatEUR(companyAvailable)}</td></tr>{/each}</tbody>
         </table>
       </div>
     </Card>
@@ -339,14 +360,15 @@
       </div>
     {:else}
       <p class="section-label mb-3">Estado de la cartera</p>
-      <div class="pulse-metrics grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+      <div class="pulse-metrics grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
         <KpiCard label="Valor conseguido" value={formatEUR(wonProjectValueCents)} hint={`${activeDevProjects.length} proyectos en cartera`} icon="◫" accent="violet" />
-        <KpiCard label="Facturado total" value={formatEUR(billedProjectCents)} hint={`${formatEUR(activeCompanyFinancialSummary?.issued_paid_cents ?? 0)} cobrado`} icon="€" accent="emerald" />
+        <KpiCard label="Ingresos realizados" value={formatEUR(billedProjectCents)} hint={`${formatEUR(activeCompanyFinancialSummary?.issued_total_cents ?? 0)} facturado · ${formatEUR(collectedGrantCents)} subvenciones`} icon="€" accent="emerald" />
+        <KpiCard label="Financiación recibida" value={formatEUR(receivedFinancingCents)} hint={`${formatEUR(receivedInvestmentCents)} inversión · ${formatEUR(receivedLoanCents)} préstamos`} icon="↗" accent="cyan" />
         <KpiCard label="Gastado" value={formatEUR(totalSpentCents)} hint={`${totalExpenseMovements.length} gastos registrados en Caja`} icon="−" accent="amber" />
         <KpiCard
-          label="Margen facturado"
+          label="Margen realizado"
           value={formatEUR(billedMarginCents)}
-          hint="Facturado menos todos los gastos"
+          hint="Facturación y subvenciones cobradas menos gastos"
           icon="◇"
           accent={billedMarginCents < 0 ? "rose" : "cyan"}
           valueTone={billedMarginCents < 0 ? "danger" : "default"}
@@ -365,7 +387,7 @@
       <Card class="relative mt-4 overflow-visible" lift={false}>
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h2 class="section-label !normal-case !tracking-wide !text-sm">Facturación y proyección propia</h2>
+            <h2 class="section-label !normal-case !tracking-wide !text-sm">Ingresos y proyección propia</h2>
             <p class="mt-1 max-w-2xl text-xs text-[var(--color-muted)]">
               Los hitos de cada proyecto propio se mantienen mes a mes hasta que un nuevo hito cambia la estimación.
             </p>
@@ -373,7 +395,7 @@
           <div class="flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px]">
             <span class="inline-flex items-center gap-1.5 text-[var(--color-muted)]">
               <span class="h-2.5 w-2.5 rounded-sm bg-emerald-400"></span>
-              Facturación real
+              Ingresos reales
             </span>
             <span class="inline-flex items-center gap-1.5 text-[var(--color-muted)]">
               <span class="h-2.5 w-2.5 rounded-sm bg-gradient-to-t from-purple-600 to-violet-300"></span>
@@ -388,7 +410,7 @@
 
         <div class="mt-4 grid gap-3 sm:grid-cols-3">
           <div class="rounded-xl border border-[var(--color-border)] bg-black/20 px-3 py-2.5">
-            <p class="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Facturado este mes</p>
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Ingresado este mes</p>
             <p class="mt-1 text-lg font-semibold tabular text-emerald-300">
               {formatEUR(currentRevenueProjection?.income_cents ?? 0)}
             </p>

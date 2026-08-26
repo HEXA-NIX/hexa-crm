@@ -161,6 +161,7 @@ export const POST: RequestHandler = async ({ request }) => {
       case "portal_get_project": result = await postgresApi.portal_get_project(String(args?.reference ?? ""), token); break;
       case "portal_create_request": result = await postgresApi.portal_create_request(String(args?.reference ?? ""), args?.input ?? {}, token); break;
       case "portal_add_request_message": result = await postgresApi.portal_add_request_message(String(args?.reference ?? ""), String(args?.request_id ?? ""), String(args?.text ?? ""), token); break;
+      case "portal_validate_task": result = await postgresApi.portal_validate_task(String(args?.reference ?? ""), Number(args?.task_id), args?.decision === "approved" ? "approved" : "changes_requested", String(args?.message ?? ""), token); break;
       case "list_products":
         result = await postgresApi.list_products(!!args?.active_only, token);
         break;
@@ -206,6 +207,12 @@ export const POST: RequestHandler = async ({ request }) => {
         break;
       case "create_cash_movement":
         result = await postgresApi.create_cash_movement(args?.input, token);
+        break;
+      case "sync_project_grant_income":
+        result = await postgresApi.sync_project_grant_income(args?.input, token);
+        break;
+      case "sync_company_financing_income":
+        result = await postgresApi.sync_company_financing_income(args?.input, token);
         break;
       case "list_expense_documents": result = await postgresApi.list_expense_documents(token); break;
       case "upsert_expense_document": result = await postgresApi.upsert_expense_document(args?.input, token); break;
@@ -276,6 +283,9 @@ export const POST: RequestHandler = async ({ request }) => {
         break;
       case "upsert_work_item":
         result = await postgresApi.upsertWorkItem(args?.input, token);
+        break;
+      case "submit_task_for_client_validation":
+        result = await postgresApi.submit_task_for_client_validation(Number(args?.task_id), token);
         break;
       case "archive_work_item":
         result = await postgresApi.archiveWorkItem(args?.id as number, token);

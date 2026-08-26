@@ -1,5 +1,7 @@
 <script lang="ts">
   import DatePicker from "$lib/components/DatePicker.svelte";
+  import MoneyInput from "$lib/components/MoneyInput.svelte";
+  import { isMoneyLabel } from "$lib/money-input";
   let {
     label = "",
     type = "text",
@@ -41,6 +43,8 @@
         oninput?.({ currentTarget: { value: next } } as unknown as Event & { currentTarget: HTMLInputElement });
       }}
     />
+  {:else if isMoneyLabel(label, placeholder)}
+    <MoneyInput bind:value {placeholder} {required} ariaLabel={ariaLabel || label || "Importe en euros"} {oninput} />
   {:else}<input
     aria-label={ariaLabel}
     {type}

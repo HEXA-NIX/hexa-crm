@@ -8,6 +8,8 @@ import type {
   AuthUser,
   CashInput,
   CashMovement,
+  ProjectGrantIncomeInput,
+  CompanyFinancingIncomeInput,
   Company,
   CompanyInput,
   CompanyMember,
@@ -244,6 +246,7 @@ function defaultSettings(): Settings {
     idle_timeout_minutes: 15,
     last_backup_at: null,
     monthly_economic_goals: {},
+    company_financing: { founders: [], investors: [], rounds: [], loans: [] },
   };
 }
 
@@ -1192,7 +1195,7 @@ export const browserApi = {
       const cash = s.cash.filter((movement) => movement.company_id === company.id);
       const issuedTotal = invoices.reduce((sum, invoice) => sum + invoice.total_cents, 0);
       const issuedPaid = invoices.reduce((sum, invoice) => sum + invoice.paid_cents, 0);
-      return { company_id: company.id, code: company.code, trade_name: company.trade_name, issued_total_cents: issuedTotal, issued_paid_cents: issuedPaid, issued_pending_cents: Math.max(0, issuedTotal - issuedPaid), received_total_cents: expenses.reduce((sum, expense) => sum + expense.total_cents, 0), received_paid_cents: expensePayments.reduce((sum, payment) => sum + payment.amount_cents, 0), cash_income_cents: cash.filter((movement) => movement.kind === "income").reduce((sum, movement) => sum + movement.amount_cents, 0), cash_expense_cents: cash.filter((movement) => movement.kind === "expense").reduce((sum, movement) => sum + movement.amount_cents, 0) };
+      return { company_id: company.id, code: company.code, trade_name: company.trade_name, issued_total_cents: issuedTotal, issued_paid_cents: issuedPaid, issued_pending_cents: Math.max(0, issuedTotal - issuedPaid), received_total_cents: expenses.reduce((sum, expense) => sum + expense.total_cents, 0), received_paid_cents: expensePayments.reduce((sum, payment) => sum + payment.amount_cents, 0), cash_income_cents: cash.filter((movement) => movement.kind === "income").reduce((sum, movement) => sum + movement.amount_cents, 0), grant_income_cents: cash.filter((movement) => movement.kind === "income" && movement.category === "subvencion_cobrada").reduce((sum, movement) => sum + movement.amount_cents, 0), financing_income_cents: cash.filter((movement) => movement.kind === "income" && ["inversion_recibida","prestamo_recibido"].includes(movement.category)).reduce((sum, movement) => sum + movement.amount_cents, 0), investment_income_cents: cash.filter((movement) => movement.kind === "income" && movement.category === "inversion_recibida").reduce((sum, movement) => sum + movement.amount_cents, 0), loan_income_cents: cash.filter((movement) => movement.kind === "income" && movement.category === "prestamo_recibido").reduce((sum, movement) => sum + movement.amount_cents, 0), cash_expense_cents: cash.filter((movement) => movement.kind === "expense").reduce((sum, movement) => sum + movement.amount_cents, 0) };
     });
   },
 
@@ -2147,6 +2150,12 @@ export const browserApi = {
     return { ...saved };
   },
 
+  reanalyze_expense_document(_id: number, token?: string | null): ExpenseDocument {
+    const s = load();
+    requireSession(s, token);
+    throw new Error("La relectura con IA requiere el servidor central.");
+  },
+
   approve_expense_document(id: number, token?: string | null): ExpenseDocument {
     const s = load();
     const user = requireSession(s, token);
@@ -2355,6 +2364,55 @@ export const browserApi = {
     s.cash.push(m);
     save(s);
     return m;
+  },
+
+  sync_project_grant_income(input: ProjectGrantIncomeInput, token?: string | null): CashMovement | null {
+    const s = load();
+    ensureCompanies(s);
+    const activeCompanyId = sessionCompanyId(s, token);
+    const project = s.workProjects.find((candidate) => candidate.id === input.project_id && (candidate.company_id === activeCompanyId || candidate.task_company_id === activeCompanyId));
+    if (!project) throw new Error("Proyecto no encontrado.");
+    const beneficiaryCompanyId = Number(input.beneficiary_company_id);
+    if (![project.company_id, project.task_company_id].includes(beneficiaryCompanyId)) throw new Error("La empresa beneficiaria no pertenece al proyecto.");
+    const cid = beneficiaryCompanyId;
+    const marker = `[SUBVENCION:${input.grant_id}]`;
+    const matches = (movement: CashMovement) => movement.company_id === cid && movement.category === "subvencion_cobrada" && movement.description.startsWith(marker);
+    const existing = s.cash.find(matches);
+    const amount = Math.max(0, Math.round(Number(input.amount_cents) || 0));
+    if (!amount) {
+      s.cash = s.cash.filter((movement) => !matches(movement));
+      save(s);
+      return null;
+    }
+    const values = { project_id: input.project_id, kind: "income" as const, amount_cents: amount, category: "subvencion_cobrada", description: `${marker} ${input.description}`.trim(), occurred_at: input.occurred_at || now() };
+    if (existing) Object.assign(existing, values);
+    else {
+      s.seq.cash += 1;
+      s.cash.push({ id: s.seq.cash, company_id: cid, sale_id: null, ...values });
+    }
+    save(s);
+    return s.cash.find(matches) ?? null;
+  },
+
+  sync_company_financing_income(input: CompanyFinancingIncomeInput, token?: string | null): CashMovement | null {
+    const s = load();
+    ensureCompanies(s);
+    const cid = sessionCompanyId(s, token);
+    const category = input.source_type === "investment" ? "inversion_recibida" : "prestamo_recibido";
+    const marker = `[FINANCIACION:${input.source_type}:${input.source_id}]`;
+    const matches = (movement: CashMovement) => movement.company_id === cid && movement.category === category && movement.description.startsWith(marker);
+    const amount = Math.max(0, Math.round(Number(input.amount_cents) || 0));
+    if (!amount) {
+      s.cash = s.cash.filter((movement) => !matches(movement));
+      save(s);
+      return null;
+    }
+    const values = { project_id: null, kind: "income" as const, amount_cents: amount, category, description: `${marker} ${input.description}`.trim(), occurred_at: input.occurred_at || now() };
+    const existing = s.cash.find(matches);
+    if (existing) Object.assign(existing, values);
+    else { s.seq.cash += 1; s.cash.push({ id: s.seq.cash, company_id: cid, sale_id: null, ...values }); }
+    save(s);
+    return s.cash.find(matches) ?? null;
   },
 
   get_cash_balance(token?: string | null): number {

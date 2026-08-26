@@ -15,6 +15,7 @@
   import Modal from "$lib/components/Modal.svelte";
   import Select from "$lib/components/Select.svelte";
   import DateRangePicker from "$lib/components/DateRangePicker.svelte";
+  import MoneyInput from "$lib/components/MoneyInput.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import RichDescription from "$lib/components/RichDescription.svelte";
   import RichDescriptionEditor from "$lib/components/RichDescriptionEditor.svelte";
@@ -539,7 +540,7 @@
         </div>
         {#if $isAdmin}
           <form class="mt-4 flex flex-wrap gap-2" onsubmit={(event) => { event.preventDefault(); saveEconomicGoal(); }}>
-            <input class="field min-w-44 flex-1 text-sm" inputmode="decimal" bind:value={goalInput} placeholder="Objetivo del mes (€)" aria-label="Objetivo económico del mes en euros" />
+            <MoneyInput class="min-w-44 flex-1 text-sm" bind:value={goalInput} placeholder="Objetivo del mes (€)" ariaLabel="Objetivo económico del mes en euros" />
             <Button type="submit" variant="secondary" disabled={savingGoal}>Guardar objetivo</Button>
           </form>
         {/if}
@@ -830,7 +831,7 @@
     {#if form.project_type === "client"}
       <div class="space-y-1">
         <label for="project-value" class="text-xs font-medium text-[var(--color-muted)]">Valor contratado (€)</label>
-        <input id="project-value" type="text" inputmode="decimal" bind:value={form.value} placeholder="0,00" class="field w-full text-sm" />
+        <MoneyInput id="project-value" bind:value={form.value} placeholder="0,00" class="text-sm" ariaLabel="Valor económico estimado (€)" />
       </div>
     {:else}
       <div class="space-y-3 rounded-xl border border-[var(--color-border)] p-3">
@@ -843,7 +844,7 @@
         </div>
         {#each form.milestones as milestone, index}
           <div class="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
-            <input class="field w-full text-sm" inputmode="decimal" bind:value={milestone.amount} placeholder="Importe (€)" />
+            <MoneyInput class="text-sm" bind:value={milestone.amount} placeholder="Importe (€)" />
             <Select
               options={availableMilestoneMonths(milestoneMonthOptions, form.milestones, index)}
               bind:value={milestone.target_month}

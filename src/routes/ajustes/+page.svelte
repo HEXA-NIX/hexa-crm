@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { confirmDialog } from "$lib/stores/confirm-dialog";
   import { onMount } from "svelte";
   import { api, supportsOrcaWorker, usesLocalOrcaBridge } from "$lib/api/client";
   import type { AuthUser, Company, CompanyEntityType, Settings, UserInput, UserRole, WorkProject } from "$lib/types";
@@ -290,7 +291,7 @@
   }
 
   async function resetDemo() {
-    if (!confirm("¿Restaurar datos de demostración? Se perderán los datos actuales.")) {
+    if (!await confirmDialog("Se perderán los datos actuales y se restaurarán los datos de demostración.", { title: "Restaurar datos de demostración", confirmLabel: "Restaurar", danger: true })) {
       return;
     }
     try {
@@ -339,7 +340,7 @@
 
   async function restoreBackup() {
     if (!restorePreview) return;
-    if (!confirm("Se sustituirán los datos locales por esta copia y se cerrará la sesión. ¿Continuar?")) {
+    if (!await confirmDialog("Se sustituirán los datos locales por esta copia y se cerrará la sesión.", { title: "Restaurar copia de seguridad", confirmLabel: "Restaurar copia", danger: true })) {
       return;
     }
     restoreBusy = true;
@@ -512,8 +513,9 @@
 
   async function regenTemp(u: AuthUser) {
     if (
-      !confirm(
+      !await confirmDialog(
         `¿Generar nueva contraseña temporal de ${TEMP_PASSWORD_LENGTH} caracteres para @${u.username}?`,
+        { title: "Regenerar contraseña temporal", confirmLabel: "Generar contraseña", danger: true },
       )
     ) {
       return;
@@ -634,6 +636,12 @@
 
   function selectModel(m: string) {
     if (settings) settings.ollama_model = m;
+  }
+
+  function isConfiguredModelAvailable() {
+    if (!settings || !health?.models.length) return false;
+    const selected = settings.ollama_model.replace(/:latest$/, "");
+    return health.models.some((model) => model.replace(/:latest$/, "") === selected);
   }
 
   async function onCheckUpdate() {
@@ -1076,8 +1084,8 @@
                 <p class="mt-1 text-sm text-[var(--color-muted)]">{activeMeta.hint}</p>
               </div>
               <div class="flex flex-wrap items-center gap-2">
-                <Badge tone={health?.ok ? "ok" : "danger"}>
-                  {health?.ok ? "Conectado" : "Offline"}
+                <Badge tone={!health?.ok ? "danger" : isConfiguredModelAvailable() ? "ok" : "warn"}>
+                  {!health?.ok ? "Offline" : isConfiguredModelAvailable() ? "Modelo conectado" : "Servidor conectado · modelo no disponible"}
                 </Badge>
                 <Button onclick={save} data-ajustes-save>Guardar ajustes</Button>
               </div>
@@ -1087,6 +1095,7 @@
               <Input label="Modelo" bind:value={settings.ollama_model} placeholder="qwen3.5:4b" />
             </div>
             {#if health?.models?.length}
+              <p class="mt-3 text-xs text-[var(--color-muted)]">La lectura de tickets e imágenes usa automáticamente <strong class="text-purple-200">llama3.2-vision</strong>; el campo “Modelo” corresponde al asistente de texto.</p>
               <p class="section-label mt-4 mb-2 !normal-case !tracking-wide">Modelos detectados</p>
               <div class="flex flex-wrap gap-2">
                 {#each health.models.slice(0, 16) as m}

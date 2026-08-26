@@ -12,6 +12,7 @@ import {
 import { sha256HexSync, validatePin } from "../auth/pin";
 import { createVerifactuRecord, verifyVerifactuChain } from "../verifactu/records";
 import { extractOllamaReply, ollamaChatBody } from "../ai/ollama-reply";
+import { transcribeAudio } from "../ai/transcription.server";
 import { isVatRate, lineBreakdown, type VatRate } from "../vat";
 import {
   createBackupEnvelope,
@@ -33,6 +34,8 @@ import type {
   ClientPortalProject,
   CashInput,
   CashMovement,
+  ProjectGrantIncomeInput,
+  CompanyFinancingIncomeInput,
   Company,
   CompanyInput,
   CreateInventoryMovementInput,
@@ -690,7 +693,6 @@ export async function initDb() {
   `;
   await sql`CREATE INDEX IF NOT EXISTS idx_company_whatsapp_links_phone ON company_whatsapp_links(phone)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_company_whatsapp_links_device ON company_whatsapp_links(device_id)`;
-
   await sql`
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -925,6 +927,33 @@ export async function initDb() {
     )
   `;
   await sql`CREATE INDEX IF NOT EXISTS idx_project_client_access_user ON project_client_access(user_id, project_id)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS whatsapp_project_request_pending (
+      id BIGSERIAL PRIMARY KEY,
+      user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      device_id TEXT NOT NULL,
+      from_phone TEXT NOT NULL,
+      source_message_id TEXT NOT NULL DEFAULT '',
+      message_text TEXT NOT NULL,
+      project_options JSONB NOT NULL DEFAULT '[]'::jsonb,
+      status TEXT NOT NULL DEFAULT 'awaiting_project',
+      selected_project_id BIGINT REFERENCES work_projects(id) ON DELETE SET NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_whatsapp_project_request_pending_sender ON whatsapp_project_request_pending(device_id,from_phone,status,created_at DESC)`;
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_project_request_source_message ON whatsapp_project_request_pending(device_id,source_message_id) WHERE source_message_id <> ''`;
+  await sql`ALTER TABLE whatsapp_project_request_pending ADD COLUMN IF NOT EXISTS request_type TEXT`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS whatsapp_inbound_text_messages (
+      device_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      from_phone TEXT NOT NULL,
+      received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (device_id,message_id)
+    )
+  `;
   await sql`CREATE INDEX IF NOT EXISTS idx_cash_movements_project ON cash_movements(company_id, project_id)`;
   await sql`
     CREATE TABLE IF NOT EXISTS work_project_revenue_milestones (
@@ -1583,6 +1612,7 @@ const CLIENT_RPC_COMMANDS = new Set([
   "portal_get_project",
   "portal_create_request",
   "portal_add_request_message",
+  "portal_validate_task",
 ]);
 
 /** Deny client accounts access to every staff RPC unless explicitly exposed. */
@@ -2343,7 +2373,7 @@ export const postgresApi = {
         sql`SELECT COALESCE(SUM(total_cents) FILTER (WHERE status = 'issued'), 0)::int AS issued_total, COALESCE(SUM(paid_cents) FILTER (WHERE status = 'issued'), 0)::int AS issued_paid FROM invoices WHERE company_id = ${company.id}`,
         sql`SELECT COALESCE(SUM(total_cents) FILTER (WHERE status IN ('review','approved','paid')), 0)::int AS received_total FROM expense_documents WHERE company_id = ${company.id}`,
         sql`SELECT COALESCE(SUM(amount_cents), 0)::int AS received_paid FROM expense_payments WHERE company_id = ${company.id}`,
-        sql`SELECT COALESCE(SUM(amount_cents) FILTER (WHERE kind = 'income'), 0)::int AS cash_income, COALESCE(SUM(amount_cents) FILTER (WHERE kind = 'expense'), 0)::int AS cash_expense FROM cash_movements WHERE company_id = ${company.id}`,
+        sql`SELECT COALESCE(SUM(amount_cents) FILTER (WHERE kind = 'income'), 0)::int AS cash_income, COALESCE(SUM(amount_cents) FILTER (WHERE kind = 'income' AND category = 'subvencion_cobrada'), 0)::int AS grant_income, COALESCE(SUM(amount_cents) FILTER (WHERE kind = 'income' AND category IN ('inversion_recibida','prestamo_recibido')), 0)::int AS financing_income, COALESCE(SUM(amount_cents) FILTER (WHERE kind = 'income' AND category = 'inversion_recibida'), 0)::int AS investment_income, COALESCE(SUM(amount_cents) FILTER (WHERE kind = 'income' AND category = 'prestamo_recibido'), 0)::int AS loan_income, COALESCE(SUM(amount_cents) FILTER (WHERE kind = 'expense'), 0)::int AS cash_expense FROM cash_movements WHERE company_id = ${company.id}`,
       ]);
       const issuedTotal = Number(invoices[0]?.issued_total ?? 0);
       const issuedPaid = Number(invoices[0]?.issued_paid ?? 0);
@@ -2357,6 +2387,10 @@ export const postgresApi = {
         received_total_cents: Number(expenses[0]?.received_total ?? 0),
         received_paid_cents: Number(payments[0]?.received_paid ?? 0),
         cash_income_cents: Number(cash[0]?.cash_income ?? 0),
+        grant_income_cents: Number(cash[0]?.grant_income ?? 0),
+        financing_income_cents: Number(cash[0]?.financing_income ?? 0),
+        investment_income_cents: Number(cash[0]?.investment_income ?? 0),
+        loan_income_cents: Number(cash[0]?.loan_income ?? 0),
         cash_expense_cents: Number(cash[0]?.cash_expense ?? 0),
       };
     }));
@@ -3781,6 +3815,29 @@ export const postgresApi = {
     return { budget: result.budget, invoice: result.invoice };
   },
 
+  async reopenInvoicedBudget(id: number, token: string | null): Promise<Budget> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const result = await sql.begin(async (tx) => {
+      const budgetRows = await tx`SELECT * FROM budgets WHERE id=${Number(id)} AND company_id=${companyId} FOR UPDATE`;
+      if (!budgetRows.length) throw new Error("Presupuesto no encontrado");
+      const budget = formatBudget(budgetRows[0]);
+      if (budget.status !== "invoiced" || !budget.invoice_id) throw new Error("Este presupuesto no tiene una factura vinculada");
+      const invoiceRows = await tx`SELECT * FROM invoices WHERE id=${budget.invoice_id} AND company_id=${companyId} FOR UPDATE`;
+      if (!invoiceRows.length) throw new Error("Factura vinculada no encontrada");
+      const invoice = formatInvoice(invoiceRows[0]);
+      const payments = await tx`SELECT COUNT(*)::int AS count FROM invoice_payments WHERE invoice_id=${invoice.id} AND company_id=${companyId}`;
+      if (invoice.paid_cents > 0 || Number(payments[0]?.count ?? 0) > 0) throw new Error("No se puede deshacer: la factura ya tiene cobros registrados");
+      const rectifying = await tx`SELECT COUNT(*)::int AS count FROM invoices WHERE rectifies_invoice_id=${invoice.id} AND company_id=${companyId}`;
+      if (Number(rectifying[0]?.count ?? 0) > 0) throw new Error("No se puede deshacer: la factura ya tiene un abono vinculado");
+      if (invoice.status !== "cancelled") await tx`UPDATE invoices SET status='cancelled',updated_at=NOW() WHERE id=${invoice.id} AND company_id=${companyId}`;
+      const updated = await tx`UPDATE budgets SET status='sent',invoice_id=NULL,converted_at=NULL,accepted_at=NULL,updated_at=NOW() WHERE id=${budget.id} AND company_id=${companyId} RETURNING *`;
+      return { budget: formatBudget(updated[0]), invoice, wasIssued: invoice.status === "issued" };
+    });
+    if (result.wasIssued) await this.appendVerifactuRecord({ ...result.invoice, status: "cancelled" }, null, "anulacion");
+    return result.budget;
+  },
+
   async deleteBudget(id: number, token: string | null): Promise<void> {
     const user = await requireSession(token);
     const companyId = await resolveActiveCompanyId(token, user.id);
@@ -3896,14 +3953,17 @@ export const postgresApi = {
   async cancelInvoice(id: number, token: string | null): Promise<Invoice> {
     const user = await requireSession(token);
     const companyId = await resolveActiveCompanyId(token, user.id);
-    const existing = await sql`SELECT status FROM invoices WHERE id=${id} AND company_id=${companyId}`;
-    if (!existing.length) throw new Error("Factura no encontrada");
-    const rows = await sql`UPDATE invoices SET status='cancelled', updated_at=NOW() WHERE id=${id} AND company_id=${companyId} RETURNING *`;
-    if (!rows.length) throw new Error("Factura no encontrada");
+    const result = await sql.begin(async (tx) => {
+      const existing = await tx`SELECT * FROM invoices WHERE id=${id} AND company_id=${companyId} FOR UPDATE`;
+      if (!existing.length) throw new Error("Factura no encontrada");
+      const rows = await tx`UPDATE invoices SET status='cancelled', updated_at=NOW() WHERE id=${id} AND company_id=${companyId} RETURNING *`;
+      await tx`UPDATE budgets SET status='sent', invoice_id=NULL, converted_at=NULL, accepted_at=NULL, updated_at=NOW() WHERE invoice_id=${id} AND company_id=${companyId}`;
+      return { invoice: formatInvoice(rows[0]), previousStatus: existing[0].status };
+    });
     const profileRows = await sql`SELECT * FROM fiscal_profiles WHERE company_id=${companyId}`;
-    if (existing[0].status === "issued") await this.appendVerifactuRecord(formatInvoice(rows[0]), profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "anulacion");
+    if (result.previousStatus === "issued") await this.appendVerifactuRecord(result.invoice, profileRows[0] ? formatFiscalProfile(profileRows[0]) : null, "anulacion");
     void user;
-    return formatInvoice(rows[0]);
+    return result.invoice;
   },
 
   async listVerifactuRecords(token: string | null): Promise<VerifactuRecord[]> {
@@ -4001,6 +4061,25 @@ export const postgresApi = {
     return formatExpenseDocument(rows[0]);
   },
 
+  async reanalyzeExpenseDocument(id: number, token: string | null): Promise<ExpenseDocument> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const rows = await sql`SELECT * FROM expense_documents WHERE id=${id} AND company_id=${companyId}`;
+    if (!rows.length) throw new Error("Documento no encontrado.");
+    const current = formatExpenseDocument(rows[0]);
+    const attachment = current.attachments.find((item) => Boolean(item.data_url));
+    if (!attachment?.data_url) throw new Error("El documento original no está disponible para volver a leerlo.");
+    const settingsRows = await sql`SELECT key, value FROM settings WHERE key='ollama_url' OR key=${companySettingKey(companyId, "ollama_url")}`;
+    const vision = await extractExpenseFromImage(attachment.data_url, current.notes, {
+      baseUrl: settingValue(settingsRows, companyId, "ollama_url") || undefined,
+    });
+    const meaningful = Boolean(vision.supplier_name || vision.invoice_number || vision.issued_at || vision.total_cents || vision.base_cents);
+    if (!meaningful) throw new Error("El modelo visual respondió, pero no pudo reconocer datos del documento.");
+    await sql`UPDATE expense_documents SET title=${vision.title || current.title}, supplier_name=${vision.supplier_name || current.supplier_name}, supplier_tax_id=${vision.supplier_tax_id || current.supplier_tax_id}, invoice_number=${vision.invoice_number || current.invoice_number}, issued_at=${vision.issued_at || current.issued_at}, accounting_date=${vision.issued_at || current.accounting_date || current.issued_at}, base_cents=${vision.base_cents || current.base_cents}, vat_cents=${vision.vat_cents || current.vat_cents}, total_cents=${vision.total_cents || current.total_cents}, notes=${vision.notes || current.notes}, ocr_confidence=${vision.ocr_confidence ?? current.ocr_confidence}, updated_at=NOW() WHERE id=${id} AND company_id=${companyId}`;
+    const updated = await sql`SELECT * FROM expense_documents WHERE id=${id} AND company_id=${companyId}`;
+    return formatExpenseDocument(updated[0]);
+  },
+
   async approveExpenseDocument(id: number, token: string | null): Promise<ExpenseDocument> {
     const user = await requireSession(token);
     const companyId = await resolveActiveCompanyId(token, user.id);
@@ -4069,7 +4148,7 @@ export const postgresApi = {
     // Route by the receiving phone. If several companies share it, defer the
     // choice to WhatsApp. The membership fallback keeps pre-migration devices
     // working until their next status refresh records the explicit link.
-    const companyRows = linkRows.length
+    let companyRows = linkRows.length
       ? await sql`SELECT c.id,c.trade_name,c.legal_name FROM companies c INNER JOIN company_whatsapp_links wl ON wl.company_id=c.id WHERE wl.phone=${linkRows[0].phone} AND c.active=TRUE ORDER BY c.trade_name,c.id`
       : await sql`SELECT c.id,c.trade_name,c.legal_name FROM companies c INNER JOIN company_members cm ON cm.company_id=c.id INNER JOIN users u ON u.id=cm.user_id WHERE u.id=${userId} AND u.active=TRUE AND c.active=TRUE ORDER BY c.trade_name,c.id`;
     if (!companyRows.length) throw new Error("El teléfono de WhatsApp no está asociado a ninguna empresa activa.");
@@ -4078,9 +4157,9 @@ export const postgresApi = {
     const messageId = String(payload.message_id ?? payload.id ?? payload.key?.id ?? "");
     const senderDigits = from.replace(/\D/g, "");
     if (!senderDigits || !companyRows.length) return { state: "ignored" };
-    const linkedCompanyIds = companyRows.map((company: any) => Number(company.id));
+    let linkedCompanyIds = companyRows.map((company: any) => Number(company.id));
     const authorizedSender = await sql`
-      SELECT DISTINCT u.id
+      SELECT DISTINCT u.id,u.display_name,u.role,u.is_master
       FROM users u
       INNER JOIN company_members cm ON cm.user_id = u.id
       WHERE u.active = TRUE
@@ -4092,9 +4171,42 @@ export const postgresApi = {
     // active Hexa user who belongs to the receiving company. Unknown senders
     // are deliberately silent: no reply, no pending row and no expense.
     if (!authorizedSender.length) return { state: "ignored" };
+    const senderUser = authorizedSender[0];
+    const senderCanManageDocuments = senderUser.role === "admin" || Boolean(senderUser.is_master);
+    // The receiving number authenticates the entry point, but an administrator
+    // must be able to route documents and requests to every company they
+    // administer, including companies that do not have their own WhatsApp link.
+    if (senderCanManageDocuments) {
+      companyRows = senderUser.is_master
+        ? await sql`SELECT id,trade_name,legal_name FROM companies WHERE active=TRUE ORDER BY trade_name,id`
+        : await sql`
+            SELECT DISTINCT c.id,c.trade_name,c.legal_name
+            FROM companies c
+            INNER JOIN company_members cm ON cm.company_id=c.id
+            WHERE cm.user_id=${senderUser.id} AND c.active=TRUE
+            ORDER BY c.trade_name,c.id
+          `;
+      linkedCompanyIds = companyRows.map((company: any) => Number(company.id));
+    }
     const mediaType = String(payload.media_type ?? payload.type ?? payload.message_type ?? "").toLowerCase();
-    const hasMedia = Boolean(payload.image || payload.document || payload.media || payload.filename || payload.url) || ["image", "document", "file", "pdf"].some((kind) => mediaType.includes(kind));
+    const isAudio = Boolean(payload.audio || payload.voice || payload.ptt) || ["audio", "voice", "ptt"].some((kind) => mediaType.includes(kind));
+    let transcribedText = "";
+    if (isAudio) {
+      if (!messageId) throw new Error("El audio no incluye un identificador para descargarlo.");
+      try {
+        const audio = await gowaDownloadMessageMedia(deviceId, messageId, chatJid);
+        transcribedText = await transcribeAudio(audio.data_url, audio.name);
+      } catch (error) {
+        await gowaSendText(deviceId, from, `He recibido el audio, pero no he podido transcribirlo: ${error instanceof Error ? error.message : "transcriptor no disponible"}. Puedes enviarme el texto mientras se revisa la configuración.`);
+        return { state: "audio_transcription_failed" };
+      }
+    }
+    const hasMedia = !isAudio && (Boolean(payload.image || payload.document || payload.media || payload.filename || payload.url) || ["image", "document", "file", "pdf"].some((kind) => mediaType.includes(kind)));
     if (hasMedia) {
+      if (!senderCanManageDocuments) {
+        await gowaSendText(deviceId, from, "Tu usuario puede enviar sugerencias, mejoras, preguntas y avisos de errores por texto. La recepción de tickets, facturas, abonos y justificantes está reservada a administradores.");
+        return { state: "document_forbidden" };
+      }
       if (!messageId) throw new Error("El mensaje multimedia no incluye identificador para descargarlo.");
       const caption = String(payload.caption ?? payload.body ?? payload.content ?? "");
       const companyId = companyRows.length === 1 ? Number(companyRows[0].id) : null;
@@ -4140,7 +4252,7 @@ export const postgresApi = {
     const nestedText = typeof payload.text === "object" && payload.text !== null
       ? (payload.text as any).body ?? (payload.text as any).text ?? (payload.text as any).content ?? ""
       : payload.text;
-    const rawTypeText = listSelection || pollSelection || selectedPollLabel || payload.body || payload.content || nestedText
+    const rawTypeText = transcribedText || listSelection || pollSelection || selectedPollLabel || payload.body || payload.content || nestedText
       || payload.message?.text || payload.message?.body || payload.message?.content || "";
     const text = String(rawTypeText).normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
     const kind = text === "1" || text.includes("ticket") ? "ticket"
@@ -4149,8 +4261,155 @@ export const postgresApi = {
       : text === "4" || text.includes("abono") || text.includes("rectific") ? "credit_note"
       : text === "5" || text.includes("justificante") || text.includes("recibo") ? "receipt"
       : text.includes("factura") ? "invoice" : null;
-    const pendingRows = from ? await sql`SELECT * FROM whatsapp_expense_pending WHERE device_id=${deviceId} AND from_phone=${from} AND status IN ('awaiting_company','awaiting_type') ORDER BY created_at DESC LIMIT 1` : [];
-    if (!pendingRows.length) return { state: "ignored" };
+    // A document question must not hijack unrelated text messages forever.
+    // Keep its conversational lifetime aligned with the 30-minute public link.
+    if (from && senderCanManageDocuments) {
+      await sql`
+        UPDATE whatsapp_expense_pending
+        SET status='expired',updated_at=NOW()
+        WHERE device_id=${deviceId} AND from_phone=${from}
+          AND status IN ('awaiting_company','awaiting_type')
+          AND created_at < NOW() - (${WHATSAPP_UPLOAD_LINK_TTL_MINUTES} || ' minutes')::interval
+      `;
+    }
+    const pendingRows = from && senderCanManageDocuments ? await sql`
+      SELECT * FROM whatsapp_expense_pending
+      WHERE device_id=${deviceId} AND from_phone=${from}
+        AND status IN ('awaiting_company','awaiting_type')
+        AND created_at >= NOW() - (${WHATSAPP_UPLOAD_LINK_TTL_MINUTES} || ' minutes')::interval
+      ORDER BY created_at DESC LIMIT 1
+    ` : [];
+    if (!pendingRows.length) {
+      if (messageId) {
+        const acceptedMessage = await sql`
+          INSERT INTO whatsapp_inbound_text_messages (device_id,message_id,from_phone)
+          VALUES (${deviceId},${messageId},${from})
+          ON CONFLICT (device_id,message_id) DO NOTHING
+          RETURNING message_id
+        `;
+        if (!acceptedMessage.length) return { state: "duplicate" };
+      }
+      const pendingSuggestionRows = await sql`
+        SELECT * FROM whatsapp_project_request_pending
+        WHERE device_id=${deviceId} AND from_phone=${from} AND user_id=${senderUser.id}
+          AND status IN ('awaiting_request_type','awaiting_project')
+        ORDER BY created_at DESC LIMIT 1
+      `;
+      const normalizeChoice = (value: unknown) => String(value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+      const requestTypeOptions: { type: WorkProjectRequest["type"]; label: string; aliases: string[] }[] = [
+        { type: "suggestion", label: "Sugerencia", aliases: ["sugerencia"] },
+        { type: "improvement", label: "Mejora", aliases: ["mejora"] },
+        { type: "issue", label: "Incidencia", aliases: ["incidencia", "bug", "error"] },
+        { type: "feature", label: "Nueva funcionalidad", aliases: ["nueva funcionalidad", "funcionalidad", "feature"] },
+        { type: "question", label: "Consulta", aliases: ["consulta", "pregunta", "duda"] },
+      ];
+      const requestTypePrompt = `¿Qué tipo de solicitud es?\n${requestTypeOptions.map((option,index) => `${index + 1}. ${option.label}`).join("\n")}\n\nResponde con el número o el nombre.`;
+      const parseRequestType = (value: unknown): WorkProjectRequest["type"] | null => {
+        const normalized = normalizeChoice(value);
+        const numericIndex = /^\d+$/.test(normalized) ? Number(normalized) - 1 : -1;
+        if (numericIndex >= 0 && numericIndex < requestTypeOptions.length) return requestTypeOptions[numericIndex].type;
+        return requestTypeOptions.find((option) => option.type === normalized || option.aliases.includes(normalized))?.type ?? null;
+      };
+      const requestLabel = (type: WorkProjectRequest["type"]) => type === "issue" ? "Incidencia" : type === "improvement" ? "Mejora" : type === "question" ? "Pregunta" : type === "feature" ? "Funcionalidad" : "Sugerencia";
+      const createSuggestion = async (projectId: number, messageText: string, selectedType: WorkProjectRequest["type"]) => {
+        const now = new Date().toISOString();
+        const cleanText = String(messageText ?? "").trim().slice(0, 5000);
+        const type = selectedType;
+        const firstLine = cleanText.split(/\r?\n/).find(Boolean)?.trim() || `${requestLabel(type)} recibida por WhatsApp`;
+        const request: WorkProjectRequest = {
+          id: randomBytes(12).toString("hex"), type,
+          title: firstLine.slice(0, 180), description: cleanText,
+          requester: String(senderUser.display_name || from), requester_user_id: Number(senderUser.id),
+          priority: "normal", impact: "", status: "new", reviewer_id: null, task_id: null,
+          messages: [], created_at: now, updated_at: now,
+        };
+        await sql.begin(async (tx) => {
+          const rows = senderCanManageDocuments
+            ? await tx`
+                SELECT p.id,p.requests FROM work_projects p
+                WHERE p.id=${projectId} AND p.status <> 'archived' AND p.project_type IN ('own','internal')
+                  AND (p.company_id IN ${tx(linkedCompanyIds)} OR p.task_company_id IN ${tx(linkedCompanyIds)} OR p.client_company_id IN ${tx(linkedCompanyIds)})
+                FOR UPDATE
+              `
+            : await tx`
+                SELECT p.id,p.requests FROM work_projects p
+                INNER JOIN project_client_access access ON access.project_id=p.id
+                WHERE p.id=${projectId} AND access.user_id=${senderUser.id} AND p.status <> 'archived'
+                FOR UPDATE
+              `;
+          if (!rows.length) throw new Error("El proyecto seleccionado ya no está disponible para este teléfono.");
+          const requests = Array.isArray(rows[0].requests) ? rows[0].requests : [];
+          await tx`UPDATE work_projects SET requests=${tx.json([...requests,request] as any)},updated_at=NOW() WHERE id=${projectId}`;
+        });
+        return request;
+      };
+      if (pendingSuggestionRows.length) {
+        const pendingSuggestion = pendingSuggestionRows[0];
+        const options = Array.isArray(pendingSuggestion.project_options) ? pendingSuggestion.project_options : [];
+        if (pendingSuggestion.status === "awaiting_request_type") {
+          const selectedType = parseRequestType(rawTypeText);
+          if (!selectedType) {
+            await gowaSendText(deviceId, from, `No he identificado el tipo.\n\n${requestTypePrompt}`);
+            return { state: "awaiting_request_type" };
+          }
+          if (options.length === 1) {
+            const created = await createSuggestion(Number(options[0].id), String(pendingSuggestion.message_text), selectedType);
+            await sql`UPDATE whatsapp_project_request_pending SET status='processed',request_type=${selectedType},selected_project_id=${Number(options[0].id)},updated_at=NOW() WHERE id=${pendingSuggestion.id} AND status='awaiting_request_type'`;
+            await gowaSendText(deviceId, from, `${requestLabel(created.type)} añadida a «${options[0].name}» ✅`);
+            return { state: "project_request_created" };
+          }
+          await sql`UPDATE whatsapp_project_request_pending SET status='awaiting_project',request_type=${selectedType},updated_at=NOW() WHERE id=${pendingSuggestion.id} AND status='awaiting_request_type'`;
+          const choices = options.map((project: any, index: number) => `${index + 1}. ${project.name}`).join("\n");
+          await gowaSendText(deviceId, from, `¿A qué proyecto quieres añadir la ${requestLabel(selectedType).toLowerCase()}?\n${choices}\n\nResponde con el número o el nombre.`);
+          return { state: "awaiting_project" };
+        }
+        const normalizedReply = normalizeChoice(rawTypeText);
+        const selectedIndex = /^\d+$/.test(normalizedReply) ? Number(normalizedReply) - 1 : -1;
+        const selected = selectedIndex >= 0
+          ? options[selectedIndex]
+          : options.find((project: any) => normalizeChoice(project.name) === normalizedReply);
+        if (!selected) {
+          const choices = options.map((project: any, index: number) => `${index + 1}. ${project.name}`).join("\n");
+          await gowaSendText(deviceId, from, `No he identificado el proyecto. Responde con el número o el nombre:\n${choices}`);
+          return { state: "awaiting_project" };
+        }
+        const selectedType = parseRequestType(pendingSuggestion.request_type) ?? "suggestion";
+        const created = await createSuggestion(Number(selected.id), String(pendingSuggestion.message_text), selectedType);
+        await sql`UPDATE whatsapp_project_request_pending SET status='processed',selected_project_id=${Number(selected.id)},updated_at=NOW() WHERE id=${pendingSuggestion.id} AND status='awaiting_project'`;
+        await gowaSendText(deviceId, from, `${requestLabel(created.type)} añadida a «${selected.name}» ✅`);
+        return { state: "project_suggestion_created" };
+      }
+      const suggestionText = String(rawTypeText ?? "").trim();
+      if (!suggestionText) return { state: "ignored" };
+      const projects = senderCanManageDocuments
+        ? await sql`
+            SELECT DISTINCT p.id,p.name
+            FROM work_projects p
+            WHERE p.status <> 'archived' AND p.project_type IN ('own','internal')
+              AND (p.company_id IN ${sql(linkedCompanyIds)} OR p.task_company_id IN ${sql(linkedCompanyIds)} OR p.client_company_id IN ${sql(linkedCompanyIds)})
+            ORDER BY p.name,p.id
+          `
+        : await sql`
+            SELECT DISTINCT p.id,p.name
+            FROM work_projects p
+            INNER JOIN project_client_access access ON access.project_id=p.id
+            WHERE access.user_id=${senderUser.id} AND p.status <> 'archived'
+            ORDER BY p.name,p.id
+          `;
+      if (!projects.length) {
+        await gowaSendText(deviceId, from, "Tu teléfono está reconocido, pero no tiene ningún proyecto asignado. Contacta con el equipo para que te dé acceso.");
+        return { state: "no_project_access" };
+      }
+      const inserted = await sql`
+        INSERT INTO whatsapp_project_request_pending (user_id,device_id,from_phone,source_message_id,message_text,project_options,status,updated_at)
+        VALUES (${senderUser.id},${deviceId},${from},${messageId},${suggestionText},${sql.json(projects.map((project: any) => ({ id:Number(project.id),name:String(project.name) })) as any)},'awaiting_request_type',NOW())
+        ON CONFLICT (device_id,source_message_id) WHERE source_message_id <> '' DO NOTHING
+        RETURNING id
+      `;
+      if (!inserted.length && messageId) return { state: "duplicate" };
+      await gowaSendText(deviceId, from, requestTypePrompt);
+      return { state: "awaiting_request_type" };
+    }
     const pending = pendingRows[0];
     if (pending.status === "awaiting_company") {
       const selectedIndex = /^\d+$/.test(text) ? Number(text) - 1 : -1;
@@ -4184,7 +4443,6 @@ export const postgresApi = {
     try {
       vision = await extractExpenseFromImage(media.data_url, pending.caption, {
         baseUrl: settingValue(settingsRows, companyId, "ollama_url") || undefined,
-        model: settingValue(settingsRows, companyId, "ollama_model") || undefined,
       });
     } catch (error) {
       // A broken/missing vision model must not discard the document or make
@@ -4199,7 +4457,7 @@ export const postgresApi = {
     // session-protected upsertExpenseDocument method.
     const attachments = [{ id: `wa-${pending.message_id}`, name: media.name, mime_type: media.mime_type, size: Math.floor((media.data_url.length * 3) / 4), data_url: media.data_url }];
     const expenseRows = await sql.begin(async (tx) => {
-      const rows = await tx`INSERT INTO expense_documents (company_id,status,kind,title,supplier_name,supplier_tax_id,invoice_number,issued_at,accounting_date,base_cents,vat_cents,total_cents,notes,attachments,source,source_phone,ocr_confidence,created_by) VALUES (${companyId},'review',${kind},${hints.title || media.name},${hints.supplier_name || ""},${hints.supplier_tax_id || ""},${hints.invoice_number || ""},${hints.issued_at || null},${hints.issued_at || null},${hints.base_cents || 0},${hints.vat_cents || 0},${hints.total_cents || 0},${hints.notes || pending.caption},${tx.json(attachments)},'whatsapp',${pending.from_phone},${hints.ocr_confidence ?? 0.8},${userId}) RETURNING *`;
+      const rows = await tx`INSERT INTO expense_documents (company_id,status,kind,title,supplier_name,supplier_tax_id,invoice_number,issued_at,accounting_date,base_cents,vat_cents,total_cents,notes,attachments,source,source_phone,ocr_confidence,created_by) VALUES (${companyId},'review',${kind},${hints.title || media.name},${hints.supplier_name || ""},${hints.supplier_tax_id || ""},${hints.invoice_number || ""},${hints.issued_at || null},${hints.issued_at || null},${hints.base_cents || 0},${hints.vat_cents || 0},${hints.total_cents || 0},${hints.notes || pending.caption},${tx.json(attachments)},'whatsapp',${pending.from_phone},${visionError ? 0 : (hints.ocr_confidence ?? 0.8)},${userId}) RETURNING *`;
       await tx`UPDATE whatsapp_expense_pending SET status='processed',updated_at=NOW() WHERE id=${pending.id} AND status='awaiting_type'`;
       return rows;
     });
@@ -4216,7 +4474,7 @@ export const postgresApi = {
     const deviceId = gowaDeviceId(companyId, user.id);
     const latest = await gowaLatestMedia(deviceId);
     const settings = await this.get_settings(token);
-    const vision = await extractExpenseFromImage(latest.media.data_url, latest.caption, { baseUrl: settings.ollama_url, model: settings.ollama_model });
+    const vision = await extractExpenseFromImage(latest.media.data_url, latest.caption, { baseUrl: settings.ollama_url });
     const hints = { ...extractExpenseHints(latest.caption), ...vision };
     const input = { kind, title: hints.title || latest.media.name, supplier_name: hints.supplier_name || "", supplier_tax_id: hints.supplier_tax_id || "", invoice_number: hints.invoice_number || "", issued_at: hints.issued_at || null, base_cents: hints.base_cents || 0, vat_cents: hints.vat_cents || 0, total_cents: hints.total_cents || 0, notes: hints.notes || latest.caption, ocr_confidence: hints.ocr_confidence ?? 0.8, attachments: [{ id: `wa-${latest.message_id}`, name: latest.media.name, mime_type: latest.media.mime_type, size: Math.floor((latest.media.data_url.length * 3) / 4), data_url: latest.media.data_url }], source: "whatsapp" as const, source_phone: latest.from };
     return this.upsertExpenseDocument(input, token);
@@ -4257,6 +4515,51 @@ export const postgresApi = {
       sale_id: m.sale_id ?? null,
       occurred_at: toIso(m.occurred_at),
     };
+  },
+
+  async sync_project_grant_income(input: ProjectGrantIncomeInput, token: string | null): Promise<CashMovement | null> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const projects = await sql`SELECT id,company_id FROM work_projects WHERE id=${input.project_id} AND (company_id=${companyId} OR task_company_id=${companyId})`;
+    if (!projects.length) throw new Error("Proyecto no encontrado.");
+    const grantCompanyId = Number(input.beneficiary_company_id);
+    const allowedCompanies = await sql`SELECT company_id,task_company_id FROM work_projects WHERE id=${input.project_id}`;
+    if (![Number(allowedCompanies[0].company_id), Number(allowedCompanies[0].task_company_id)].includes(grantCompanyId)) throw new Error("La empresa beneficiaria no pertenece al proyecto.");
+    const marker = `[SUBVENCION:${String(input.grant_id)}]`;
+    const amount = Math.max(0, Math.round(Number(input.amount_cents) || 0));
+    if (!amount) {
+      await sql`DELETE FROM cash_movements WHERE company_id=${grantCompanyId} AND category='subvencion_cobrada' AND description LIKE ${`${marker}%`}`;
+      return null;
+    }
+    const description = `${marker} ${String(input.description || "Subvención cobrada")}`.trim();
+    const occurredAt = input.occurred_at?.trim() || null;
+    const existing = await sql`SELECT id FROM cash_movements WHERE company_id=${grantCompanyId} AND category='subvencion_cobrada' AND description LIKE ${`${marker}%`} ORDER BY id LIMIT 1`;
+    const rows = existing.length
+      ? await sql`UPDATE cash_movements SET project_id=${input.project_id},kind='income',amount_cents=${amount},description=${description},occurred_at=COALESCE(${occurredAt}::timestamptz,occurred_at) WHERE id=${existing[0].id} AND company_id=${grantCompanyId} RETURNING *`
+      : await sql`INSERT INTO cash_movements(company_id,project_id,kind,amount_cents,category,description,occurred_at) VALUES(${grantCompanyId},${input.project_id},'income',${amount},'subvencion_cobrada',${description},COALESCE(${occurredAt}::timestamptz,NOW())) RETURNING *`;
+    const movement = rows[0];
+    return { ...movement, id:Number(movement.id), company_id:Number(movement.company_id), project_id:movement.project_id == null ? null : Number(movement.project_id), amount_cents:Number(movement.amount_cents), occurred_at:toIso(movement.occurred_at) } as CashMovement;
+  },
+
+  async sync_company_financing_income(input: CompanyFinancingIncomeInput, token: string | null): Promise<CashMovement | null> {
+    const user = await requireSession(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const sourceType = input.source_type === "investment" ? "investment" : "loan";
+    const category = sourceType === "investment" ? "inversion_recibida" : "prestamo_recibido";
+    const marker = `[FINANCIACION:${sourceType}:${String(input.source_id)}]`;
+    const amount = Math.max(0, Math.round(Number(input.amount_cents) || 0));
+    if (!amount) {
+      await sql`DELETE FROM cash_movements WHERE company_id=${companyId} AND category=${category} AND description LIKE ${`${marker}%`}`;
+      return null;
+    }
+    const description = `${marker} ${String(input.description || (sourceType === "investment" ? "Inversión recibida" : "Préstamo recibido"))}`.trim();
+    const occurredAt = input.occurred_at?.trim() || null;
+    const existing = await sql`SELECT id FROM cash_movements WHERE company_id=${companyId} AND category=${category} AND description LIKE ${`${marker}%`} ORDER BY id LIMIT 1`;
+    const rows = existing.length
+      ? await sql`UPDATE cash_movements SET kind='income',amount_cents=${amount},description=${description},occurred_at=COALESCE(${occurredAt}::timestamptz,occurred_at) WHERE id=${existing[0].id} AND company_id=${companyId} RETURNING *`
+      : await sql`INSERT INTO cash_movements(company_id,project_id,kind,amount_cents,category,description,occurred_at) VALUES(${companyId},NULL,'income',${amount},${category},${description},COALESCE(${occurredAt}::timestamptz,NOW())) RETURNING *`;
+    const movement = rows[0];
+    return { ...movement, id:Number(movement.id), company_id:Number(movement.company_id), project_id:null, amount_cents:Number(movement.amount_cents), occurred_at:toIso(movement.occurred_at) } as CashMovement;
   },
 
   async get_cash_balance(token: string | null): Promise<number> {
@@ -4518,6 +4821,19 @@ export const postgresApi = {
           return {};
         }
       })(),
+      company_financing: (() => {
+        try {
+          const parsed = JSON.parse(settingValue(rows, companyId, "company_financing", "{}"));
+          return {
+            founders: Array.isArray(parsed?.founders) ? parsed.founders : [],
+            investors: Array.isArray(parsed?.investors) ? parsed.investors : [],
+            rounds: Array.isArray(parsed?.rounds) ? parsed.rounds : [],
+            loans: Array.isArray(parsed?.loans) ? parsed.loans : [],
+          };
+        } catch {
+          return { founders: [], investors: [], rounds: [], loans: [] };
+        }
+      })(),
     };
   },
 
@@ -4532,6 +4848,7 @@ export const postgresApi = {
       "idle_timeout_minutes",
       "last_backup_at",
       "monthly_economic_goals",
+      "company_financing",
     ];
     for (const key of allowed) {
       const value = partial[key];
@@ -4542,7 +4859,7 @@ export const postgresApi = {
         ) {
           throw new Error("El bloqueo automático debe estar entre 0 y 480 minutos");
         }
-        const storedValue = key === "monthly_economic_goals"
+        const storedValue = key === "monthly_economic_goals" || key === "company_financing"
           ? JSON.stringify(value)
           : value == null ? "" : value.toString();
         if (key === "shop_name") {
@@ -4750,6 +5067,79 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     return Promise.all(rows.map((row) => this.portal_get_project(String(row.uid), token)));
   },
 
+  async submit_task_for_client_validation(taskId: number, token: string | null) {
+    const user = await requireAdmin(token);
+    const companyId = await resolveActiveCompanyId(token, user.id);
+    const rows = await sql`
+      SELECT wi.*, p.uid AS project_uid, p.name AS project_name, p.project_type, p.customer_id,
+             c.phone AS customer_phone
+      FROM work_items wi
+      INNER JOIN work_projects p ON p.id=wi.project_id
+      LEFT JOIN customers c ON c.id=p.customer_id
+      WHERE wi.id=${taskId} AND wi.company_id=${companyId}
+        AND (p.company_id=${companyId} OR p.task_company_id=${companyId})
+      LIMIT 1
+    `;
+    if (!rows.length) throw new Error("Tarea no encontrada.");
+    const row = rows[0];
+    if (row.project_type !== "client" && row.customer_id == null) {
+      throw new Error("La columna Validar cliente solo está disponible en proyectos de cliente.");
+    }
+    if (row.status !== "validation") throw new Error("La tarea debe pasar primero por Validación interna.");
+    const reviews = Array.isArray(row.review_messages) ? row.review_messages : [];
+    const latestDecision = [...reviews].reverse().find((entry: any) =>
+      new Set(["internal_approved", "client_approved", "changes_requested"]).has(String(entry?.kind)),
+    );
+    if (latestDecision?.kind === "internal_approved") {
+      return { ...formatWorkItem(row), client_notification: { notified: 0, failed: 0, warning: "La tarea ya estaba pendiente del cliente" } };
+    }
+
+    const contactRows = await sql`
+      SELECT u.phone
+      FROM project_client_access access
+      INNER JOIN users u ON u.id=access.user_id AND u.active=TRUE
+      WHERE access.project_id=${row.project_id} AND COALESCE(u.phone,'') <> ''
+    `;
+    const phones = [...new Set([
+      ...contactRows.map((contact: any) => normalizeWhatsAppPhone(String(contact.phone))),
+      ...(row.customer_phone ? [normalizeWhatsAppPhone(String(row.customer_phone))] : []),
+    ].filter((phone) => phone.length > 4))];
+    if (!phones.length) throw new Error("El proyecto no tiene ningún contacto de cliente con teléfono para avisar por WhatsApp.");
+    const binding = await resolveWhatsAppDevice(companyId, user.id);
+    const whatsappStatus = await gowaStatus(binding.deviceId);
+    if (!whatsappStatus.connected && !whatsappStatus.logged_in) {
+      throw new Error("Conecta el WhatsApp de la empresa antes de enviar la tarea al cliente.");
+    }
+
+    const review = {
+      id: randomBytes(12).toString("hex"),
+      author_id: Number(user.id),
+      author_name: user.display_name,
+      message: "Validación interna superada. Pendiente de aprobación del cliente.",
+      created_at: new Date().toISOString(),
+      kind: "internal_approved",
+    };
+    const saved = await this.upsertWorkItem({
+      id: Number(row.id),
+      title: String(row.title),
+      status: "validation",
+      review_messages: [...reviews, review],
+    }, token);
+    const message = `Tienes una tarea pendiente de validación en «${String(row.project_name)}»:\n\n${String(row.title)}\n\nEntra en tu portal de cliente para aprobarla o solicitar cambios.`;
+    const deliveries = await Promise.allSettled(phones.map((phone) => gowaSendText(binding.deviceId, phone, message)));
+    const notified = deliveries.filter((delivery) => delivery.status === "fulfilled").length;
+    const failed = deliveries.length - notified;
+    await pluginAudit(companyId, user.id, "whatsapp_gowa", failed ? "client_validation_partial" : "client_validation_sent", "send_text", failed ? "error" : "ok", `Validación de tarea ${taskId}: ${notified} enviados, ${failed} fallidos`);
+    return {
+      ...saved,
+      client_notification: {
+        notified,
+        failed,
+        ...(failed ? { warning: `${failed} aviso${failed === 1 ? "" : "s"} de WhatsApp no se ha${failed === 1 ? "" : "n"} podido enviar` } : {}),
+      },
+    };
+  },
+
   async portal_get_project(reference: string, token: string | null): Promise<ClientPortalProject> {
     const user = await requireSession(token);
     if (user.role !== "cliente") throw new Error("Se requiere un perfil de cliente.");
@@ -4763,7 +5153,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
     const row = projectRows[0];
     const [taskRows, invoiceRows] = await Promise.all([
       sql`
-        SELECT wi.id,wi.parent_id,wi.title,wi.status,wi.priority,wi.due_date,
+        SELECT wi.id,wi.parent_id,wi.title,wi.status,wi.priority,wi.due_date,wi.review_messages,
                COALESCE(wi.due_date,parent.due_date) AS effective_due_date
         FROM work_items wi
         LEFT JOIN work_items parent ON parent.id=wi.parent_id
@@ -4782,12 +5172,57 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
       id: Number(row.id), uid: String(row.uid), name: String(row.name), description: String(row.description ?? ""),
       status: row.status, start_date: toIso(row.start_date) || null, target_date: toIso(row.target_date) || null,
       logo_data_url: String(row.logo_data_url ?? ""), milestones: management.milestones,
-      tasks: taskRows.map((task) => ({ id:Number(task.id),parent_id:task.parent_id==null?null:Number(task.parent_id),title:String(task.title),status:task.status,priority:task.priority,due_date:toIso(task.due_date)||null,effective_due_date:toIso(task.effective_due_date)||null })),
+      tasks: taskRows.map((task) => ({ id:Number(task.id),parent_id:task.parent_id==null?null:Number(task.parent_id),title:String(task.title),status:task.status,priority:task.priority,due_date:toIso(task.due_date)||null,effective_due_date:toIso(task.effective_due_date)||null,review_messages:Array.isArray(task.review_messages)?task.review_messages:[] })),
       invoices: invoiceRows.map((invoice) => ({ id:Number(invoice.id),series:String(invoice.series),number:String(invoice.number),kind:invoice.kind,status:invoice.status,issued_at:toIso(invoice.issued_at),operation_date:toIso(invoice.operation_date).slice(0,10),due_at:toIso(invoice.due_at)||null,total_cents:Number(invoice.total_cents),paid_cents:Number(invoice.paid_cents),payment_status:invoice.payment_status })),
       requests: (Array.isArray(row.requests) ? row.requests : []).filter(
         (request: WorkProjectRequest) => request.requester_user_id === Number(user.id),
       ),
     };
+  },
+
+  async portal_validate_task(reference: string, taskId: number, decision: "approved" | "changes_requested", message: string, token: string | null): Promise<ClientPortalProject> {
+    const user = await requireSession(token);
+    if (user.role !== "cliente") throw new Error("Se requiere un perfil de cliente.");
+    if (!new Set(["approved", "changes_requested"]).has(decision)) throw new Error("Decisión de validación no válida.");
+    const rows = await sql`
+      SELECT wi.* FROM work_items wi
+      INNER JOIN work_projects p ON p.id=wi.project_id
+      INNER JOIN project_client_access access ON access.project_id=p.id
+      WHERE access.user_id=${user.id} AND wi.id=${taskId}
+        AND (p.uid::text=${String(reference)} OR p.id::text=${String(reference)})
+      LIMIT 1
+    `;
+    if (!rows.length) throw new Error("Tarea no encontrada o sin acceso.");
+    const task = rows[0];
+    const reviews = Array.isArray(task.review_messages) ? task.review_messages : [];
+    const latestDecision = [...reviews].reverse().find((entry: any) =>
+      new Set(["internal_approved", "client_approved", "changes_requested"]).has(String(entry?.kind)),
+    );
+    if (task.status !== "validation" || latestDecision?.kind !== "internal_approved") throw new Error("La tarea todavía no está pendiente de validación del cliente.");
+    const text = String(message ?? "").trim();
+    if (decision === "changes_requested" && !text) throw new Error("Indica qué debe corregirse.");
+    const nextStatus = decision === "approved" ? "done" : "in_progress";
+    const review = {
+      id: randomBytes(12).toString("hex"), author_id:Number(user.id), author_name:user.display_name,
+      message:text || "Tarea validada por el cliente.", created_at:new Date().toISOString(),
+      kind:decision === "approved" ? "client_approved" : "changes_requested",
+    };
+    await sql`UPDATE work_items SET status=${nextStatus}, completed_at=${nextStatus === "done" ? new Date() : null}, review_messages=${sql.json([...reviews, review] as any)}, updated_at=NOW() WHERE id=${taskId}`;
+    if (task.parent_id != null) {
+      await sql`
+        UPDATE work_items parent SET
+          status=CASE
+            WHEN NOT EXISTS (SELECT 1 FROM work_items child WHERE child.parent_id=parent.id AND child.status NOT IN ('done','archived')) THEN 'done'
+            WHEN EXISTS (SELECT 1 FROM work_items child WHERE child.parent_id=parent.id AND child.status='validation') THEN 'validation'
+            WHEN EXISTS (SELECT 1 FROM work_items child WHERE child.parent_id=parent.id AND child.status='in_progress') THEN 'in_progress'
+            ELSE parent.status
+          END,
+          completed_at=CASE WHEN NOT EXISTS (SELECT 1 FROM work_items child WHERE child.parent_id=parent.id AND child.status NOT IN ('done','archived')) THEN COALESCE(parent.completed_at,NOW()) ELSE NULL END,
+          updated_at=NOW()
+        WHERE parent.id=${task.parent_id}
+      `;
+    }
+    return this.portal_get_project(reference, token);
   },
 
   async portal_create_request(reference: string, input: Partial<WorkProjectRequest>, token: string | null): Promise<WorkProjectRequest> {
@@ -5717,6 +6152,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   archive_work_item(id: number, token?: string | null) { return this.archiveWorkItem(id, token); },
   list_expense_documents(token?: string | null) { return this.listExpenseDocuments(token ?? null); },
   upsert_expense_document(input: any, token?: string | null) { return this.upsertExpenseDocument(input, token ?? null); },
+  reanalyze_expense_document(id: number, token?: string | null) { return this.reanalyzeExpenseDocument(id, token ?? null); },
   approve_expense_document(id: number, token?: string | null) { return this.approveExpenseDocument(id, token ?? null); },
   list_invoices(token?: string | null) { return this.listInvoices(token ?? null); },
   issue_invoice(input: InvoiceInput, token?: string | null) { return this.issueInvoice(input, token ?? null); },
@@ -5726,6 +6162,7 @@ No inventes datos fuera de este contexto. Si falta información, indícalo educa
   upsert_budget(input: BudgetInput, token?: string | null) { return this.upsertBudget(input, token ?? null); },
   update_budget_status(id: number, status: BudgetStatus, token?: string | null) { return this.updateBudgetStatus(id, status, token ?? null); },
   convert_budget_to_invoice(id: number, token?: string | null) { return this.convertBudgetToInvoice(id, token ?? null); },
+  reopen_invoiced_budget(id: number, token?: string | null) { return this.reopenInvoicedBudget(id, token ?? null); },
   delete_budget(id: number, token?: string | null) { return this.deleteBudget(id, token ?? null); },
   list_invoice_payments(invoiceId: number, token?: string | null) { return this.listInvoicePayments(invoiceId, token ?? null); },
   add_invoice_payment(input: InvoicePaymentInput, token?: string | null) { return this.addInvoicePayment(input, token ?? null); },

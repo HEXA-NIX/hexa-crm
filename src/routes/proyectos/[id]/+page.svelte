@@ -5,6 +5,7 @@
   import { api } from "$lib/api/client";
   import { session, isAdmin, currentUser, setActiveCompanyLocal } from "$lib/stores/session";
   import { showToast } from "$lib/stores/ui";
+  import { confirmDialog } from "$lib/stores/confirm-dialog";
   import type {
     WorkProject,
     WorkItem,
@@ -24,6 +25,7 @@
     WorkProjectRequestStatus,
     WorkProjectRequestType,
     WorkProjectKind,
+    CompanyFinancialSummary,
   } from "$lib/types";
   import { formatEUR, parseEurosInput } from "$lib/money";
   import Button from "$lib/components/Button.svelte";
@@ -33,12 +35,14 @@
   import Select from "$lib/components/Select.svelte";
   import Input from "$lib/components/Input.svelte";
   import DatePicker from "$lib/components/DatePicker.svelte";
+  import MoneyInput from "$lib/components/MoneyInput.svelte";
   import DateRangePicker from "$lib/components/DateRangePicker.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import RichDescription from "$lib/components/RichDescription.svelte";
   import RichDescriptionEditor from "$lib/components/RichDescriptionEditor.svelte";
   import { countImportedTasks, parseTaskImport } from "$lib/work/task-import";
   import { formatTaskForAi } from "$lib/work/task-ai-copy";
+  import { awaitsClientValidation } from "$lib/work/client-validation";
   import { calculateTaskProgress } from "$lib/projects/task-progress";
   import { projectStatusLabel, projectStatusTone } from "$lib/projects/presentation";
   import { buildProjectEconomicSeries } from "$lib/projects/project-economics";
@@ -50,6 +54,7 @@
   import ProjectProgress from "$lib/components/projects/ProjectProgress.svelte";
   import ProjectManagementCenter from "$lib/components/projects/ProjectManagementCenter.svelte";
   import SprintCenter from "$lib/components/projects/SprintCenter.svelte";
+  import ProjectGrants from "$lib/components/projects/ProjectGrants.svelte";
   import { normalizeProjectManagement } from "$lib/projects/management";
   import { currentSprint, sprintTasks } from "$lib/projects/sprints";
   import TechnologyPicker from "$lib/components/projects/TechnologyPicker.svelte";
@@ -91,6 +96,7 @@
   let customers = $state<Customer[]>([]);
   let cashMovements = $state<CashMovement[]>([]);
   let invoices = $state<Invoice[]>([]);
+  let companyFinancialSummaries = $state<CompanyFinancialSummary[]>([]);
   let loading = $state(true);
   let loadedDataProjectUid = $state("");
   let tasksLoaded = $state(false);
@@ -100,6 +106,7 @@
   let customersLoaded = $state(false);
   let cashMovementsLoaded = $state(false);
   let invoicesLoaded = $state(false);
+  let companyFinancialSummariesLoaded = $state(false);
   let sectionDataLoading = $state(false);
   let projectDescriptionExpanded = $state(false);
 
@@ -108,16 +115,18 @@
   );
   let workScope = $state<"sprint" | "backlog">("sprint");
   let draggedTaskId = $state<number | null>(null);
-  let dragOverStatus = $state<WorkStatus | null>(null);
+  type KanbanStatus = WorkStatus | "client_validation";
+  let dragOverStatus = $state<KanbanStatus | null>(null);
   let dragOverParentId = $state<number | null>(null);
   let suppressTaskClick = $state(false);
   let statusUpdatingTaskId = $state<number | null>(null);
   let kanbanScrollLeft = $state(0);
-  let kanbanAutoScrollFrame: number | null = null;
+  let kanbanAutoScrollTimer: ReturnType<typeof setInterval> | null = null;
   let kanbanAutoScrollSpeed = 0;
   let kanbanAutoScrollElement: HTMLElement | null = null;
-  let kanbanBoardElement: HTMLElement | null = null;
+  let kanbanBoardElement = $state<HTMLElement | null>(null);
   let kanbanDragCancelled = false;
+  let kanbanLastPointerX = 0;
   let collapsedParentIds = $state<Set<number>>(new Set());
   let collapsedInitializedProject = $state("");
 
@@ -346,17 +355,20 @@
       : null;
   });
 
-  const kanbanColumns: { status: WorkStatus; label: string; tone: "neutral" | "ok" | "warn" | "danger" | "info" | "ai" }[] = [
+  const kanbanColumns = $derived.by((): { status: KanbanStatus; label: string; tone: "neutral" | "ok" | "warn" | "danger" | "info" | "ai" }[] => [
     { status: "inbox", label: "Backlog", tone: "neutral" },
     { status: "planned", label: "Planificado", tone: "warn" },
     { status: "in_progress", label: "En progreso", tone: "ai" },
     { status: "blocked", label: "Bloqueado", tone: "danger" },
     { status: "validation", label: "Validación", tone: "info" },
+    ...(projectType(project?.project_type, project?.customer_id) === "client"
+      ? [{ status: "client_validation" as const, label: "Validar cliente", tone: "warn" as const }]
+      : []),
     { status: "done", label: "Hecho", tone: "ok" },
-  ];
+  ]);
   const visibleKanbanColumns = $derived(
     filterStatus === "archived"
-      ? [{ status: "archived" as WorkStatus, label: "Archivado", tone: "neutral" as const }]
+      ? [{ status: "archived" as KanbanStatus, label: "Archivado", tone: "neutral" as const }]
       : kanbanColumns,
   );
 
@@ -412,11 +424,12 @@
         customers = [];
         cashMovements = [];
         invoices = [];
-        tasksLoaded = categoriesLoaded = membersLoaded = projectsLoaded = customersLoaded = cashMovementsLoaded = invoicesLoaded = false;
+        companyFinancialSummaries = [];
+        tasksLoaded = categoriesLoaded = membersLoaded = projectsLoaded = customersLoaded = cashMovementsLoaded = invoicesLoaded = companyFinancialSummariesLoaded = false;
         loadedDataProjectUid = p.uid;
         projectDescriptionExpanded = false;
       } else if (refreshSection) {
-        tasksLoaded = categoriesLoaded = membersLoaded = projectsLoaded = customersLoaded = cashMovementsLoaded = invoicesLoaded = false;
+        tasksLoaded = categoriesLoaded = membersLoaded = projectsLoaded = customersLoaded = cashMovementsLoaded = invoicesLoaded = companyFinancialSummariesLoaded = false;
       }
       project = p;
       if (projectReference !== p.uid) {
@@ -456,6 +469,7 @@
     if (needsCustomers && !customersLoaded) requests.push(api.listCustomers(hexaCompanyId()).then((value) => { customers = value; customersLoaded = true; }));
     if (needsCash && !cashMovementsLoaded) requests.push(api.listCashMovements().then((value) => { cashMovements = value; cashMovementsLoaded = true; }));
     if (needsCash && !invoicesLoaded) requests.push(api.listInvoices().then((value) => { invoices = value; invoicesLoaded = true; }));
+    if (needsCash && !companyFinancialSummariesLoaded) requests.push(api.groupFinancialSummary().then((value) => { companyFinancialSummaries = value; companyFinancialSummariesLoaded = true; }));
     if (!requests.length) return;
     sectionDataLoading = true;
     try {
@@ -475,7 +489,7 @@
       case "equipo":
       case "actividad": return tasksLoaded && membersLoaded && projectsLoaded;
       case "solicitudes": return tasksLoaded && membersLoaded;
-      case "economia": return cashMovementsLoaded;
+      case "economia": return cashMovementsLoaded && invoicesLoaded && companyFinancialSummariesLoaded;
       case "documentos": return true;
     }
   });
@@ -553,6 +567,10 @@
       .filter((movement) => movement.kind === "expense")
       .reduce((sum, movement) => sum + movement.amount_cents, 0),
   );
+  const projectFinanceCompanyId = $derived(project?.task_company_id ?? project?.client_company_id ?? project?.company_id ?? 0);
+  const projectCompanyFinancialSummary = $derived(companyFinancialSummaries.find((summary) => summary.company_id === projectFinanceCompanyId));
+  const projectInvestmentCents = $derived(projectCompanyFinancialSummary?.investment_income_cents ?? 0);
+  const projectLoanCents = $derived(projectCompanyFinancialSummary?.loan_income_cents ?? 0);
   const economicSeries = $derived(project ? buildProjectEconomicSeries(project, projectCashMovements, new Date(), invoices) : []);
   const economicChartMax = $derived(Math.max(1, ...economicSeries.flatMap((point) => [point.planned_cents, point.billed_cents])));
   const economicPlannedPoints = $derived(economicSeries.map((point, index) => `${36 + index * (648 / Math.max(1, economicSeries.length - 1))},${112 - (point.planned_cents / economicChartMax) * 76}`).join(" "));
@@ -652,11 +670,21 @@
     return reviewerId ? members.find((member) => member.id === reviewerId)?.display_name ?? "Revisor" : "";
   }
 
-  function columnTasks(status: WorkStatus) {
+  function taskOrChildrenAwaitClient(task: WorkItem) {
+    return awaitsClientValidation(task) || taskSubtasks(task.id).some(awaitsClientValidation);
+  }
+
+  function columnTasks(status: KanbanStatus) {
     if (status === "archived") {
       return parentTasksForView.filter(
         (task) => task.status === "archived" || visibleSubtasks(task.id).some((child) => child.status === "archived"),
       );
+    }
+    if (status === "client_validation") {
+      return parentTasksForView.filter(taskOrChildrenAwaitClient);
+    }
+    if (status === "validation") {
+      return parentTasksForView.filter((task) => task.status === status && !taskOrChildrenAwaitClient(task));
     }
     return parentTasksForView.filter((task) => task.status === status);
   }
@@ -667,11 +695,16 @@
       case "planned": return "Planificado";
       case "in_progress": return "En progreso";
       case "validation": return "Validación";
+      case "client_validation": return "Validar cliente";
       case "blocked": return "Bloqueado";
       case "done": return "Hecho";
       case "archived": return "Archivado";
       default: return s;
     }
+  }
+
+  function visualWorkStatus(status: KanbanStatus): WorkStatus {
+    return status === "client_validation" ? "validation" : status;
   }
 
   function taskTypeLabel(t: string) {
@@ -1148,6 +1181,28 @@
     } finally { requestSaving = false; }
   }
 
+  async function deleteProjectRequest(request: WorkProjectRequest) {
+    if (!project || requestSaving) return;
+    const accepted = await confirmDialog(`¿Quieres eliminar «${request.title}»? Esta acción no se puede deshacer.`, {
+      title: "Eliminar solicitud",
+      confirmLabel: "Eliminar",
+      danger: true,
+    });
+    if (!accepted) return;
+    requestSaving = true;
+    try {
+      await persistProjectRequests((project.requests ?? []).filter((item) => item.id !== request.id));
+      requestsModalOpen = false;
+      resetRequestForm();
+      showToast("Solicitud eliminada");
+      await loadData();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo eliminar la solicitud", "err");
+    } finally {
+      requestSaving = false;
+    }
+  }
+
   async function convertRequestToTask(request: WorkProjectRequest) {
     if (!project || requestSaving || request.task_id) return;
     requestSaving = true;
@@ -1162,7 +1217,7 @@
       const updated = { ...request, status: "converted" as const, task_id: task.id, updated_at: now };
       await persistProjectRequests((project.requests ?? []).map((item) => item.id === request.id ? updated : item));
       requestsModalOpen = false;
-      showToast("Solicitud convertida en tarea");
+      showToast("Solicitud enviada al backlog");
       await loadData();
       openEditTaskModal(task);
     } catch (error) {
@@ -1379,7 +1434,18 @@
     }
     reviewSaving = true;
     try {
-      const status: WorkStatus = kind === "approved" ? "done" : kind === "changes_requested" ? "in_progress" : "validation";
+      const requiresClientApproval = kind === "approved" && projectType(project?.project_type, project?.customer_id) === "client";
+      if (requiresClientApproval) {
+        const saved = await api.submitTaskForClientValidation(editingTask.id);
+        editingTask = saved;
+        detailForm.status = saved.status;
+        tasks = tasks.map((task) => task.id === saved.id ? saved : task);
+        reviewDraft = "";
+        const notification = saved.client_notification;
+        showToast(notification?.warning ?? `Validación interna aprobada · ${notification?.notified ?? 0} aviso${notification?.notified === 1 ? "" : "s"} enviado${notification?.notified === 1 ? "" : "s"}`, notification?.failed ? "err" : undefined);
+        return;
+      }
+      const status: WorkStatus = kind === "approved" && !requiresClientApproval ? "done" : kind === "changes_requested" ? "in_progress" : "validation";
       const saved = await api.upsertWorkItem({
         id: editingTask.id,
         title: editingTask.title,
@@ -1390,7 +1456,7 @@
             id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}`,
             author_id: $currentUser?.id ?? 0,
             author_name: $currentUser?.display_name ?? "Usuario",
-            message: text || "Tarea validada y aprobada.",
+            message: text || (requiresClientApproval ? "Validación interna superada. Pendiente de aprobación del cliente." : "Tarea validada y aprobada."),
             created_at: new Date().toISOString(),
             kind,
           },
@@ -1511,7 +1577,30 @@
     }
   }
 
-  async function updateTaskStatus(task: WorkItem, newStatus: WorkStatus) {
+  async function updateTaskStatus(task: WorkItem, newStatus: KanbanStatus) {
+    if (newStatus === "client_validation") {
+      if (!$isAdmin) {
+        showToast("Solo un administrador puede enviar tareas a validar al cliente", "err");
+        return;
+      }
+      if (task.status !== "validation") {
+        showToast("La tarea debe pasar primero por Validación interna", "err");
+        return;
+      }
+      if (awaitsClientValidation(task)) return;
+      statusUpdatingTaskId = task.id;
+      try {
+        const saved = await api.submitTaskForClientValidation(task.id);
+        tasks = syncParentStatuses(tasks.map((item) => item.id === saved.id ? { ...item, ...saved } : item), [saved.parent_id]);
+        const notification = saved.client_notification;
+        showToast(notification?.warning ?? `Tarea enviada al cliente · ${notification?.notified ?? 0} aviso${notification?.notified === 1 ? "" : "s"} por WhatsApp`, notification?.failed ? "err" : undefined);
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "No se pudo solicitar la validación del cliente", "err");
+      } finally {
+        statusUpdatingTaskId = null;
+      }
+      return;
+    }
     if (task.status === newStatus || statusUpdatingTaskId === task.id) return;
     const previousTasks = tasks;
     const previousRect = taskCardRect(task.id);
@@ -1587,6 +1676,7 @@
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", String(task.id));
     draggedTaskId = task.id;
+    kanbanLastPointerX = event.clientX || Math.max(0, event.screenX - window.screenX);
     kanbanDragCancelled = false;
     suppressTaskClick = true;
     document.addEventListener("dragover", handleKanbanBoardDragOver, true);
@@ -1597,8 +1687,8 @@
   function stopKanbanAutoScroll() {
     kanbanAutoScrollSpeed = 0;
     kanbanAutoScrollElement = null;
-    if (kanbanAutoScrollFrame !== null) cancelAnimationFrame(kanbanAutoScrollFrame);
-    kanbanAutoScrollFrame = null;
+    if (kanbanAutoScrollTimer !== null) clearInterval(kanbanAutoScrollTimer);
+    kanbanAutoScrollTimer = null;
   }
 
   function runKanbanAutoScroll() {
@@ -1606,26 +1696,51 @@
       stopKanbanAutoScroll();
       return;
     }
+    const previous = kanbanAutoScrollElement.scrollLeft;
     kanbanAutoScrollElement.scrollLeft += kanbanAutoScrollSpeed;
     kanbanScrollLeft = kanbanAutoScrollElement.scrollLeft;
-    kanbanAutoScrollFrame = requestAnimationFrame(runKanbanAutoScroll);
+    if (kanbanAutoScrollElement.scrollLeft === previous) {
+      stopKanbanAutoScroll();
+      return;
+    }
+  }
+
+  function ensureKanbanAutoScroll() {
+    if (!kanbanAutoScrollElement || kanbanAutoScrollSpeed === 0) return;
+    // Chrome on macOS can suspend requestAnimationFrame during native drag.
+    // A short interval keeps scrolling independently from the render loop.
+    if (kanbanAutoScrollTimer === null) {
+      kanbanAutoScrollTimer = setInterval(runKanbanAutoScroll, 24);
+    }
+  }
+
+  function startKanbanAutoScroll(direction: -1 | 1, event?: DragEvent) {
+    event?.preventDefault();
+    event?.stopPropagation();
+    if (draggedTaskId === null || !kanbanBoardElement) return;
+    kanbanAutoScrollElement = kanbanBoardElement;
+    kanbanAutoScrollSpeed = direction * 28;
+    runKanbanAutoScroll();
+    ensureKanbanAutoScroll();
   }
 
   function handleKanbanBoardDragOver(event: DragEvent) {
     if (draggedTaskId === null || !kanbanBoardElement) return;
     if (event.type === "dragover") event.preventDefault();
-    if (event.clientX === 0 && event.clientY === 0) return;
     const board = kanbanBoardElement;
     const rect = board.getBoundingClientRect();
-    if (event.clientY < rect.top || event.clientY > rect.bottom) {
-      stopKanbanAutoScroll();
-      return;
-    }
+    // Safari/macOS often reports clientX=0 during native HTML drag. screenX
+    // remains available, so use it as a fallback and retain the last valid
+    // coordinate when the browser emits an empty drag frame.
+    const screenRelativeX = event.screenX ? event.screenX - window.screenX : 0;
+    const pointerX = event.clientX || screenRelativeX || kanbanLastPointerX;
+    if (!pointerX) return;
+    kanbanLastPointerX = pointerX;
     const visibleLeft = Math.max(0, rect.left);
     const visibleRight = Math.min(window.innerWidth, rect.right);
     const edgeSize = Math.min(140, (visibleRight - visibleLeft) * 0.2);
-    const leftDistance = event.clientX - visibleLeft;
-    const rightDistance = visibleRight - event.clientX;
+    const leftDistance = pointerX - visibleLeft;
+    const rightDistance = visibleRight - pointerX;
     const maxSpeed = 22;
     kanbanAutoScrollElement = board;
     kanbanAutoScrollSpeed = leftDistance < edgeSize
@@ -1635,10 +1750,9 @@
         : 0;
     if (kanbanAutoScrollSpeed === 0) {
       stopKanbanAutoScroll();
-    } else if (kanbanAutoScrollFrame === null) {
-      board.scrollLeft += kanbanAutoScrollSpeed;
-      kanbanScrollLeft = board.scrollLeft;
-      kanbanAutoScrollFrame = requestAnimationFrame(runKanbanAutoScroll);
+    } else {
+      runKanbanAutoScroll();
+      ensureKanbanAutoScroll();
     }
   }
 
@@ -1666,19 +1780,20 @@
     dragOverStatus = null;
     dragOverParentId = null;
     kanbanDragCancelled = false;
+    kanbanLastPointerX = 0;
     setTimeout(() => {
       suppressTaskClick = false;
     }, 0);
   }
 
-  function handleColumnDragOver(event: DragEvent, status: WorkStatus) {
+  function handleColumnDragOver(event: DragEvent, status: KanbanStatus) {
     if (draggedTaskId === null) return;
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
     dragOverStatus = status;
   }
 
-  function handleTaskDrop(event: DragEvent, status: WorkStatus) {
+  function handleTaskDrop(event: DragEvent, status: KanbanStatus) {
     event.preventDefault();
     finishKanbanDragTracking();
     if (kanbanDragCancelled) {
@@ -2123,6 +2238,28 @@
         {/if}
         </div>
       {/if}
+      <section class="mt-5 rounded-xl border border-cyan-300/20 bg-cyan-500/[0.025] p-4">
+        <div>
+          <span class="section-label">FINANCIACIÓN DE LA EMPRESA</span>
+          <p class="mt-1 text-xs text-[var(--color-muted)]">Vista consolidada de inversión y préstamos recibidos por la empresa vinculada al proyecto.</p>
+        </div>
+        <div class="mt-4 grid gap-3 sm:grid-cols-3">
+          <div class="rounded-xl border border-purple-300/15 bg-purple-500/[0.05] p-4">
+            <p class="text-[10px] font-bold uppercase tracking-wider text-purple-200/70">Inversión recibida</p>
+            <strong class="mt-2 block text-xl text-purple-200">{formatEUR(projectInvestmentCents)}</strong>
+          </div>
+          <div class="rounded-xl border border-cyan-300/15 bg-cyan-500/[0.05] p-4">
+            <p class="text-[10px] font-bold uppercase tracking-wider text-cyan-200/70">Préstamos recibidos</p>
+            <strong class="mt-2 block text-xl text-cyan-200">{formatEUR(projectLoanCents)}</strong>
+          </div>
+          <div class="rounded-xl border border-emerald-300/15 bg-emerald-500/[0.05] p-4">
+            <p class="text-[10px] font-bold uppercase tracking-wider text-emerald-200/70">Financiación recibida</p>
+            <strong class="mt-2 block text-xl text-emerald-200">{formatEUR(projectInvestmentCents + projectLoanCents)}</strong>
+          </div>
+        </div>
+        <p class="mt-3 text-[11px] text-[var(--color-muted-dim)]">Las rondas, socios y préstamos se administran desde Finanzas → Financiación.</p>
+      </section>
+      <ProjectGrants {project} readonly />
       </details>
     </Card>
     {/if}
@@ -2178,7 +2315,7 @@
     {/if}
 
     {#if activeProjectSection === "trabajo"}
-    <SprintCenter project={project} {tasks} {members} onsaved={(saved) => (project = saved)} />
+    <SprintCenter project={project} {tasks} {members} onsaved={(saved) => (project = saved)} ontaskupdated={(saved) => (tasks = tasks.map((task) => task.id === saved.id ? saved : task))} />
     <!-- Project work sections -->
     <div id="project-work-sections" class="mb-3 flex flex-wrap items-end justify-between gap-2">
       <div>
@@ -2432,7 +2569,7 @@
         </div>
         <div
           bind:this={kanbanBoardElement}
-          class="flex w-full min-w-0 max-w-full snap-x items-stretch gap-4 overflow-x-auto pb-4"
+          class="flex w-full min-w-0 max-w-full items-stretch gap-4 overflow-x-auto pb-4 {draggedTaskId === null ? 'snap-x' : 'snap-none'}"
           data-kanban-horizontal-scroll
           onscroll={(event) => (kanbanScrollLeft = event.currentTarget.scrollLeft)}
         >
@@ -2548,7 +2685,7 @@
 
                     {#if task.assignee_name || taskDueDate(task)}
                       <div class="flex items-center justify-between text-[10px] text-[var(--color-muted-dim)] pt-1 border-t border-white/5">
-                        {#if task.assignee_name}<AssigneeAvatar name={task.assignee_name} avatar={task.assignee_avatar_data_url} size="xs" status={col.status} />{:else}<span></span>{/if}
+                        {#if task.assignee_name}<AssigneeAvatar name={task.assignee_name} avatar={task.assignee_avatar_data_url} size="xs" status={visualWorkStatus(col.status)} />{:else}<span></span>{/if}
                         <span class={isTaskOverdue(task) ? "font-semibold text-rose-300" : isTaskDueSoon(task) ? "font-semibold text-amber-300" : ""}>{taskDueDate(task) ? `📅 ${formatDate(taskDueDate(task))}` : ""}</span>
                       </div>
                     {/if}
@@ -2564,7 +2701,7 @@
                             tabindex="0"
                             draggable={statusUpdatingTaskId !== child.id}
                             aria-label={`Arrastrar subtarea ${child.title}`}
-                            class="group/subtask relative flex w-full cursor-grab items-center gap-2 rounded-md border-l-2 px-2 py-1.5 text-left transition hover:z-[70] active:cursor-grabbing {statusBorderClass(col.status)} {isTaskOverdue(child) ? '!border-l-rose-500 ring-1 ring-rose-500/20' : isTaskDueSoon(child) ? '!border-l-amber-400 ring-1 ring-amber-400/20' : ''} {draggedTaskId === child.id ? 'scale-[0.98] opacity-40' : ''} {statusUpdatingTaskId === child.id ? 'cursor-wait opacity-60' : ''}"
+                            class="group/subtask relative flex w-full cursor-grab items-center gap-2 rounded-md border-l-2 px-2 py-1.5 text-left transition hover:z-[70] active:cursor-grabbing {statusBorderClass(visualWorkStatus(col.status))} {isTaskOverdue(child) ? '!border-l-rose-500 ring-1 ring-rose-500/20' : isTaskDueSoon(child) ? '!border-l-amber-400 ring-1 ring-amber-400/20' : ''} {draggedTaskId === child.id ? 'scale-[0.98] opacity-40' : ''} {statusUpdatingTaskId === child.id ? 'cursor-wait opacity-60' : ''}"
                             onclick={(event) => {
                               event.stopPropagation();
                               openEditTaskModal(child);
@@ -2582,7 +2719,7 @@
                             <span class="text-[9px] text-[var(--color-muted-dim)]" aria-hidden="true">⠇⠇</span>
                             <span class="h-1.5 w-1.5 shrink-0 rounded-full {statusDotClass(child.status)}"></span>
                             <span class="min-w-[7rem] basis-0 flex-1 truncate text-[10px] text-[var(--color-muted)] {child.status === 'done' ? 'line-through opacity-60' : ''}" title={child.title}>{child.title}</span>
-                            {#if child.assignee_name}<AssigneeAvatar name={child.assignee_name} avatar={child.assignee_avatar_data_url} size="xs" status={col.status} />{/if}
+                            {#if child.assignee_name}<AssigneeAvatar name={child.assignee_name} avatar={child.assignee_avatar_data_url} size="xs" status={visualWorkStatus(col.status)} />{/if}
                             <div class="pointer-events-none absolute bottom-[calc(100%+0.5rem)] z-[100] hidden w-[30rem] max-w-[calc(100vw-3rem)] overflow-hidden rounded-2xl border border-[var(--color-border-strong)] bg-[var(--color-obsidian-elevated)] shadow-[0_24px_70px_rgba(0,0,0,0.65)] group-hover/subtask:block {colIndex >= 3 ? 'right-0' : 'left-0'}">
                               <div class="border-b border-[var(--color-border)] bg-[var(--color-obsidian-panel)] px-5 py-4">
                                 <div class="mb-1.5 flex items-center gap-2">
@@ -2617,6 +2754,22 @@
           </div>
         {/each}
         </div>
+        {#if draggedTaskId !== null}
+          <div
+            class="fixed inset-y-0 left-0 z-[300] w-24 bg-gradient-to-r from-purple-500/15 to-transparent"
+            aria-hidden="true"
+            ondragenter={(event) => startKanbanAutoScroll(-1, event)}
+            ondragover={(event) => startKanbanAutoScroll(-1, event)}
+            ondragleave={stopKanbanAutoScroll}
+          ></div>
+          <div
+            class="fixed inset-y-0 right-0 z-[300] w-24 bg-gradient-to-l from-purple-500/15 to-transparent"
+            aria-hidden="true"
+            ondragenter={(event) => startKanbanAutoScroll(1, event)}
+            ondragover={(event) => startKanbanAutoScroll(1, event)}
+            ondragleave={stopKanbanAutoScroll}
+          ></div>
+        {/if}
       </div>
     {/if}
     {/if}
@@ -2722,7 +2875,7 @@
     {#if editProjectForm.project_type === "client"}
       <div class="space-y-1">
         <label for="edit-project-value" class="text-xs font-medium text-[var(--color-muted)]">Valor contratado (€)</label>
-        <input id="edit-project-value" type="text" inputmode="decimal" bind:value={editProjectForm.value} placeholder="0,00" class="field w-full text-sm" />
+        <MoneyInput id="edit-project-value" bind:value={editProjectForm.value} placeholder="0,00" class="text-sm" ariaLabel="Valor económico estimado (€)" />
       </div>
     {:else}
       <div class="space-y-3 rounded-xl border border-[var(--color-border)] p-3">
@@ -2735,7 +2888,7 @@
         </div>
         {#each editProjectForm.milestones as milestone, index}
           <div class="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
-            <input class="field w-full text-sm" inputmode="decimal" bind:value={milestone.amount} placeholder="Importe (€)" />
+            <MoneyInput class="text-sm" bind:value={milestone.amount} placeholder="Importe (€)" />
             <Select
               options={availableMilestoneMonths(milestoneMonthOptions, editProjectForm.milestones, index)}
               bind:value={milestone.target_month}
@@ -2816,7 +2969,8 @@
         <Button type="button" variant="ghost" disabled={requestSaving} onclick={() => (requestsModalOpen = false)}>Cancelar</Button>
         {#if editingRequestId}
           {@const requestToConvert = (project?.requests ?? []).find((item) => item.id === editingRequestId)}
-          {#if requestToConvert && !requestToConvert.task_id && ["accepted", "reviewing"].includes(requestForm.status)}<Button type="button" variant="secondary" disabled={requestSaving} onclick={() => convertRequestToTask(requestToConvert)}>Convertir en tarea</Button>{/if}
+          <Button type="button" variant="danger" disabled={requestSaving} onclick={() => requestToConvert && deleteProjectRequest(requestToConvert)}>Eliminar</Button>
+          {#if requestToConvert && !requestToConvert.task_id && requestForm.status === "accepted"}<Button type="button" variant="secondary" disabled={requestSaving} onclick={() => convertRequestToTask(requestToConvert)}>Enviar al backlog</Button>{/if}
           {#if requestToConvert?.task_id}<Button type="button" variant="secondary" onclick={() => { const linkedTask = tasks.find((item) => item.id === requestToConvert.task_id); requestsModalOpen = false; if (linkedTask) openEditTaskModal(linkedTask); }}>Abrir tarea vinculada</Button>{/if}
         {/if}
         <Button type="submit" disabled={requestSaving}>{requestSaving ? "Guardando…" : editingRequestId ? "Guardar cambios" : "Registrar solicitud"}</Button>
@@ -2928,7 +3082,7 @@
   >
     <div class="space-y-1">
       <label for="project-cash-amount" class="text-xs font-medium text-[var(--color-muted)]">Importe (€)</label>
-      <input id="project-cash-amount" class="field w-full" inputmode="decimal" bind:value={cashForm.amount} placeholder="0,00" required />
+      <MoneyInput bind:value={cashForm.amount} placeholder="0,00" required ariaLabel="Importe (€)" />
     </div>
     <div class="space-y-1">
       <label for="project-cash-description" class="text-xs font-medium text-[var(--color-muted)]">Concepto</label>
@@ -3225,7 +3379,11 @@
           <div class="flex flex-wrap justify-end gap-2">
             <Button type="button" variant="ghost" disabled={reviewSaving} onclick={() => addReviewMessage("comment")}>Añadir comentario</Button>
             <Button type="button" variant="danger" disabled={reviewSaving} onclick={() => addReviewMessage("changes_requested")}>Solicitar cambios</Button>
-            <Button type="button" variant="primary" disabled={reviewSaving} onclick={() => addReviewMessage("approved")}>Aprobar y marcar hecha</Button>
+            {#if projectType(project?.project_type, project?.customer_id) === "client" && awaitsClientValidation(editingTask)}
+              <Badge tone="info">Pendiente de validación del cliente</Badge>
+            {:else}
+              <Button type="button" variant="primary" disabled={reviewSaving} onclick={() => addReviewMessage("approved")}>{projectType(project?.project_type, project?.customer_id) === "client" ? "Aprobar internamente" : "Aprobar y marcar hecha"}</Button>
+            {/if}
           </div>
         {/if}
       </section>
