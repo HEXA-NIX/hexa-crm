@@ -1,4 +1,7 @@
 <script lang="ts">
+  import DatePicker from "$lib/components/DatePicker.svelte";
+  import MoneyInput from "$lib/components/MoneyInput.svelte";
+  import { isMoneyLabel } from "$lib/money-input";
   let {
     label = "",
     type = "text",
@@ -8,6 +11,8 @@
     step = undefined as string | undefined,
     min = undefined as string | number | undefined,
     class: className = "",
+    "aria-label": ariaLabel = undefined as string | undefined,
+    oninput,
   }: {
     label?: string;
     type?: string;
@@ -17,6 +22,8 @@
     step?: string;
     min?: string | number;
     class?: string;
+    "aria-label"?: string;
+    oninput?: (event: Event & { currentTarget: HTMLInputElement }) => void;
   } = $props();
 </script>
 
@@ -24,13 +31,29 @@
   {#if label}
     <span class="font-medium text-[var(--color-muted)]">{label}</span>
   {/if}
-  <input
+  {#if type === "date" || type === "month"}
+    <DatePicker
+      type={type as "date" | "month"}
+      value={String(value ?? "")}
+      {placeholder}
+      {required}
+      min={min == null ? undefined : String(min)}
+      oninput={(next) => {
+        value = next;
+        oninput?.({ currentTarget: { value: next } } as unknown as Event & { currentTarget: HTMLInputElement });
+      }}
+    />
+  {:else if isMoneyLabel(label, placeholder)}
+    <MoneyInput bind:value {placeholder} {required} ariaLabel={ariaLabel || label || "Importe en euros"} {oninput} />
+  {:else}<input
+    aria-label={ariaLabel}
     {type}
     {placeholder}
     {required}
     {step}
     {min}
     bind:value
+    {oninput}
     class="field w-full"
-  />
+  />{/if}
 </label>

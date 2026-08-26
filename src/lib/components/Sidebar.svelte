@@ -4,8 +4,9 @@
   import Logo from "$lib/components/Logo.svelte";
   import { PRODUCT_DISPLAY_NAME, PRODUCT_TAGLINE } from "$lib/product";
   import { api } from "$lib/api/client";
-  import { activeCompany } from "$lib/stores/session";
-  import { PROJECT_COMPANY_CODE } from "$lib/company/context";
+  import { activeCompany, isAdmin } from "$lib/stores/session";
+  import type { WorkProject } from "$lib/types";
+  import { isProjectCompany, isProjectPortfolioCompany } from "$lib/company/context";
 
   let {
     forceExpanded = false,
@@ -17,48 +18,94 @@
     /** Cerrar sesión (layout wire). */
     onLogout?: () => void | Promise<void>;
   } = $props();
+  let salesMenuOpen = $state(false);
+  let workspaceProjects = $state<WorkProject[]>([]);
 
   const collapsed = $derived(forceExpanded ? false : $sidebarCollapsed);
   const showWork = $derived(
-    api.supportsWorkManagement() && $activeCompany?.code === PROJECT_COMPANY_CODE,
+    api.supportsWorkManagement() && isProjectCompany($activeCompany),
   );
+  const directProject = $derived(
+    showWork && !isProjectPortfolioCompany($activeCompany) && workspaceProjects.length === 1
+      ? workspaceProjects[0]
+      : null,
+  );
+  const projectEntry = $derived({
+    href: directProject ? `/proyectos/${directProject.uid}` : "/proyectos",
+    label: directProject ? "Gestión" : "Proyectos",
+    icon: "projects",
+  });
+  const projectGroup = $derived(directProject
+    ? { label: "GESTIÓN", links: [projectEntry, { href: "/clientes", label: "Clientes", icon: "customers" }, { href: "/trabajo", label: "Trabajo", icon: "projects" }, { href: "/roadmap", label: "Roadmap", icon: "sales" }] }
+    : { label: "PROYECTOS", links: [projectEntry, { href: "/clientes", label: "Clientes", icon: "customers" }, { href: "/trabajo", label: "Trabajo", icon: "projects" }, { href: "/roadmap", label: "Roadmap", icon: "sales" }] });
+
+  $effect(() => {
+    const companyId = $activeCompany?.id ?? null;
+    void $page.url.pathname;
+    if (!showWork || companyId == null) {
+      workspaceProjects = [];
+      return;
+    }
+    const requestedCompanyId = companyId;
+    void api.listWorkProjects().then((projects) => {
+      if (($activeCompany?.id ?? null) !== requestedCompanyId) return;
+      workspaceProjects = projects;
+    }).catch(() => {
+      if (($activeCompany?.id ?? null) === requestedCompanyId) workspaceProjects = [];
+    });
+  });
+
+  const iconPaths: Record<string, string> = {
+    pulse: '<path d="M4 17V9m5 8V5m5 12v-6m5 6V3"/><path d="m4 6 5-3 5 4 5-4"/>',
+    sales: '<path d="M4 19V5h16v14z"/><path d="M7 15l3-3 2 2 5-5"/>',
+    invoice: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6M9 16h4"/>',
+    cash: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3"/><path d="M7 9h.01M17 15h.01"/>',
+    inventory: '<path d="m4 8 8-4 8 4-8 4z"/><path d="M4 8v8l8 4 8-4V8M12 12v8"/>',
+    customers: '<circle cx="9" cy="8" r="3"/><path d="M3 19c.5-3 2.5-5 6-5s5.5 2 6 5M16 5a3 3 0 0 1 0 6M17 14c2.5.5 3.5 2 4 5"/>',
+    projects: '<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 5V3h8v2M8 10h8M8 14h5"/>',
+    taxes: '<path d="M5 3h14v18l-3-2-4 2-4-2-3 2z"/><path d="M8 15l2.5-2.5 2 1.8L16 11l1.5 2"/><path d="M8 8h.01"/>',
+    financing: '<path d="M4 8h16M6 8v10m4-10v10m4-10v10m4-10v10M3 19h18M12 3l9 4H3z"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.5-2.3 1a7 7 0 0 0-1.7-1L14.5 3h-5L9 6a7 7 0 0 0-1.7 1L5 6 3 9.5 5.1 11a7 7 0 0 0 0 2L3 14.5 5 18l2.3-1a7 7 0 0 0 1.7 1l.5 3h5l.5-3a7 7 0 0 0 1.7-1l2.3 1 2-3.5-2.1-1.5a7 7 0 0 0 .1-1z"/>',
+  };
+
+  function iconSvg(name: string) {
+    return `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">${iconPaths[name] ?? iconPaths.sales}</svg>`;
+  }
 
   const navigationGroups = $derived([
     {
       label: "VISIÓN",
-      links: [{ href: "/", label: "Pulso", icon: "⌁" }],
+      links: [{ href: "/", label: "Dashboard", icon: "pulse" }],
     },
     ...(!showWork
       ? [{
           label: "OPERACIÓN",
           links: [
-            { href: "/ventas", label: "Ventas", icon: "○" },
-            { href: "/inventario", label: "Inventario", icon: "□" },
-            { href: "/clientes", label: "Clientes", icon: "◇" },
+            { href: "/inventario", label: "Inventario", icon: "inventory" },
+            { href: "/clientes", label: "Clientes", icon: "customers" },
           ],
         }]
       : []),
     {
       label: "FINANZAS",
       links: [
-        { href: "/caja", label: "Caja", icon: "€" },
-        { href: "/impuestos", label: "Impuestos", icon: "%" },
+        { href: "/caja", label: "Caja", icon: "cash" },
+        { href: "/financiacion", label: "Financiación", icon: "financing" },
+        { href: "/ventas", label: "Ventas", icon: "sales" },
+        { href: "/gastos", label: "Facturas recibidas", icon: "invoice" },
+        { href: "/impuestos", label: "Impuestos", icon: "taxes" },
       ],
     },
-    ...(showWork
+    ...(showWork ? [projectGroup] : []),
+    ...($isAdmin
       ? [{
-          label: "PROYECTOS",
-          links: [
-            { href: "/proyectos", label: "Proyectos", icon: "◫" },
-            { href: "/clientes", label: "Clientes", icon: "◇" },
-            { href: "/trabajo", label: "Trabajo", icon: "☑" },
-            { href: "/roadmap", label: "Roadmap", icon: "↗" },
-          ],
+          label: "PERSONAS",
+          links: [{ href: "/personal", label: "Personal", icon: "customers" }],
         }]
       : []),
     {
       label: "SISTEMA",
-      links: [{ href: "/ajustes", label: "Ajustes", icon: "⚙" }],
+      links: [{ href: "/ajustes", label: "Ajustes", icon: "settings" }],
     },
   ]);
 
@@ -74,12 +121,25 @@
   function active(href: string, path: string) {
     const base = href.split("?")[0];
     if (base === "/") return path === "/";
+    if (href.includes("?")) return path === href;
     return path.startsWith(base);
   }
 
   function nav() {
+    salesMenuOpen = false;
     onNavigate?.();
   }
+
+  function toggleSalesMenu(event: MouseEvent) {
+    if (collapsed) return;
+    event.preventDefault();
+    salesMenuOpen = !salesMenuOpen;
+  }
+
+  $effect(() => {
+    const path = $page.url.pathname;
+    salesMenuOpen = ["/facturas", "/presupuestos", "/servicios"].some((prefix) => path.startsWith(prefix));
+  });
 
   async function logout() {
     onNavigate?.();
@@ -91,16 +151,24 @@
   class="crm-sidebar flex h-full w-full flex-col transition-all duration-300 {collapsed ? 'md:w-[76px]' : 'md:w-[17.5rem]'}"
   data-sidebar
 >
-  <div class="flex items-center gap-3 border-b border-[var(--color-border)] px-5 py-5 sm:py-6">
-    <Logo size={40} class="rounded-xl shadow-[0_0_20px_rgba(168,85,247,0.25)]" />
-    {#if !collapsed}
-      <div class="min-w-0">
-        <p class="truncate text-sm font-semibold tracking-wide text-[var(--color-text)]">
-          {PRODUCT_DISPLAY_NAME}
-        </p>
-        <p class="truncate text-[11px] text-[var(--color-muted-dim)]" title={PRODUCT_TAGLINE}>
-          RETAIL OPERATING SYSTEM
-        </p>
+  <div class="border-b border-[var(--color-border)] px-5 py-5 sm:py-6">
+    {#if !collapsed && $activeCompany}
+      <div class="flex items-center gap-3">
+        <img src={$activeCompany.logo_data_url || "/logo-mark.svg"} alt="Logo de {$activeCompany.trade_name}" class="company-logo-frame h-10 w-10 shrink-0 rounded-xl object-contain" />
+        <div class="min-w-0">
+          <p class="truncate text-base font-semibold text-[var(--color-text)]">{$activeCompany.trade_name}</p>
+          <p class="truncate text-[10px] uppercase tracking-[0.16em] text-[var(--color-muted-dim)]">{$activeCompany.code} · HEXA CRM</p>
+        </div>
+      </div>
+    {:else}
+      <div class="flex items-center gap-3">
+        <Logo size={40} class="rounded-xl shadow-[0_0_20px_rgba(168,85,247,0.25)]" />
+        {#if !collapsed}
+          <div class="min-w-0">
+            <p class="truncate text-sm font-semibold tracking-wide text-[var(--color-text)]">{PRODUCT_DISPLAY_NAME}</p>
+            <p class="truncate text-[11px] text-[var(--color-muted-dim)]" title={PRODUCT_TAGLINE}>RETAIL OPERATING SYSTEM</p>
+          </div>
+        {/if}
       </div>
     {/if}
   </div>
@@ -115,28 +183,44 @@
           {/if}
           <div class="space-y-0.5">
             {#each group.links as link}
+              <div class="sidebar-link-wrap">
               <a
                 href={link.href}
-                onclick={nav}
-                class="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-all duration-200 {active(
+                onclick={(event) => { if (link.label === "Ventas") toggleSalesMenu(event); else nav(); }}
+                class="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-all duration-200 {link.label === 'Ventas' ? 'sidebar-sales-trigger' : ''} {group.label === 'VENTAS' && link.label !== 'Ventas' ? 'ml-7 pl-3 text-[var(--color-muted)]' : ''} {active(
                   link.href,
-                  $page.url.pathname
+                  $page.url.pathname + $page.url.search
                 )
                   ? 'nav-active'
                   : 'text-[var(--color-muted)] hover:bg-purple-500/[0.08] hover:text-[var(--color-purple-bright)]'}"
                 title={link.label}
               >
-                <span
-                  class="w-5 text-center text-base opacity-90 {active(link.href, $page.url.pathname)
+                {#if link.icon}<span
+                  class="sidebar-icon w-5 text-center text-base opacity-90 {active(link.href, $page.url.pathname + $page.url.search)
                     ? 'text-radiant'
                     : ''}"
                 >
-                  {link.icon}
-                </span>
+                  {@html iconSvg(link.icon)}
+                </span>{/if}
                 {#if !collapsed}
                   <span class="font-medium">{link.label}</span>
+                  {#if link.label === "Ventas"}
+                    <span class="ml-auto text-[10px] transition-transform {salesMenuOpen ? 'rotate-180' : ''}" aria-hidden="true">⌄</span>
+                  {/if}
                 {/if}
               </a>
+              {#if link.label === "Ventas" && salesMenuOpen && !collapsed}
+                <div class="sidebar-sales-children" aria-label="Opciones de ventas">
+                  {#each [
+                    { href: "/facturas", label: "Facturas" },
+                    { href: "/presupuestos", label: "Presupuestos" },
+                    { href: "/servicios", label: "Servicios" },
+                  ] as child}
+                    <a href={child.href} onclick={nav} aria-current={active(child.href, $page.url.pathname) ? "page" : undefined} class:nav-active={active(child.href, $page.url.pathname)}>{child.label}</a>
+                  {/each}
+                </div>
+              {/if}
+              </div>
             {/each}
           </div>
         </section>
@@ -187,3 +271,12 @@
     {/if}
   </div>
 </aside>
+
+<style>
+  .sidebar-icon :global(svg) { width:1.25rem; height:1.25rem; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; vertical-align:middle; }
+  .sidebar-link-wrap { position:relative; }
+  .sidebar-sales-children { margin:.15rem 0 .35rem 2.45rem; padding-left:.65rem; border-left:1px solid var(--color-border); }
+  .sidebar-sales-children a { display:block; border-radius:.55rem; color:var(--color-muted); padding:.45rem .65rem; font-size:.78rem; transition:background .2s,color .2s; }
+  .sidebar-sales-children a:hover { background:var(--color-purple-soft); color:var(--color-purple-bright); }
+  .sidebar-sales-children a.nav-active { color:var(--color-purple-bright); background:var(--color-purple-soft); }
+</style>

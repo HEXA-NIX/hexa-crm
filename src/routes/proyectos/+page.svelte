@@ -3,25 +3,34 @@
   import { session, isAdmin } from "$lib/stores/session";
   import { showToast } from "$lib/stores/ui";
   import { formatEUR, parseEurosInput } from "$lib/money";
-  import type { CashMovement, Customer, Settings, WorkProject, WorkItem, WorkProjectInput } from "$lib/types";
+  import type { CashMovement, Customer, Invoice, Settings, WorkProject, WorkItem, WorkProjectInput, WorkProjectKind } from "$lib/types";
   import { economicGoalKey, economicGoalProgress, monthlyEconomicGoal } from "$lib/projects/economic-goal";
   import { calculateTaskProgress } from "$lib/projects/task-progress";
   import { projectStatusLabel, projectStatusTone } from "$lib/projects/presentation";
   import { hasInvalidDateRange, hasInvalidMoneyInput } from "$lib/projects/form-validation";
+  import { availableMilestoneMonths, hasDuplicateMilestoneMonths, nextMilestoneMonth } from "$lib/projects/milestone-months";
   import Button from "$lib/components/Button.svelte";
   import Card from "$lib/components/Card.svelte";
   import Badge from "$lib/components/Badge.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import Select from "$lib/components/Select.svelte";
+  import DateRangePicker from "$lib/components/DateRangePicker.svelte";
+  import MoneyInput from "$lib/components/MoneyInput.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import RichDescription from "$lib/components/RichDescription.svelte";
   import RichDescriptionEditor from "$lib/components/RichDescriptionEditor.svelte";
   import { browser } from "$app/environment";
+  import { goto } from "$app/navigation";
+  import { activeCompany } from "$lib/stores/session";
+  import { isProjectPortfolioCompany } from "$lib/company/context";
+  import { isTaskDueSoon, isTaskOverdue, isTaskPendingWork } from "$lib/work/task-dates";
+  import { latestProjectUpdate, normalizeProjectManagement, projectUpdateIsStale } from "$lib/projects/management";
 
   let projects = $state<WorkProject[]>([]);
   let items = $state<WorkItem[]>([]);
   let customers = $state<Customer[]>([]);
   let cashMovements = $state<CashMovement[]>([]);
+  let invoices = $state<Invoice[]>([]);
   let settings = $state<Settings | null>(null);
   let loading = $state(true);
 
@@ -32,11 +41,16 @@
   let saving = $state(false);
   let savingGoal = $state(false);
   let goalInput = $state("");
+  let centerView = $state<"command" | "projects" | "timeline" | "team" | "economy" | "updates">(
+    browser ? (localStorage.getItem("hexa-project-center-view") as any) || "command" : "command",
+  );
 
   let form = $state({
     name: "",
     description: "",
     status: "active" as WorkProject["status"],
+    project_type: "own" as WorkProjectKind,
+    client_company_id: "",
     customer_id: "",
     value: "",
     milestones: [] as { amount: string; target_month: string }[],
@@ -61,6 +75,12 @@
     { value: "archived", label: "Archivado" },
   ];
 
+  const projectTypeOptions = [
+    { value: "own", label: "Dev · producto propio" },
+    { value: "client", label: "Dev · cliente / servicio facturable" },
+    { value: "internal", label: "Dev · empresa del grupo" },
+  ];
+
   const sortOptions = [
     { value: "attention", label: "Necesitan atención" },
     { value: "deadline", label: "Fecha objetivo" },
@@ -80,28 +100,60 @@
   });
 
   const customerOptions = $derived([
-    { value: "", label: "Proyecto propio (sin cliente)" },
+    { value: "", label: "Sin contacto específico" },
     ...customers.map((customer) => ({
       value: String(customer.id),
       label: customer.name,
       hint: customer.nif || customer.email || undefined,
     })),
   ]);
+  const clientCompanyOptions = $derived([
+    { value: "", label: "Seleccionar empresa" },
+    ...$session.companies.map((company) => ({ value: String(company.id), label: company.trade_name, hint: company.code })),
+  ]);
+
+  const projectTypeLabel = (type?: WorkProjectKind) =>
+    type === "client" ? "Dev · Cliente" : type === "internal" ? "Dev · Interno" : "Dev · Propio";
+  const projectClientCompanyName = (companyId?: number | null) =>
+    companyId ? $session.companies.find((company) => company.id === companyId)?.trade_name ?? "Empresa" : "";
+  const projectLogo = (project: WorkProject) => {
+    if (project.logo_data_url) return project.logo_data_url;
+    const kind = project.project_type ?? (project.customer_id != null ? "client" : "own");
+    // Client projects are branded only with an image explicitly provided for
+    // that project; never expose HEXA or the client's company logo as a
+    // fallback. Own/internal projects may inherit their workspace logo.
+    if (kind === "client") return "";
+    const logoCompanyId = kind === "own"
+      ? project.company_id
+      : project.task_company_id ?? project.company_id;
+    return $session.companies.find((company) => company.id === logoCompanyId)?.logo_data_url ?? "";
+  };
+  const hexaCompanyId = () =>
+    $session.companies.find((company) => company.code.toUpperCase() === "DEV")?.id
+    ?? $session.companies.find((company) => /hexa/i.test(company.trade_name) && company.kind === "software_studio")?.id
+    ?? $session.activeCompanyId;
 
   async function loadData() {
     loading = true;
     try {
-      const [projList, itemList, customerList, movementList, loadedSettings] = await Promise.all([
+      const [projList, customerList, movementList, invoiceList, loadedSettings] = await Promise.all([
         api.listWorkProjects(),
-        api.listWorkItems(),
-        api.listCustomers(),
+        api.listCustomers(hexaCompanyId()),
         api.listCashMovements(),
+        api.listInvoices(),
         api.getSettings(),
       ]);
       projects = projList;
-      items = itemList;
+      if (!isProjectPortfolioCompany($activeCompany) && projList.length === 1) {
+        await goto(`/proyectos/${projList[0].uid}`, { replaceState: true });
+        return;
+      }
+      items = (await Promise.all(
+        projList.map((project) => api.listWorkItems({ project_id: project.id })),
+      )).flat();
       customers = customerList;
       cashMovements = movementList;
+      invoices = invoiceList;
       settings = loadedSettings;
       goalInput = monthlyEconomicGoal(loadedSettings.monthly_economic_goals, $session.activeCompanyId, currentMonth)
         ? String(monthlyEconomicGoal(loadedSettings.monthly_economic_goals, $session.activeCompanyId, currentMonth) / 100).replace(".", ",")
@@ -123,6 +175,7 @@
     if (!browser) return;
     localStorage.setItem("hexa-projects-status", filterStatus);
     localStorage.setItem("hexa-projects-sort", sortBy);
+    localStorage.setItem("hexa-project-center-view", centerView);
   });
 
   function clearFilters() {
@@ -144,24 +197,18 @@
     }>();
     const now = new Date();
     now.setHours(0, 0, 0, 0);
-    const inSevenDays = new Date(now);
-    inSevenDays.setDate(inSevenDays.getDate() + 7);
     for (const proj of projects) {
       const projItems = items.filter((i) => i.project_id === proj.id);
       const { total, completed, progress } = calculateTaskProgress(projItems);
       const blocked = projItems.filter((i) => i.status === "blocked").length;
-      const openItems = projItems.filter((i) => i.status !== "done" && i.status !== "archived");
-      const overdue = openItems.filter((i) => i.due_date && new Date(`${i.due_date}T00:00:00`) < now).length;
-      const dueSoon = openItems.filter((i) => {
-        if (!i.due_date) return false;
-        const due = new Date(`${i.due_date}T00:00:00`);
-        return due >= now && due <= inSevenDays;
-      }).length;
+      const openItems = projItems.filter(isTaskPendingWork);
+      const overdue = openItems.filter((item) => isTaskOverdue(item, now)).length;
+      const dueSoon = openItems.filter((item) => isTaskDueSoon(item, now)).length;
       const targetOverdue = Boolean(
         proj.target_date &&
         proj.status !== "done" &&
         proj.status !== "archived" &&
-        new Date(`${proj.target_date}T00:00:00`) < now,
+        new Date(`${proj.target_date.slice(0, 10)}T00:00:00`) < now,
       );
       const health = targetOverdue || overdue > 0
         ? "off_track"
@@ -213,14 +260,62 @@
   });
 
   const currentMonthIncomeCents = $derived(
-    cashMovements
-      .filter((movement) => movement.kind === "income" && movement.project_id != null && movement.occurred_at.slice(0, 7) === currentMonth)
-      .reduce((sum, movement) => sum + movement.amount_cents, 0),
+    invoices
+      .filter((invoice) => invoice.status === "issued" && invoice.operation_date.slice(0, 7) === currentMonth)
+      .reduce((sum, invoice) => sum + invoice.total_cents, 0),
   );
   const currentGoalCents = $derived(
-    monthlyEconomicGoal(settings?.monthly_economic_goals, $session.activeCompanyId, currentMonth),
+    projects
+      .filter((project) => (project.project_type ?? (project.customer_id != null ? "client" : "own")) !== "client")
+      .flatMap((project) => project.revenue_milestones)
+      .filter((milestone) => milestone.target_month === currentMonth)
+      .reduce((sum, milestone) => sum + milestone.amount_cents, 0)
+      || monthlyEconomicGoal(settings?.monthly_economic_goals, $session.activeCompanyId, currentMonth),
   );
   const currentGoalProgress = $derived(economicGoalProgress(currentMonthIncomeCents, currentGoalCents));
+  const projectMonthlyEconomics = $derived.by(() => {
+    const map = new Map<number, { month: string; goal: number; achieved: number }>();
+    for (const project of projects) {
+      const milestones = [...project.revenue_milestones]
+        .filter((milestone) => milestone.target_month >= currentMonth)
+        .sort((a, b) => a.target_month.localeCompare(b.target_month));
+      const month = milestones.some((milestone) => milestone.target_month === currentMonth)
+        ? currentMonth
+        : milestones[0]?.target_month ?? currentMonth;
+      const goal = project.revenue_milestones
+        .filter((milestone) => milestone.target_month === month)
+        .reduce((sum, milestone) => sum + milestone.amount_cents, 0);
+      const achieved = invoices
+        .filter((invoice) => invoice.project_id === project.id && invoice.status === "issued" && invoice.operation_date.slice(0, 7) === month)
+        .reduce((sum, invoice) => sum + invoice.total_cents, 0);
+      map.set(project.id, { month, goal, achieved });
+    }
+    return map;
+  });
+  const portfolioUpdates = $derived.by(() => projects.flatMap((project) =>
+    normalizeProjectManagement(project.management).updates.map((update) => ({ project, update })),
+  ).sort((a, b) => b.update.created_at.localeCompare(a.update.created_at)));
+  const teamLoad = $derived.by(() => {
+    const map = new Map<string, { name: string; open: number; overdue: number; projects: Set<number> }>();
+    for (const item of items.filter(isTaskPendingWork)) {
+      const name = item.assignee_name || "Sin responsable";
+      const entry = map.get(name) ?? { name, open: 0, overdue: 0, projects: new Set<number>() };
+      entry.open += 1;
+      if (isTaskOverdue(item)) entry.overdue += 1;
+      if (item.project_id) entry.projects.add(item.project_id);
+      map.set(name, entry);
+    }
+    return [...map.values()].sort((a, b) => b.open - a.open);
+  });
+  const upcomingMilestones = $derived.by(() => projects.flatMap((project) =>
+    normalizeProjectManagement(project.management).milestones
+      .filter((milestone) => milestone.status !== "done")
+      .map((milestone) => ({ project, milestone })),
+  ).sort((a, b) => (a.milestone.target_date || "9999").localeCompare(b.milestone.target_date || "9999")));
+
+  function shortMonth(month: string) {
+    return new Date(`${month}-01T12:00:00`).toLocaleDateString("es-ES", { month: "short", year: "numeric" }).replace(".", "");
+  }
 
   async function saveEconomicGoal() {
     const amount = goalInput.trim() ? parseEurosInput(goalInput) : 0;
@@ -270,6 +365,8 @@
       name: "",
       description: "",
       status: "active",
+      project_type: "own",
+      client_company_id: "",
       customer_id: "",
       value: "",
       milestones: [],
@@ -280,14 +377,34 @@
   }
 
   function addMilestone() {
+    const targetMonth = nextMilestoneMonth(milestoneMonthOptions, form.milestones);
+    if (!targetMonth) {
+      showToast("No quedan más meses disponibles para añadir otro hito", "err");
+      return;
+    }
     form.milestones = [
       ...form.milestones,
-      { amount: "", target_month: currentMonth },
+      { amount: "", target_month: targetMonth },
     ];
   }
 
   function removeMilestone(index: number) {
     form.milestones = form.milestones.filter((_, itemIndex) => itemIndex !== index);
+  }
+
+  function setProjectType(value: string) {
+    const projectType = value as WorkProjectKind;
+    form.project_type = projectType;
+    // A product owned by the studio has no external client/contact. Clear
+    // values immediately so they can never be submitted accidentally after
+    // switching from a client project.
+    if (projectType !== "client") {
+      form.customer_id = "";
+    }
+    if (projectType === "own") {
+      form.client_company_id = "";
+      form.value = "";
+    }
   }
 
   async function handleCreateProject() {
@@ -300,15 +417,19 @@
       return;
     }
     const projectValue = parseEurosInput(form.value);
-    if (form.customer_id && hasInvalidMoneyInput(form.value)) {
+    if (form.project_type === "client" && hasInvalidMoneyInput(form.value)) {
       showToast("Introduce un valor contratado válido", "err");
       return;
     }
     const invalidMilestone = form.milestones.some((milestone) => {
       return hasInvalidMoneyInput(milestone.amount);
     });
-    if (!form.customer_id && invalidMilestone) {
+    if (form.project_type !== "client" && invalidMilestone) {
       showToast("Revisa los importes de los hitos mensuales", "err");
+      return;
+    }
+    if (form.project_type !== "client" && hasDuplicateMilestoneMonths(form.milestones)) {
+      showToast("No puedes repetir el mismo mes en dos hitos", "err");
       return;
     }
     saving = true;
@@ -317,23 +438,25 @@
         name: form.name.trim(),
         description: form.description.trim(),
         status: form.status,
-        customer_id: form.customer_id ? Number(form.customer_id) : null,
-        value_cents: form.customer_id ? (projectValue ?? 0) : 0,
-        monthly_estimate_cents: form.customer_id
-          ? 0
-          : form.milestones.reduce(
+        project_type: form.project_type,
+        client_company_id: form.project_type === "own" || !form.client_company_id ? null : Number(form.client_company_id),
+        customer_id: form.project_type === "client" && form.customer_id ? Number(form.customer_id) : null,
+        value_cents: form.project_type === "client" ? (projectValue ?? 0) : 0,
+        monthly_estimate_cents: form.project_type !== "client"
+          ? form.milestones.reduce(
               (sum, milestone) => sum + (parseEurosInput(milestone.amount) ?? 0),
               0,
-            ),
+            )
+          : 0,
         revenue_target_date: null,
-        revenue_milestones: form.customer_id
-          ? []
-          : form.milestones
+        revenue_milestones: form.project_type !== "client"
+          ? form.milestones
               .map((milestone) => ({
                 amount_cents: parseEurosInput(milestone.amount) ?? 0,
                 target_month: milestone.target_month,
               }))
-              .filter((milestone) => milestone.amount_cents > 0 && milestone.target_month),
+              .filter((milestone) => milestone.amount_cents > 0 && milestone.target_month)
+          : [],
         start_date: form.start_date || null,
         target_date: form.target_date || null,
       };
@@ -367,6 +490,15 @@
       </div>
     </div>
   </div>
+
+  <nav class="mb-6 flex gap-2 overflow-x-auto rounded-2xl border border-[var(--color-border)] bg-black/20 p-2" aria-label="Centro de proyectos" data-project-center-navigation>
+    {#each [
+      ["command", "Centro de mando"], ["projects", "Proyectos"], ["timeline", "Cronología"],
+      ["team", "Equipo"], ["economy", "Economía"], ["updates", "Actualizaciones"]
+    ] as view}
+      <button type="button" class="shrink-0 rounded-xl px-4 py-2 text-sm font-medium transition {centerView === view[0] ? 'bg-purple-500/20 text-[var(--color-purple-bright)] shadow-[inset_0_0_0_1px_rgba(192,132,252,.25)]' : 'text-[var(--color-muted)] hover:bg-white/[0.04] hover:text-[var(--color-text)]'}" onclick={() => (centerView = view[0] as typeof centerView)}>{view[1]}</button>
+    {/each}
+  </nav>
 
   {#if !loading && projects.length > 0}
     <div class="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -408,7 +540,7 @@
         </div>
         {#if $isAdmin}
           <form class="mt-4 flex flex-wrap gap-2" onsubmit={(event) => { event.preventDefault(); saveEconomicGoal(); }}>
-            <input class="field min-w-44 flex-1 text-sm" inputmode="decimal" bind:value={goalInput} placeholder="Objetivo del mes (€)" aria-label="Objetivo económico del mes en euros" />
+            <MoneyInput class="min-w-44 flex-1 text-sm" bind:value={goalInput} placeholder="Objetivo del mes (€)" ariaLabel="Objetivo económico del mes en euros" />
             <Button type="submit" variant="secondary" disabled={savingGoal}>Guardar objetivo</Button>
           </form>
         {/if}
@@ -428,7 +560,34 @@
     </div>
   {/if}
 
+  {#if !loading && centerView === "command"}
+    <div class="mb-6 grid gap-4 xl:grid-cols-2" data-project-command-center>
+      <section class="rounded-2xl border border-[var(--color-border)] bg-black/15 p-4">
+        <div class="flex items-center justify-between"><span class="section-label">REQUIEREN ATENCIÓN</span><span class="text-xs text-[var(--color-muted)]">Prioridad automática</span></div>
+        <div class="mt-3 space-y-2">
+          {#each projects.filter((project) => (projectMetrics.get(project.id)?.attentionScore ?? 0) > 0 || projectUpdateIsStale(project)).sort((a,b) => (projectMetrics.get(b.id)?.attentionScore ?? 0) - (projectMetrics.get(a.id)?.attentionScore ?? 0)).slice(0, 8) as project}
+            {@const metric = projectMetrics.get(project.id)}
+            <a href={`/proyectos/${project.uid}`} class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.07] px-3 py-2.5 transition hover:border-purple-400/30"><div><p class="text-sm font-semibold text-[var(--color-text)]">{project.name}</p><p class="text-xs text-[var(--color-muted)]">{metric?.overdue ?? 0} vencidas · {metric?.blocked ?? 0} bloqueadas{projectUpdateIsStale(project) ? " · actualización pendiente" : ""}</p></div><span class="text-xs text-[var(--color-purple-bright)]">Abrir →</span></a>
+          {:else}<p class="rounded-xl border border-dashed border-[var(--color-border)] p-4 text-sm text-[var(--color-muted)]">No hay señales críticas. La cartera está al día.</p>{/each}
+        </div>
+      </section>
+      <section class="rounded-2xl border border-[var(--color-border)] bg-black/15 p-4">
+        <div class="flex items-center justify-between"><span class="section-label">PRÓXIMOS HITOS</span><button class="text-xs text-[var(--color-purple-bright)]" onclick={() => (centerView = "timeline")}>Ver cronología →</button></div>
+        <div class="mt-3 space-y-2">{#each upcomingMilestones.slice(0,8) as entry}<a href={`/proyectos/${entry.project.uid}?seccion=plan`} class="grid grid-cols-[1fr_auto] gap-3 rounded-xl border border-white/[0.07] px-3 py-2.5"><div><p class="text-sm font-semibold">{entry.milestone.title}</p><p class="text-xs text-[var(--color-muted)]">{entry.project.name}</p></div><time class="text-xs text-cyan-200">{entry.milestone.target_date || "Sin fecha"}</time></a>{:else}<p class="rounded-xl border border-dashed border-[var(--color-border)] p-4 text-sm text-[var(--color-muted)]">Todavía no hay hitos operativos.</p>{/each}</div>
+      </section>
+    </div>
+  {:else if !loading && centerView === "timeline"}
+    <section class="mb-6 overflow-x-auto rounded-2xl border border-[var(--color-border)] bg-black/15 p-4" data-project-timeline><div class="min-w-[760px]"><div class="grid grid-cols-[13rem_1fr_8rem] gap-3 border-b border-white/10 pb-3 text-xs font-semibold uppercase text-[var(--color-muted)]"><span>Proyecto</span><span>Periodo y progreso</span><span>Dependencias</span></div>{#each projects.filter((project) => project.status !== "archived") as project}{@const metric = projectMetrics.get(project.id)}{@const management = normalizeProjectManagement(project.management)}<a href={`/proyectos/${project.uid}?seccion=plan`} class="grid grid-cols-[13rem_1fr_8rem] items-center gap-3 border-b border-white/[0.06] py-3"><div><p class="text-sm font-semibold">{project.name}</p><p class="text-xs text-[var(--color-muted)]">{project.start_date?.slice(0,10) || "Sin inicio"} → {project.target_date?.slice(0,10) || "Sin fin"}</p></div><div><div class="h-3 overflow-hidden rounded-full bg-white/10"><div class="h-full rounded-full bg-gradient-to-r from-purple-500 to-cyan-400" style={`width:${metric?.progress ?? 0}%`}></div></div><div class="mt-2 flex flex-wrap gap-1">{#each management.milestones.filter((item) => item.status !== "done").slice(0,4) as milestone}<span class="rounded-full border border-cyan-400/20 px-2 py-0.5 text-[10px] text-cyan-200">{milestone.title} · {milestone.target_date || "s/f"}</span>{/each}</div></div><span class="text-center text-sm text-[var(--color-muted)]">{management.dependencies.length}</span></a>{/each}</div></section>
+  {:else if !loading && centerView === "team"}
+    <section class="mb-6 rounded-2xl border border-[var(--color-border)] bg-black/15 p-4" data-portfolio-team><div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{#each teamLoad as member}<div class="rounded-xl border border-white/[0.07] p-4"><div class="flex justify-between"><p class="font-semibold">{member.name}</p>{#if member.overdue}<span class="text-xs font-semibold text-rose-300">{member.overdue} vencidas</span>{/if}</div><p class="mt-2 text-2xl font-semibold text-[var(--color-purple-bright)]">{member.open}</p><p class="text-xs text-[var(--color-muted)]">tareas abiertas en {member.projects.size} proyectos</p></div>{/each}</div></section>
+  {:else if !loading && centerView === "economy"}
+    <section class="mb-6 rounded-2xl border border-[var(--color-border)] bg-black/15 p-4" data-portfolio-economy><div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{#each projects as project}{@const economics = projectMonthlyEconomics.get(project.id) ?? {month:currentMonth,goal:0,achieved:0}}<a href={`/proyectos/${project.uid}?seccion=economia`} class="rounded-xl border border-white/[0.07] p-4"><div class="flex justify-between gap-3"><p class="font-semibold">{project.name}</p><span class="text-xs text-[var(--color-muted)]">{shortMonth(economics.month)}</span></div><p class="mt-3 text-xl font-semibold text-emerald-300">{formatEUR(economics.achieved)}</p><p class="text-xs text-[var(--color-muted)]">ingresado de {economics.goal ? formatEUR(economics.goal) : "objetivo sin definir"}</p>{#if economics.goal}<div class="mt-3 h-2 overflow-hidden rounded-full bg-white/10"><div class="h-full bg-gradient-to-r from-purple-500 to-emerald-400" style={`width:${Math.min(100,economicGoalProgress(economics.achieved,economics.goal))}%`}></div></div>{/if}</a>{/each}</div></section>
+  {:else if !loading && centerView === "updates"}
+    <section class="mb-6 rounded-2xl border border-[var(--color-border)] bg-black/15 p-4" data-portfolio-updates><div class="space-y-3">{#each portfolioUpdates as entry}<a href={`/proyectos/${entry.project.uid}`} class="block rounded-xl border border-white/[0.07] p-4"><div class="flex flex-wrap justify-between gap-3"><div><p class="text-xs font-semibold uppercase text-[var(--color-purple-bright)]">{entry.project.name}</p><p class="mt-1 text-sm font-semibold">{entry.update.summary}</p></div><Badge tone={entry.update.health === "on_track" ? "ok" : entry.update.health === "at_risk" ? "warn" : "danger"}>{entry.update.health}</Badge></div><p class="mt-2 text-xs text-[var(--color-muted)]">{entry.update.author} · {new Date(entry.update.created_at).toLocaleString("es-ES")}</p></a>{:else}<p class="py-8 text-center text-sm text-[var(--color-muted)]">Todavía no hay actualizaciones publicadas.</p>{/each}</div></section>
+  {/if}
+
   <!-- Status Filter Toolbar -->
+  {#if centerView === "projects"}
   <div class="workspace-toolbar mb-6 flex flex-wrap items-center justify-between gap-4">
     <div class="flex flex-1 flex-wrap items-center gap-3">
       <input
@@ -485,6 +644,7 @@
     <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
       {#each filteredProjects as project (project.id)}
         {@const metrics = projectMetrics.get(project.id) ?? { total: 0, completed: 0, blocked: 0, overdue: 0, dueSoon: 0, progress: 0, health: "on_track" as const, attentionScore: 0 }}
+        {@const economics = projectMonthlyEconomics.get(project.id) ?? { month: currentMonth, goal: 0, achieved: 0 }}
         <a
           href="/proyectos/{project.uid}"
           class="group block transition-transform duration-200 hover:-translate-y-0.5"
@@ -493,9 +653,18 @@
             <div>
               <!-- Top info: Title & Status -->
               <div class="flex items-start justify-between gap-2 mb-2">
-                <h3 class="font-semibold text-base text-[var(--color-text)] group-hover:text-[var(--color-purple-bright)] transition-colors">
-                  {project.name}
-                </h3>
+                <div class="flex min-w-0 items-center gap-2.5">
+                  {#if projectLogo(project)}
+                    <img src={projectLogo(project)} alt="" class="h-9 w-9 shrink-0 rounded-lg border border-white/10 object-cover shadow-sm" data-project-card-logo />
+                  {:else}
+                    <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-purple-400/20 bg-purple-500/10 text-sm font-bold uppercase text-purple-200" aria-hidden="true" data-project-card-logo>
+                      {project.name.trim().charAt(0) || "P"}
+                    </span>
+                  {/if}
+                  <h3 class="min-w-0 font-semibold text-base text-[var(--color-text)] group-hover:text-[var(--color-purple-bright)] transition-colors">
+                    {project.name}
+                  </h3>
+                </div>
                 <span class="shrink-0 rounded-full border px-2 py-1 text-[10px] font-bold uppercase tracking-wide {healthClass(metrics.health)}">
                   {healthLabel(metrics.health)}
                 </span>
@@ -512,15 +681,34 @@
 
               <!-- Description -->
               <p class="mb-2 text-xs font-medium text-[var(--color-purple-bright)]">
-                {project.customer_id
-                  ? `Cliente: ${customers.find((customer) => customer.id === project.customer_id)?.name ?? "Cliente"}`
-                  : "Proyecto propio"}
+                {projectTypeLabel(project.project_type)}
+                {#if project.client_company_id}
+                  · {projectClientCompanyName(project.client_company_id)}
+                {:else if project.project_type === "client" && project.customer_id}
+                  · {customers.find((customer) => customer.id === project.customer_id)?.name ?? "Cliente"}
+                {/if}
               </p>
               <p class="mb-3 text-sm font-semibold text-emerald-300">
-                {project.customer_id
+                {project.project_type === "client"
                   ? `Valor: ${formatEUR(project.value_cents)}`
-                  : `Estimación mensual: ${formatEUR(project.monthly_estimate_cents)}`}
+                  : project.project_type === "internal"
+                    ? "Gestión interna del grupo"
+                    : `Estimación mensual: ${formatEUR(project.monthly_estimate_cents)}`}
               </p>
+              {#if project.project_type !== "client"}
+                <div class="mb-3 rounded-lg border border-purple-400/20 bg-purple-500/[0.06] px-3 py-2.5">
+                  <p class="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Objetivo {shortMonth(economics.month)}</p>
+                  <div class="mt-1 flex items-baseline justify-between gap-3 text-xs">
+                    <strong class="text-[var(--color-text)]">{economics.goal ? formatEUR(economics.goal) : "Sin objetivo"}</strong>
+                    <span class="text-emerald-300">Llevamos {formatEUR(economics.achieved)}</span>
+                  </div>
+                  {#if economics.goal}
+                    <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
+                      <div class="h-full rounded-full bg-gradient-to-r from-purple-500 to-emerald-400" style={`width: ${Math.min(economicGoalProgress(economics.achieved, economics.goal), 100)}%`}></div>
+                    </div>
+                  {/if}
+                </div>
+              {/if}
               {#if project.description}
                 <RichDescription value={project.description} class="mb-4 line-clamp-2 text-xs text-[var(--color-muted-dim)]" />
               {:else}
@@ -573,6 +761,7 @@
       {/each}
     </div>
   {/if}
+  {/if}
 </section>
 
 <!-- Project Creation Modal -->
@@ -613,16 +802,36 @@
     />
 
     <Select
-      label="Tipo y cliente"
-      options={customerOptions}
-      bind:value={form.customer_id}
-      placeholder="Proyecto propio (sin cliente)"
+      label="Tipo de proyecto"
+      options={projectTypeOptions}
+      bind:value={form.project_type}
+      onvaluechange={setProjectType}
     />
 
-    {#if form.customer_id}
+    {#if form.project_type === "internal"}
+      <Select
+        label="Empresa propietaria"
+        options={clientCompanyOptions}
+        bind:value={form.client_company_id}
+        placeholder="Seleccionar empresa"
+        required
+      />
+    {/if}
+
+    {#if form.project_type === "client"}
+      <Select
+        label="Cliente de HEXA / contacto (opcional)"
+        options={customerOptions}
+        bind:value={form.customer_id}
+        placeholder="Sin cliente/contacto específico"
+      />
+      <p class="-mt-2 text-[11px] text-[var(--color-muted-dim)]">Se selecciona del catálogo de clientes de HEXA.</p>
+    {/if}
+
+    {#if form.project_type === "client"}
       <div class="space-y-1">
         <label for="project-value" class="text-xs font-medium text-[var(--color-muted)]">Valor contratado (€)</label>
-        <input id="project-value" type="text" inputmode="decimal" bind:value={form.value} placeholder="0,00" class="field w-full text-sm" />
+        <MoneyInput id="project-value" bind:value={form.value} placeholder="0,00" class="text-sm" ariaLabel="Valor económico estimado (€)" />
       </div>
     {:else}
       <div class="space-y-3 rounded-xl border border-[var(--color-border)] p-3">
@@ -631,13 +840,13 @@
             <p class="text-xs font-medium text-[var(--color-text)]">Hitos mensuales</p>
             <p class="text-[11px] text-[var(--color-muted-dim)]">Importe estimado y mes/año objetivo.</p>
           </div>
-          <Button type="button" variant="secondary" onclick={addMilestone}>+ Añadir hito</Button>
+          <Button type="button" variant="secondary" disabled={!nextMilestoneMonth(milestoneMonthOptions, form.milestones)} onclick={addMilestone}>+ Añadir hito</Button>
         </div>
         {#each form.milestones as milestone, index}
           <div class="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
-            <input class="field w-full text-sm" inputmode="decimal" bind:value={milestone.amount} placeholder="Importe (€)" />
+            <MoneyInput class="text-sm" bind:value={milestone.amount} placeholder="Importe (€)" />
             <Select
-              options={milestoneMonthOptions}
+              options={availableMilestoneMonths(milestoneMonthOptions, form.milestones, index)}
               bind:value={milestone.target_month}
               placeholder="Mes y año"
             />
@@ -650,26 +859,7 @@
       </div>
     {/if}
 
-    <div class="grid gap-3 sm:grid-cols-2">
-      <div class="space-y-1">
-        <label for="project-start-date" class="text-xs font-medium text-[var(--color-muted)]">Fecha de inicio</label>
-        <input
-          id="project-start-date"
-          type="date"
-          bind:value={form.start_date}
-          class="field w-full text-sm"
-        />
-      </div>
-      <div class="space-y-1">
-        <label for="project-target-date" class="text-xs font-medium text-[var(--color-muted)]">Fecha objetivo</label>
-        <input
-          id="project-target-date"
-          type="date"
-          bind:value={form.target_date}
-          class="field w-full text-sm"
-        />
-      </div>
-    </div>
+    <DateRangePicker label="Periodo del proyecto" bind:start={form.start_date} bind:end={form.target_date} />
 
     <div class="flex items-center justify-end gap-2 border-t border-[var(--color-border)] pt-4">
       <Button variant="ghost" type="button" onclick={() => (modalOpen = false)}>

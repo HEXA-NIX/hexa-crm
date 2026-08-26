@@ -1,0 +1,69 @@
+From: HEXA-NIX
+Subject: [PATCH] Add legacy WhatsApp list messages
+
+Base: aldinokemal/go-whatsapp-web-multidevice (installed v3.4.0 source)
+
+This patch adds POST /send/list. It uses WhatsApp's legacy ListMessage
+protobuf, matching the "Opciones" menu shown in the reference screenshot.
+The resulting binary must be built with the same whatsmeow revision as the
+base checkout and tested against the linked account before replacing GOWA.
+
+--- a/src/domains/send/interfaces.go
++++ b/src/domains/send/interfaces.go
+@@
+ 	SendPoll(ctx context.Context, request PollRequest) (response GenericResponse, err error)
++	SendList(ctx context.Context, request ListRequest) (response GenericResponse, err error)
+
+--- /dev/null
++++ b/src/domains/send/list.go
+@@
++package send
++
++type ListRow struct {
++	ID string `json:"id" form:"id"`
++	Title string `json:"title" form:"title"`
++	Description string `json:"description" form:"description"`
++}
++
++type ListRequest struct {
++	BaseRequest
++	Title string `json:"title" form:"title"`
++	Description string `json:"description" form:"description"`
++	ButtonText string `json:"button_text" form:"button_text"`
++	FooterText string `json:"footer_text" form:"footer_text"`
++	Rows []ListRow `json:"rows" form:"rows"`
++}
+
+--- a/src/ui/rest/send.go
++++ b/src/ui/rest/send.go
+@@
+ 	app.Post("/send/poll", rest.SendPoll)
++	app.Post("/send/list", rest.SendList)
+@@
++func (controller *Send) SendList(c fiber.Ctx) error {
++	var request domainSend.ListRequest
++	if err := c.Bind().Body(&request); err != nil { utils.PanicIfNeeded(err) }
++	utils.SanitizePhone(&request.Phone)
++	response, err := controller.Service.SendList(whatsapp.ContextWithDevice(c.Context(), getDeviceFromCtx(c)), request)
++	utils.PanicIfNeeded(err)
++	return c.JSON(utils.ResponseData{Status: 200, Code: "SUCCESS", Message: response.Status, Results: response})
++}
+
+--- a/src/usecase/send.go
++++ b/src/usecase/send.go
+@@
++func (service serviceSend) SendList(ctx context.Context, request domainSend.ListRequest) (response domainSend.GenericResponse, err error) {
++	client := whatsapp.ClientFromContext(ctx)
++	if client == nil { return response, pkgError.ErrWaCLI }
++	if request.Phone == "" || request.Title == "" || request.ButtonText == "" || len(request.Rows) == 0 { return response, pkgError.ValidationError("phone, title, button_text and rows are required") }
++	dataWaRecipient, err := utils.ValidateJidWithLogin(client, request.Phone)
++	if err != nil { return response, err }
++	rows := make([]*waE2E.ListMessage_Row, 0, len(request.Rows))
++	for _, row := range request.Rows { id, title, description := row.ID, row.Title, row.Description; rows = append(rows, &waE2E.ListMessage_Row{RowID: &id, Title: &title, Description: &description}) }
++	listType := waE2E.ListMessage_SINGLE_SELECT
++	msg := &waE2E.Message{ListMessage: &waE2E.ListMessage{Title: &request.Title, Description: &request.Description, ButtonText: &request.ButtonText, FooterText: &request.FooterText, ListType: &listType, Sections: []*waE2E.ListMessage_Section{{Rows: rows}}}}
++	ts, err := service.wrapSendMessage(ctx, client, dataWaRecipient, msg, "📋 "+request.Title)
++	if err != nil { return response, err }
++	response.MessageID, response.Status = ts.ID, fmt.Sprintf("Send list success %s (server timestamp: %s)", request.Phone, ts.Timestamp.String())
++	return response, nil
++}

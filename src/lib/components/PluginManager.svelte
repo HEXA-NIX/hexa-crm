@@ -7,39 +7,75 @@
   import Select from "./Select.svelte";
   import { showToast } from "$lib/stores/ui";
   import { isAdmin } from "$lib/stores/session";
+  import { connectGoogleDrive, disconnectGoogleDrive, googleDriveStatus, testGoogleDriveConnection } from "$lib/storage/google-drive-client";
 
   let plugins = $state<TenantPlugin[]>([]);
   let busy = $state<PluginKey | null>(null);
   let testing = $state<PluginKey | null>(null);
   let loading = $state(true);
-  let stripeSecretInput = $state("");
+  let googleConnected = $state(false);
+  let googleConnecting = $state(false);
+  let whatsappStatus = $state<{ connected: boolean; logged_in: boolean; user_phone?: string; configured_phone?: string; shared_from_company_name?: string | null } | null>(null);
+  let whatsappLinks = $state<{ company_id: number; trade_name: string; phone: string }[]>([]);
+  let selectedWhatsAppCompany = $state("");
+  let whatsappQr = $state("");
+  let whatsappBusy = $state(false);
+  let whatsappError = $state("");
+  let whatsappExpanded = $state(false);
+  let whatsappForm = $state({ phone: "", message: "", confirmed: false });
+  let credentialInputs = $state<Record<PluginKey, string>>({
+    database_bridge: "",
+    stripe_mcp: "",
+    google_drive: "",
+  });
 
   let logsMap = $state<Record<PluginKey, PluginAuditLogEntry[]>>({
     database_bridge: [],
     stripe_mcp: [],
+    google_drive: [],
   });
   let logsOpen = $state<Record<PluginKey, boolean>>({
     database_bridge: false,
     stripe_mcp: false,
+    google_drive: false,
   });
   let loadingLogs = $state<Record<PluginKey, boolean>>({
     database_bridge: false,
     stripe_mcp: false,
+    google_drive: false,
   });
 
-  const statusLabel = (plugin: TenantPlugin) => ({
+  const statusLabel = (plugin: TenantPlugin) => plugin.plugin_key === "google_drive" && plugin.enabled
+    ? (googleConnected ? "Preparado" : "Sin conectar")
+    : ({
     inactive: "Inactivo",
     needs_secret: "Falta secreto",
     ready: "Preparado",
     error: "Con error",
   })[plugin.status];
 
-  const statusTone = (plugin: TenantPlugin): "ok" | "warn" | "danger" | "neutral" => ({
+  const statusTone = (plugin: TenantPlugin): "ok" | "warn" | "danger" | "neutral" => plugin.plugin_key === "google_drive" && plugin.enabled
+    ? (googleConnected ? "ok" : "warn")
+    : ({
     inactive: "neutral",
     needs_secret: "warn",
     ready: "ok",
     error: "danger",
   })[plugin.status] as "ok" | "warn" | "danger" | "neutral";
+
+  /** Brand marks are inline so the settings screen works offline and in Tauri. */
+  function pluginLogo(key: PluginKey | "whatsapp_gowa") {
+    if (key === "whatsapp_gowa") {
+      return `<svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle cx="16" cy="15" r="10" fill="#25d366"/><path d="m10.2 24 1.3-3.5A9.8 9.8 0 1 1 16 25.2c-1.1 0-2.2-.2-3.2-.5L10.2 24Z" fill="#25d366"/><path d="M12.2 11.5c.3-.6.6-.6 1.1-.6h.5c.3 0 .5.1.7.5l.8 1.9c.1.3.1.5-.1.7l-.6.8c-.1.2-.2.3 0 .6.4.7 1.1 1.4 1.8 1.8.3.2.5.2.7 0l.8-.9c.2-.2.4-.2.7-.1l1.9.9c.3.1.4.3.4.6 0 .7-.3 1.3-.8 1.7-.5.4-1.1.5-1.8.3-1.2-.4-2.4-1.2-3.5-2.2-1-.9-1.8-2-2.3-3.2-.3-.8-.4-1.6-.1-2.3Z" fill="white"/></svg>`;
+    }
+    if (key === "stripe_mcp") {
+      return `<svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect width="32" height="32" rx="8" fill="#635bff"/><path d="M9 12.2c0-2.2 1.8-3.5 4.7-3.5 2.1 0 3.7.5 4.9 1.1v3.1c-1.3-.7-2.8-1.2-4.4-1.2-1 0-1.6.3-1.6.9 0 .5.5.7 2.1 1.1 3.1.7 4.7 1.8 4.7 4.3 0 2.5-2 3.7-4.9 3.7-2.1 0-4.2-.6-5.5-1.4v-3.2c1.6.9 3.5 1.5 5.3 1.5 1 0 1.6-.3 1.6-.9 0-.5-.5-.8-2.1-1.2C10.4 15.8 9 14.8 9 12.2Z" fill="white"/></svg>`;
+    }
+    if (key === "google_drive") {
+      return `<svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M12 5h7l8 14h-7L12 5Z" fill="#0f9d58"/><path d="M12 5 5 17l3.5 6L16 11l3-6h-7Z" fill="#f4b400"/><path d="M8.5 23h14l4.5-4H10.8L8.5 23Z" fill="#4285f4"/></svg>`;
+    }
+    return `<svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M7 23c-.8-3.4.5-7.1 3.8-8.9-.3-4.5 2.4-7.6 6.5-7.6 3.7 0 6.2 2.1 6.8 5.4 2.1.5 3.7 2.2 3.7 4.6 0 2.9-2.2 5-5.2 5H12c-2.1 0-3.9.6-5 1.5Z" fill="#336791"/><circle cx="20.7" cy="12.2" r="1.3" fill="white"/><path d="M10.2 16.5c1.4 1.3 2.2 3.1 2 5.2M23.6 16.3c-1 1-1.5 2.4-1.4 4" fill="none" stroke="#d7e9f5" stroke-width="1.4" stroke-linecap="round"/></svg>`;
+  }
 
   const actionLabel = (action: string) => {
     switch (action) {
@@ -139,6 +175,11 @@
     loading = true;
     try {
       plugins = await api.listPlugins();
+      try {
+        googleConnected = (await googleDriveStatus()).connected;
+      } catch {
+        googleConnected = false;
+      }
       for (const p of plugins) {
         if (logsOpen[p.plugin_key]) {
           await loadLogs(p.plugin_key);
@@ -151,12 +192,36 @@
     }
   }
 
+  async function connectDrive() {
+    googleConnecting = true;
+    try {
+      await connectGoogleDrive();
+      googleConnected = true;
+      showToast("Google Drive conectado");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo conectar Google Drive", "err");
+    } finally {
+      googleConnecting = false;
+    }
+  }
+
+  async function disconnectDrive() {
+    googleConnecting = true;
+    try {
+      await disconnectGoogleDrive();
+      googleConnected = false;
+      showToast("Google Drive desconectado");
+    } finally {
+      googleConnecting = false;
+    }
+  }
+
   async function persist(plugin: TenantPlugin, enabled = plugin.enabled) {
     busy = plugin.plugin_key;
     try {
       const saved = await api.updatePlugin(plugin.plugin_key, enabled, plugin.config);
       plugins = plugins.map((item) => item.plugin_key === saved.plugin_key ? saved : item);
-      showToast(enabled ? "Plugin guardado para esta tienda" : "Plugin desactivado para esta tienda");
+      showToast(enabled ? "Plugin guardado para esta empresa" : "Plugin desactivado para esta empresa");
       if (logsOpen[plugin.plugin_key]) {
         await loadLogs(plugin.plugin_key);
       }
@@ -169,7 +234,7 @@
   }
 
   async function handleSecretAction(plugin: TenantPlugin, action: "save" | "replace" | "remove") {
-    if (action !== "remove" && !stripeSecretInput.trim()) {
+    if (action !== "remove" && !credentialInputs[plugin.plugin_key].trim()) {
       showToast("Debes ingresar una credencial válida", "err");
       return;
     }
@@ -180,9 +245,9 @@
         plugin.enabled,
         plugin.config,
         action,
-        action === "remove" ? undefined : stripeSecretInput.trim(),
+        action === "remove" ? undefined : credentialInputs[plugin.plugin_key].trim(),
       );
-      stripeSecretInput = "";
+      credentialInputs[plugin.plugin_key] = "";
       plugins = plugins.map((item) => (item.plugin_key === saved.plugin_key ? saved : item));
       const msg =
         action === "remove"
@@ -208,7 +273,9 @@
   async function test(plugin: TenantPlugin) {
     testing = plugin.plugin_key;
     try {
-      const result = await api.testPlugin(plugin.plugin_key);
+      const result = plugin.plugin_key === "google_drive"
+        ? await testGoogleDriveConnection()
+        : await api.testPlugin(plugin.plugin_key);
       showToast(result.message);
       await load();
       if (logsOpen[plugin.plugin_key]) {
@@ -229,14 +296,87 @@
     plugin.config = { ...plugin.config, ...patch };
   }
 
-  onMount(load);
+  async function loadWhatsAppStatus() {
+    try {
+      const [status, links] = await Promise.all([api.whatsappStatus(), api.whatsappAvailableLinks()]);
+      whatsappStatus = status;
+      whatsappLinks = links;
+      if (!links.some((link) => String(link.company_id) === selectedWhatsAppCompany)) {
+        selectedWhatsAppCompany = links[0] ? String(links[0].company_id) : "";
+      }
+    } catch {
+      whatsappStatus = null;
+      whatsappLinks = [];
+    }
+  }
+
+  async function connectWhatsApp() {
+    whatsappBusy = true;
+    whatsappError = "";
+    try {
+      const result = await api.whatsappLoginQr();
+      whatsappQr = result.qr_data || result.qr_url;
+      whatsappExpanded = true;
+    } catch (error) {
+      whatsappError = error instanceof Error ? error.message : "No se pudo generar el QR";
+    } finally {
+      whatsappBusy = false;
+    }
+  }
+
+  async function disconnectWhatsApp() {
+    whatsappBusy = true;
+    whatsappError = "";
+    try {
+      await api.whatsappLogout();
+      whatsappQr = "";
+      await loadWhatsAppStatus();
+    } catch (error) {
+      whatsappError = error instanceof Error ? error.message : "No se pudo desconectar WhatsApp";
+    } finally {
+      whatsappBusy = false;
+    }
+  }
+
+  async function useSharedWhatsApp() {
+    const sourceCompanyId = Number(selectedWhatsAppCompany);
+    if (!Number.isInteger(sourceCompanyId) || whatsappBusy) return;
+    whatsappBusy = true;
+    whatsappError = "";
+    try {
+      await api.whatsappUseSharedLink(sourceCompanyId);
+      await loadWhatsAppStatus();
+    } catch (error) {
+      whatsappError = error instanceof Error ? error.message : "No se pudo usar ese número";
+    } finally {
+      whatsappBusy = false;
+    }
+  }
+
+  async function sendWhatsApp() {
+    whatsappBusy = true;
+    whatsappError = "";
+    try {
+      await api.whatsappSend(whatsappForm.phone, whatsappForm.message, whatsappForm.confirmed);
+      whatsappForm = { phone: "", message: "", confirmed: false };
+    } catch (error) {
+      whatsappError = error instanceof Error ? error.message : "No se pudo enviar el WhatsApp";
+    } finally {
+      whatsappBusy = false;
+    }
+  }
+
+  onMount(() => {
+    load();
+    loadWhatsAppStatus();
+  });
 </script>
 
 <section class="space-y-4" data-plugin-manager>
   <div class="rounded-2xl border border-purple-400/20 bg-purple-500/[0.06] px-4 py-3">
-    <p class="text-sm font-medium text-[var(--color-purple-bright)]">Plugins por tienda</p>
+    <p class="text-sm font-medium text-[var(--color-purple-bright)]">Plugins por empresa</p>
     <p class="mt-1 text-xs leading-relaxed text-[var(--color-muted)]">
-      La activación y la configuración pertenecen únicamente a la empresa seleccionada. La credencial de Stripe MCP se gestiona desde esta pantalla con cifrado autenticado AES-256-GCM en el servidor. Nunca se revelan ni almacenan secretos en texto plano.
+      La activación y la configuración pertenecen únicamente a la empresa seleccionada. Las credenciales de Stripe y Google Drive se cifran con AES-256-GCM en el servidor y nunca se devuelven a la interfaz. En modo navegador local, el token de Drive solo permanece en la sesión de la pestaña.
     </p>
   </div>
 
@@ -246,6 +386,87 @@
     </div>
   {:else}
     <div class="grid gap-4 xl:grid-cols-2">
+      <article
+        class="relative overflow-hidden rounded-2xl border p-5 transition {whatsappStatus?.connected || whatsappStatus?.logged_in
+          ? 'border-emerald-400/30 bg-emerald-500/[0.06] shadow-[0_0_28px_rgba(16,185,129,0.08)]'
+          : 'border-[var(--color-border)] bg-black/20'}"
+        data-plugin-key="whatsapp_gowa"
+        data-plugin-enabled={whatsappStatus?.connected || whatsappStatus?.logged_in}
+      >
+        <div class="pointer-events-none absolute -right-12 -top-12 h-32 w-32 rounded-full bg-emerald-500/10 blur-3xl"></div>
+        <div class="relative">
+          <div class="flex items-start justify-between gap-4">
+            <div class="min-w-0">
+              <div class="mb-2 flex flex-wrap items-center gap-2">
+                <span class="plugin-logo flex h-9 w-9 items-center justify-center rounded-xl border border-emerald-400/30 bg-emerald-500/10 p-1.5">
+                  {@html pluginLogo("whatsapp_gowa")}
+                </span>
+                <div>
+                  <h3 class="font-semibold text-[var(--color-text)]">WhatsApp</h3>
+                  <p class="text-[0.65rem] uppercase tracking-[0.16em] text-[var(--color-muted-dim)]">mensajería</p>
+                </div>
+                <Badge tone={whatsappStatus?.connected || whatsappStatus?.logged_in ? "ok" : "warn"}>
+                  {whatsappStatus?.connected || whatsappStatus?.logged_in ? "Preparado" : "Sin conectar"}
+                </Badge>
+              </div>
+              <p class="max-w-xl text-sm leading-relaxed text-[var(--color-muted)]">Recibe tickets y facturas, envía avisos y comparte un número entre empresas sin mezclar sus datos.</p>
+            </div>
+            <Button variant="secondary" class="shrink-0" onclick={() => (whatsappExpanded = !whatsappExpanded)}>
+              {whatsappExpanded ? "Ocultar" : "Configurar"}
+            </Button>
+          </div>
+          {#if whatsappStatus?.connected || whatsappStatus?.logged_in}
+            <div class="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-400/20 bg-emerald-400/[0.05] px-3 py-2.5 text-sm">
+              <span class="text-emerald-100">Número conectado: <strong>{whatsappStatus.user_phone || "detectado por WhatsApp"}</strong></span>
+              <Button variant="danger" disabled={whatsappBusy} onclick={disconnectWhatsApp}>Desconectar</Button>
+            </div>
+          {:else if whatsappStatus?.configured_phone}
+            <div class="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-400/20 bg-amber-400/[0.05] px-3 py-2.5 text-sm">
+              <span class="text-amber-100">Número configurado: <strong>{whatsappStatus.configured_phone}</strong><span class="ml-2 text-amber-200/70">Sesión desconectada</span></span>
+              <Button disabled={whatsappBusy} onclick={connectWhatsApp}>{whatsappBusy ? "Preparando…" : "Reconectar con QR"}</Button>
+            </div>
+          {:else}
+            <div class="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-400/20 bg-amber-400/[0.05] px-3 py-2.5 text-sm">
+              <span class="text-amber-100">No hay un número conectado ahora mismo.</span>
+              <Button disabled={whatsappBusy} onclick={connectWhatsApp}>{whatsappBusy ? "Preparando…" : "Conectar con QR"}</Button>
+            </div>
+          {/if}
+          {#if whatsappExpanded}
+            <div class="mt-4 space-y-3 border-t border-[var(--color-border)] pt-4" data-whatsapp-inline-settings>
+              {#if !(whatsappStatus?.connected || whatsappStatus?.logged_in) && whatsappLinks.length > 0}
+                <Select
+                  label="Usar un número ya vinculado en otra empresa"
+                  bind:value={selectedWhatsAppCompany}
+                  options={whatsappLinks.map((link) => ({ value: String(link.company_id), label: `${link.trade_name} · ${link.phone}` }))}
+                  placeholder="Seleccionar empresa…"
+                  disabled={whatsappBusy}
+                />
+                <Button variant="secondary" disabled={whatsappBusy || !selectedWhatsAppCompany} onclick={useSharedWhatsApp}>Usar este número</Button>
+              {/if}
+              {#if whatsappQr}
+                <div class="rounded-xl border border-emerald-400/25 bg-white p-3 text-center">
+                  <img src={whatsappQr} alt="Código QR para vincular WhatsApp" class="mx-auto h-56 w-56 object-contain" />
+                  <p class="mt-2 text-xs text-slate-700">WhatsApp → Dispositivos vinculados → Vincular dispositivo</p>
+                </div>
+              {/if}
+              {#if whatsappStatus?.connected || whatsappStatus?.logged_in}
+                <form class="grid gap-2" onsubmit={(event) => { event.preventDefault(); sendWhatsApp(); }}>
+                  <input class="field w-full" bind:value={whatsappForm.phone} placeholder="Destinatario +34…" required />
+                  <textarea class="field min-h-20 w-full" maxlength="4000" bind:value={whatsappForm.message} placeholder="Mensaje" required></textarea>
+                  <label class="flex items-start gap-2 text-xs text-[var(--color-muted)]"><input class="mt-0.5" type="checkbox" bind:checked={whatsappForm.confirmed} /> Confirmo el envío desde el WhatsApp de la empresa.</label>
+                  <div><Button type="submit" disabled={whatsappBusy || !whatsappForm.confirmed}>{whatsappBusy ? "Enviando…" : "Enviar WhatsApp"}</Button></div>
+                </form>
+              {/if}
+              {#if whatsappError}<p class="rounded-xl border border-rose-500/25 bg-rose-500/10 px-3 py-2 text-xs text-rose-200" role="alert">{whatsappError}</p>{/if}
+            </div>
+          {/if}
+          <div class="mt-4 flex flex-wrap gap-2 text-xs text-[var(--color-muted)]">
+            <span class="rounded-full border border-emerald-400/20 bg-emerald-400/[0.06] px-2.5 py-1">Conectar por QR</span>
+            <span class="rounded-full border border-emerald-400/20 bg-emerald-400/[0.06] px-2.5 py-1">Recepción documental</span>
+            <span class="rounded-full border border-emerald-400/20 bg-emerald-400/[0.06] px-2.5 py-1">Números compartidos</span>
+          </div>
+        </div>
+      </article>
       {#each plugins as plugin (plugin.plugin_key)}
         <article
           class="relative overflow-hidden rounded-2xl border p-5 transition {plugin.enabled
@@ -259,12 +480,12 @@
             <div class="flex items-start justify-between gap-4">
               <div class="min-w-0">
                 <div class="mb-2 flex flex-wrap items-center gap-2">
-                  <span class="flex h-9 w-9 items-center justify-center rounded-xl border border-purple-400/25 bg-purple-500/15 text-lg text-[var(--color-purple-bright)]">
-                    {plugin.plugin_key === "stripe_mcp" ? "S" : "DB"}
+                  <span class="plugin-logo flex h-9 w-9 items-center justify-center rounded-xl border p-1.5 text-lg text-[var(--color-purple-bright)] {plugin.plugin_key === 'database_bridge' ? 'border-[#336791]/50 bg-[#336791]/15' : 'border-purple-400/25 bg-purple-500/15'}" title={plugin.plugin_key === "database_bridge" ? "PostgreSQL" : plugin.name}>
+                    {@html pluginLogo(plugin.plugin_key)}
                   </span>
                   <div>
                     <h3 class="font-semibold text-[var(--color-text)]">{plugin.name}</h3>
-                    <p class="text-[0.65rem] uppercase tracking-[0.16em] text-[var(--color-muted-dim)]">{plugin.category}</p>
+                    <p class="text-[0.65rem] uppercase tracking-[0.16em] text-[var(--color-muted-dim)]">{plugin.plugin_key === "database_bridge" ? "PostgreSQL" : plugin.category}</p>
                   </div>
                   <Badge tone={statusTone(plugin)}>{statusLabel(plugin)}</Badge>
                 </div>
@@ -311,6 +532,8 @@
                   <span class="font-medium text-[var(--color-text)]">
                     {plugin.plugin_key === "database_bridge"
                       ? (plugin.config.access_mode === "read_write" ? "Lectura y escritura" : "Solo lectura")
+                      : plugin.plugin_key === "google_drive"
+                        ? (plugin.config.folder_id ? "Carpeta configurada" : "Mi unidad")
                       : (plugin.config.environment === "live" ? "Producción (Live)" : "Sandbox / Pruebas")}
                   </span>
                 </div>
@@ -322,6 +545,8 @@
                   : (plugin.config.allow_write_tools ? 'text-amber-300' : 'text-emerald-400')}">
                   {plugin.plugin_key === "database_bridge"
                     ? (plugin.config.access_mode === "read_write" ? "Permitidos" : "Bloqueados (solo lectura)")
+                    : plugin.plugin_key === "google_drive"
+                      ? "Subida de archivos"
                     : (plugin.config.allow_write_tools ? "Permitidos (requiere confirmación humana)" : "Bloqueados (solo lectura)")}
                 </span>
               </div>
@@ -375,6 +600,38 @@
                     <input class="field font-mono text-xs" value={plugin.config.database_url_env ?? ""} oninput={(event) => updateConfig(plugin, { database_url_env: event.currentTarget.value })} />
                     <span class="text-[11px] text-[var(--color-muted-dim)]">Indica únicamente el nombre de la variable de entorno. Nunca ingreses URLs ni contraseñas reales.</span>
                   </label>
+                  {#if !plugin.secret_configured}
+                    <div class="mt-3 rounded-xl border border-amber-400/25 bg-amber-500/[0.08] p-3 text-xs leading-relaxed text-amber-100">
+                      <p class="font-semibold">Falta configurar la conexión en el servidor</p>
+                      <p class="mt-1">Define <code class="font-mono">{plugin.config.database_url_env || "HEXA_PLUGIN_DATABASE_SHOP_URL"}</code> con la URL de PostgreSQL de esta empresa y reinicia el backend. Por seguridad, la URL no se introduce ni se guarda en esta pantalla.</p>
+                    </div>
+                  {/if}
+                {:else if plugin.plugin_key === "google_drive"}
+                  <div class="grid gap-3 sm:grid-cols-2">
+                    <label class="flex flex-col gap-1.5 text-sm">
+                      <span class="font-medium text-[var(--color-muted)]">Nombre de la carpeta</span>
+                      <input class="field" value={plugin.config.folder_name ?? ""} oninput={(event) => updateConfig(plugin, { folder_name: event.currentTarget.value })} />
+                    </label>
+                    <label class="flex flex-col gap-1.5 text-sm">
+                      <span class="font-medium text-[var(--color-muted)]">ID de carpeta de Drive</span>
+                      <input class="field font-mono text-xs" value={plugin.config.folder_id ?? ""} oninput={(event) => updateConfig(plugin, { folder_id: event.currentTarget.value })} placeholder="1AbC…" />
+                    </label>
+                  </div>
+                  <p class="mt-2 text-[11px] text-[var(--color-muted-dim)]">Deja el ID vacío para subir a «Mi unidad». El ID aparece en la URL de la carpeta después de <code>/folders/</code>.</p>
+                  <div class="mt-3 rounded-xl border border-white/[0.08] bg-black/40 p-3.5 space-y-3" data-google-drive-oauth-box>
+                    <div class="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p class="text-xs font-semibold text-[var(--color-text)]">Cuenta de Google</p>
+                        <p class="mt-1 text-[11px] {googleConnected ? 'text-emerald-300' : 'text-[var(--color-muted-dim)]'}">{googleConnected ? "Conectada · renovación automática" : "Sin conectar"}</p>
+                      </div>
+                      {#if googleConnected}
+                        <Button variant="danger" disabled={googleConnecting} onclick={disconnectDrive}>Desconectar</Button>
+                      {:else}
+                        <Button disabled={googleConnecting} onclick={connectDrive}>{googleConnecting ? "Conectando…" : "Conectar con Google"}</Button>
+                      {/if}
+                    </div>
+                    <p class="text-[10px] text-[var(--color-muted-dim)]">Solo tendrás que autorizar Google una vez. Hexa renueva el acceso automáticamente; nunca muestra ni solicita tokens.</p>
+                  </div>
                 {:else}
                   <div class="grid gap-3 sm:grid-cols-2">
                     <Select
@@ -410,7 +667,7 @@
                           type="password"
                           class="field font-mono text-xs"
                           placeholder={plugin.secret_configured ? "••••••••••••••••••••••••" : "rk_test_... o sk_test_..."}
-                          bind:value={stripeSecretInput}
+                          bind:value={credentialInputs.stripe_mcp}
                           autocomplete="off"
                         />
                         <span class="text-[10px] text-[var(--color-muted-dim)]">
@@ -422,7 +679,7 @@
                         {#if plugin.secret_configured}
                           <Button
                             variant="secondary"
-                            disabled={busy === plugin.plugin_key || !stripeSecretInput.trim()}
+                            disabled={busy === plugin.plugin_key || !credentialInputs.stripe_mcp.trim()}
                             onclick={() => handleSecretAction(plugin, "replace")}
                           >
                             Reemplazar credencial
@@ -436,7 +693,7 @@
                           </Button>
                         {:else}
                           <Button
-                            disabled={busy === plugin.plugin_key || !stripeSecretInput.trim()}
+                            disabled={busy === plugin.plugin_key || !credentialInputs.stripe_mcp.trim()}
                             onclick={() => handleSecretAction(plugin, "save")}
                           >
                             Guardar credencial
@@ -459,8 +716,10 @@
 
                 {#if plugin.last_error}
                   <p class="mt-3 rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">{plugin.last_error}</p>
+                {:else if plugin.plugin_key === "google_drive" && !googleConnected}
+                  <p class="mt-3 rounded-xl border border-amber-400/20 bg-amber-500/[0.07] px-3 py-2 text-xs text-amber-100/80">Conecta una cuenta de Google para activar las subidas.</p>
                 {:else if !plugin.secret_configured}
-                  <p class="mt-3 rounded-xl border border-amber-400/20 bg-amber-500/[0.07] px-3 py-2 text-xs text-amber-100/80">Guarda la credencial de Stripe en la bóveda para activar las funciones.</p>
+                  <p class="mt-3 rounded-xl border border-amber-400/20 bg-amber-500/[0.07] px-3 py-2 text-xs text-amber-100/80">Guarda la credencial de {plugin.plugin_key === "google_drive" ? "Google Drive" : "Stripe"} para activar las funciones.</p>
                 {/if}
 
                 <div class="mt-4 flex flex-wrap justify-end gap-2">
@@ -483,7 +742,7 @@
                 data-toggle-audit-logs={plugin.plugin_key}
               >
                 <span class="flex items-center gap-2">
-                  <span>📋 Historial de actividad (auditoría por tienda)</span>
+                  <span>📋 Historial de actividad (auditoría por empresa)</span>
                   {#if logsMap[plugin.plugin_key]?.length > 0}
                     <span class="rounded-full bg-purple-500/20 px-2 py-0.5 text-[10px] text-purple-300 font-mono">
                       {logsMap[plugin.plugin_key].length}
@@ -499,7 +758,7 @@
                     <p class="text-xs text-[var(--color-muted-dim)] py-2 text-center">Cargando registros de auditoría…</p>
                   {:else if logsMap[plugin.plugin_key].length === 0}
                     <div class="rounded-xl border border-white/5 bg-black/30 p-3 text-xs text-center text-[var(--color-muted-dim)]" data-audit-logs-empty>
-                      No hay registros de actividad auditables para este plugin en esta tienda. Las acciones de configuración, pruebas y uso de herramientas quedarán registradas aquí de forma segura.
+                      No hay registros de actividad auditables para este plugin en esta empresa. Las acciones de configuración, pruebas y uso de herramientas quedarán registradas aquí de forma segura.
                     </div>
                   {:else}
                     <div class="max-h-60 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
@@ -535,3 +794,7 @@
     </div>
   {/if}
 </section>
+
+<style>
+  .plugin-logo :global(svg) { width: 100%; height: 100%; display: block; }
+</style>

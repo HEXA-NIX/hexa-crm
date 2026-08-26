@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { browserApi } from "./browser-store";
 import {
   validateProductPublicationInvariants,
+  validateProductFields,
   resolveDefaultsForNewProduct,
 } from "../inventory/publication-rules";
 import type { ProductInput } from "../types";
@@ -14,6 +15,21 @@ describe("Catalog & Supply Chain P0 - Unit & Integration Tests", () => {
   });
 
   describe("Publication & Policy Invariants Validator", () => {
+    it("rejects invalid product identity, negative amounts and unsupported VAT", () => {
+      const base: ProductInput = {
+        sku: "TEST-INVALID",
+        name: "Producto inválido",
+        cost_cents: 100,
+        price_cents: 200,
+        stock: 1,
+        vat_rate: 21,
+      };
+      expect(validateProductFields({ ...base, sku: "" }).valid).toBe(false);
+      expect(validateProductFields({ ...base, price_cents: -1 }).valid).toBe(false);
+      expect(validateProductFields({ ...base, stock: 1.5 }).valid).toBe(false);
+      expect(validateProductFields({ ...base, vat_rate: 23 as ProductInput["vat_rate"] }).valid).toBe(false);
+    });
+
     it("defaults new products to draft and not_sellable", () => {
       const input: ProductInput = {
         sku: "TEST-001",

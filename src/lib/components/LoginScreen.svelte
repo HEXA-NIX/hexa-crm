@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { goto } from "$app/navigation";
   import { api } from "$lib/api/client";
   import { setSession } from "$lib/stores/session";
   import { PRODUCT_DISPLAY_NAME, PRODUCT_TAGLINE } from "$lib/product";
@@ -57,6 +58,7 @@
         activeCompanyId: res.active_company_id ?? null,
         remote,
       });
+      if (res.user.role === "cliente") await goto("/portal");
     } catch (err) {
       error = err instanceof Error ? err.message : "No se pudo iniciar sesión";
       password = "";

@@ -3,6 +3,7 @@
   import { onMount, type Component } from "svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import Toast from "$lib/components/Toast.svelte";
+  import ConfirmDialogHost from "$lib/components/ConfirmDialogHost.svelte";
   import Button from "$lib/components/Button.svelte";
   import Select from "$lib/components/Select.svelte";
   import LoginScreen from "$lib/components/LoginScreen.svelte";
@@ -24,7 +25,7 @@
     setIdleTimeoutMinutes,
   } from "$lib/stores/session";
   import { idleTimeoutMs } from "$lib/auth/idle-timeout";
-  import { api } from "$lib/api/client";
+  import { api, WEB_DATA_MODE } from "$lib/api/client";
   import { configureRemoteOperator } from "$lib/api/client";
   import { page } from "$app/stores";
   import { showToast } from "$lib/stores/ui";
@@ -74,9 +75,33 @@
       title: "Caja y presupuesto",
       subtitle: "Saldo, ingresos y gastos",
     },
+    "/financiacion": {
+      title: "Financiación",
+      subtitle: "Subvenciones, inversores y préstamos de la empresa",
+    },
+    "/gastos": {
+      title: "Facturas recibidas",
+      subtitle: "Facturas recibidas, adjuntos y revisión de gastos",
+    },
+    "/facturas": {
+      title: "Facturas emitidas",
+      subtitle: "Ventas facturadas, series y documentos para clientes",
+    },
+    "/presupuestos": {
+      title: "Presupuestos",
+      subtitle: "Propuestas comerciales, aprobación y facturación",
+    },
+    "/servicios": {
+      title: "Servicios",
+      subtitle: "Catálogo de servicios y tarifas",
+    },
     "/clientes": {
       title: "Clientes",
       subtitle: "Relaciones y datos de contacto",
+    },
+    "/personal": {
+      title: "Personal",
+      subtitle: "Empleados, documentación y nóminas",
     },
     "/impuestos": {
       title: "Impuestos (IVA ES)",
@@ -84,7 +109,7 @@
     },
     "/ajustes": {
       title: "Ajustes",
-      subtitle: "Tienda, usuarios y Ollama",
+      subtitle: "Empresa, usuarios e integraciones",
     },
   };
 
@@ -114,6 +139,13 @@
       configureRemoteOperator($session.remote);
       const me = await api.sessionMe();
       if (me) {
+        if (me.role === "cliente") {
+          setSession(me, token, { companies: [], activeCompanyId: null, remote: $session.remote });
+          if (!$page.url.pathname.startsWith("/portal") && typeof window !== "undefined") {
+            window.location.replace("/portal");
+          }
+          return;
+        }
         let companies = $session.companies;
         let activeCompanyId = $session.activeCompanyId;
         try {
@@ -186,7 +218,10 @@
   $effect(() => {
     if (canEnter && !$mustChangePassword) {
       try {
-        showOnboarding = !isOnboardingDone();
+        // Central CRM data is shared between browsers. A browser-local
+        // onboarding flag must never make an existing company look new again.
+        // Central workspaces are configured from Empresa/Ajustes instead.
+        showOnboarding = WEB_DATA_MODE !== "central" && !isOnboardingDone();
       } catch {
         showOnboarding = false;
       }
@@ -223,8 +258,29 @@
       const c = await api.setActiveCompany(id);
       setActiveCompanyLocal(c);
       showToast(`Empresa activa: ${c.trade_name}`);
-      // Reload current route data
-      if (typeof window !== "undefined") window.location.reload();
+      if (typeof window !== "undefined") {
+        const current = new URL(window.location.href);
+        const projectMatch = current.pathname.match(/^\/proyectos\/([^/]+)$/);
+        let destination = `${current.pathname}${current.search}${current.hash}`;
+        if (projectMatch) {
+          try {
+            // Keep the same project when it is shared with the new company.
+            await api.getWorkProject(decodeURIComponent(projectMatch[1]));
+          } catch {
+            // In a single-project workspace, switching company is effectively
+            // switching project: enter its project directly and keep the tab.
+            try {
+              const available = await api.listWorkProjects();
+              destination = available.length === 1
+                ? `/proyectos/${available[0].uid}${current.search}${current.hash}`
+                : available.length > 1 ? "/proyectos" : "/";
+            } catch {
+              destination = "/";
+            }
+          }
+        }
+        window.location.assign(destination);
+      }
     } catch (err) {
       showToast(err instanceof Error ? err.message : "No se pudo cambiar de empresa", "err");
     } finally {
@@ -282,7 +338,10 @@
   }
 </script>
 
-{#if !$session.ready}
+{#if $page.url.pathname.startsWith("/recibir/")}
+  <!-- Bearer-token document intake is intentionally public and does not load the CRM shell. -->
+  <main class="min-h-dvh">{@render children()}</main>
+{:else if !$session.ready}
   <div class="flex min-h-screen items-center justify-center p-4">
     <div class="text-center">
       <div class="mx-auto mb-4 flex justify-center">
@@ -302,10 +361,19 @@
 {:else if $mustChangePassword}
   <ForcePasswordChange />
   <Toast />
+{:else if $session.user?.role === "cliente"}
+  <div class="min-h-dvh bg-[var(--color-obsidian)]">
+    <header class="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-3 sm:px-8">
+      <a href="/portal" class="flex items-center gap-3"><Logo size={36} /><span><strong class="block text-sm">Portal de cliente</strong><small class="text-[var(--color-muted)]">HEXA CRM</small></span></a>
+      <div class="flex items-center gap-3"><span class="hidden text-sm text-[var(--color-muted)] sm:inline">{$session.user.display_name}</span><Button variant="ghost" onclick={closeSession}>Salir</Button></div>
+    </header>
+    <main class="mx-auto max-w-6xl p-4 sm:p-8">{@render children()}</main>
+    <Toast />
+  </div>
 {:else}
-  <div class="flex h-dvh max-h-dvh overflow-hidden">
+    <div class="flex h-dvh max-h-dvh overflow-hidden">
     <!-- Desktop sidebar -->
-    <div class="hidden h-full shrink-0 md:flex">
+    <div class="relative z-[500] hidden h-full shrink-0 overflow-visible md:flex">
       <Sidebar onLogout={closeSession} />
     </div>
 
@@ -317,7 +385,7 @@
           aria-label="Cerrar menú"
           onclick={() => (mobileNavOpen = false)}
         ></button>
-        <div class="absolute inset-y-0 left-0 z-10 flex h-full w-[min(18rem,88vw)] shadow-2xl">
+        <div class="absolute inset-y-0 left-0 z-[500] flex h-full w-[min(18rem,88vw)] overflow-visible shadow-2xl">
           <Sidebar
             forceExpanded
             onNavigate={() => (mobileNavOpen = false)}
@@ -373,18 +441,20 @@
               {#if $session.companies.length > 1}
                 <Select
                   class="header-company-select"
+                  showSelectedHint
                   value={String($session.activeCompanyId ?? "")}
                   options={$session.companies.map((company) => ({
                     value: String(company.id),
                     label: company.trade_name,
-                    hint: company.code,
+                    hint: `${company.code} · HEXA CRM`,
+                    icon: company.logo_data_url || "/logo-mark.svg",
                   }))}
                   disabled={switchingCompany}
                   onvaluechange={onCompanyChange}
                 />
               {:else if $activeCompany}
                 <strong class="block truncate text-xs font-medium text-[var(--color-text)]">{$activeCompany.trade_name}</strong>
-                <small class="text-[0.55rem] font-bold tracking-[0.12em] text-[var(--color-purple)]">{$activeCompany.code}</small>
+                <small class="text-[0.55rem] font-bold tracking-[0.12em] text-[var(--color-purple)]">{$activeCompany.code} · HEXA CRM</small>
               {:else}
                 <strong class="block truncate text-xs font-medium text-amber-200">Sin empresa asignada</strong>
               {/if}
@@ -399,8 +469,8 @@
                       onclick={() => onCompanyChange(String(company.id))}
                     >
                       <span>
-                        <strong>{company.trade_name}</strong>
-                        <small>{company.code}</small>
+                        <span class="flex items-center gap-2"><img src={company.logo_data_url || "/logo-mark.svg"} alt="" class="company-logo-frame h-7 w-7 rounded-md object-contain" /><strong>{company.trade_name}</strong></span>
+                        <small>{company.code} · HEXA CRM</small>
                       </span>
                       {#if masterOwnCompanies.some((own) => own.id === company.id)}
                         <em>Asignada</em>
@@ -423,7 +493,7 @@
             >
               <p>Empresa activa</p>
               <strong>{$activeCompany.trade_name}</strong>
-              <small>{$activeCompany.code}</small>
+              <small>{$activeCompany.code} · HEXA CRM</small>
             </div>
           {/if}
           <div class="app-header-user hidden items-center gap-2.5 lg:flex">
@@ -485,3 +555,4 @@
     <OnboardingWizard onComplete={() => (showOnboarding = false)} />
   {/if}
 {/if}
+<ConfirmDialogHost />

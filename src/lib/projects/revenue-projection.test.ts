@@ -11,6 +11,7 @@ const project = (overrides: Partial<WorkProject>): WorkProject => ({
   monthly_estimate_cents: 0,
   revenue_target_date: null,
   revenue_milestones: [],
+  documents: [],
   name: "Proyecto propio",
   description: "",
   status: "active",
@@ -108,5 +109,15 @@ describe("project revenue projection", () => {
 
     expect(series[0].income_cents).toBe(125_000);
     expect(series[0].expense_cents).toBe(50_000);
+  });
+
+  it("uses issued invoices by operation month when they are available", () => {
+    const invoices = [
+      { status: "issued", operation_date: "2026-08-17", total_cents: 2_439_119 },
+      { status: "draft", operation_date: "2026-08-20", total_cents: 900_000 },
+      { status: "issued", operation_date: "2026-07-31", total_cents: 100_000 },
+    ];
+    const series = buildProjectRevenueProjection([], [], new Date(2026, 7, 25), 1, 0, invoices as never);
+    expect(series.find((item) => item.month === "2026-08")?.income_cents).toBe(2_439_119);
   });
 });

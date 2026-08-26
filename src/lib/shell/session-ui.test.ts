@@ -14,6 +14,10 @@ const CLI = resolve(__dirname, "../../routes/clientes/+page.svelte");
 const CAJA = resolve(__dirname, "../../routes/caja/+page.svelte");
 const VEN = resolve(__dirname, "../../routes/ventas/+page.svelte");
 const ROADMAP = resolve(__dirname, "../../routes/roadmap/+page.svelte");
+const INVOICES = resolve(__dirname, "../../routes/facturas/+page.svelte");
+const BUDGETS = resolve(__dirname, "../../routes/presupuestos/+page.svelte");
+const DATE_PICKER = resolve(__dirname, "../components/DatePicker.svelte");
+const INPUT = resolve(__dirname, "../components/Input.svelte");
 
 describe("session logout UI (#9)", () => {
   const layout = readFileSync(LAYOUT, "utf8");
@@ -83,6 +87,15 @@ describe("shell Spanish commerce copy (#12)", () => {
     expect(roadmap).toContain("Roadmap de trabajo");
     expect(roadmap).toContain("api.listWorkItems");
   });
+
+  it("keeps the sales destinations inside the sidebar instead of a floating popover", () => {
+    expect(sidebar).toContain("sidebar-sales-children");
+    expect(sidebar).toContain('href: "/facturas"');
+    expect(sidebar).toContain('href: "/presupuestos"');
+    expect(sidebar).toContain('href: "/servicios"');
+    expect(sidebar).not.toContain("sidebar-sales-popover");
+    expect(sidebar).not.toContain("position:fixed");
+  });
 });
 
 describe("create-flow query handlers", () => {
@@ -95,5 +108,35 @@ describe("create-flow query handlers", () => {
     ] as const) {
       expect(src, name).toMatch(/searchParams\.get\(["']nuevo["']\)/);
     }
+  });
+});
+
+describe("date controls", () => {
+  it("uses the shared themed picker and provides a two-month invoice range picker", () => {
+    const css = readFileSync(APP_CSS, "utf8");
+    const invoices = readFileSync(INVOICES, "utf8");
+    const datePicker = readFileSync(DATE_PICKER, "utf8");
+    const input = readFileSync(INPUT, "utf8");
+    expect(css).toContain("::-webkit-calendar-picker-indicator");
+    expect(css).toContain("color-scheme: dark");
+    expect(css).toContain("color-scheme: light");
+    expect(input).toContain("<DatePicker");
+    expect(datePicker).toContain("hexa-date-popover");
+    expect(datePicker).toContain("Borrar");
+    expect(datePicker).toContain("Hoy");
+    expect(datePicker).toContain('type?: "date" | "month"');
+    expect(invoices).toContain("invoice-calendar-months");
+    expect(invoices).toContain("Selecciona un intervalo");
+    expect(invoices).toContain("invoice-date-apply");
+  });
+});
+
+describe("sales editors", () => {
+  it("opens the budget editor in the same full-screen modal pattern as invoices", () => {
+    const budgets = readFileSync(BUDGETS, "utf8");
+    expect(budgets).toContain('<Modal open={editorOpen}');
+    expect(budgets).toContain('size="full"');
+    expect(budgets).not.toContain('{#if editorOpen}');
+    expect(budgets).not.toContain('class="workspace-page editor"');
   });
 });

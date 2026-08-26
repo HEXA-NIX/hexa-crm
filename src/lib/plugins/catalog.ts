@@ -34,7 +34,7 @@ export type PluginCatalogEntry = {
   key: PluginKey;
   name: string;
   description: string;
-  category: "datos" | "pagos";
+  category: "datos" | "pagos" | "almacenamiento";
   capabilities: string[];
   defaultConfig: PluginConfig;
 };
@@ -53,6 +53,17 @@ export const PLUGIN_CATALOG: readonly PluginCatalogEntry[] = [
     },
   },
   STRIPE_PLUGIN_CATALOG_ENTRY,
+  {
+    key: "google_drive",
+    name: "Google Drive",
+    description: "Sube y vincula archivos de proyectos en una carpeta de Google Drive.",
+    category: "almacenamiento",
+    capabilities: ["Subir archivos", "Carpeta configurable", "Enlaces por proyecto"],
+    defaultConfig: {
+      folder_id: "",
+      folder_name: "Documentos Hexa CRM",
+    },
+  },
 ] as const;
 
 export function pluginDefinition(key: unknown): PluginCatalogEntry {
@@ -80,6 +91,16 @@ export function sanitizePluginConfig(key: PluginKey, input: unknown): PluginConf
         "HEXA_PLUGIN_DATABASE_",
       ),
       access_mode: raw.access_mode === "read_write" ? "read_write" : "read_only",
+    };
+  }
+  if (key === "google_drive") {
+    const folderId = String(raw.folder_id ?? "").trim();
+    if (folderId && !/^[a-zA-Z0-9_-]{10,200}$/.test(folderId)) {
+      throw new Error("El ID de carpeta de Google Drive no es válido");
+    }
+    return {
+      folder_id: folderId,
+      folder_name: String(raw.folder_name ?? "Documentos Hexa CRM").trim().slice(0, 120),
     };
   }
   return sanitizeStripeConfig(input);

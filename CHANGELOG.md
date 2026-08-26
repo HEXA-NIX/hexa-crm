@@ -9,7 +9,151 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+- La recepción visual de tickets por WhatsApp ya no marca como correcta una lectura fallida: conserva el original y deja el documento pendiente para releerlo con el modelo de visión configurado.
+- Los Kanban de proyectos para cliente separan «Validación» interna de «Validar cliente». Solo un administrador puede realizar el envío y, al hacerlo, el CRM avisa por WhatsApp a los contactos vinculados; el portal mantiene la tarea pendiente hasta que el cliente la aprueba o solicita cambios.
+- Los tickets y facturas recibidos por WhatsApp conservan una extensión reconocible, permiten abrir el original desde la bandeja o el formulario de revisión, pueden releerse con IA desde su revisión y avisan cuando la lectura automática quedó incompleta. El OCR utiliza un modelo visual independiente del modelo conversacional y Ajustes distingue entre servidor disponible y modelo configurado realmente instalado.
+- Las notas de voz enviadas por WhatsApp pueden transcribirse mediante un endpoint compatible con Whisper y continuar por el mismo flujo de tipo y proyecto; las solicitudes pueden eliminarse con confirmación visual y, una vez aceptadas, enviarse explícitamente al backlog conservando su trazabilidad.
+- Los mensajes de texto recibidos por WhatsApp desde teléfonos registrados preguntan primero si son una sugerencia, mejora, incidencia, nueva funcionalidad o consulta y, cuando el contacto tiene varios proyectos, en cuál debe registrarse. Los administradores solo pueden dirigir solicitudes a proyectos propios o internos del grupo; los proyectos para clientes únicamente aparecen a sus contactos con acceso asignado. En documentos, los administradores sí pueden elegir todas las empresas que administran aunque no tengan WhatsApp propio. Solo los administradores pueden tramitar tickets, facturas, abonos y justificantes, se evitan duplicados ante reintentos del webhook y las clasificaciones documentales abandonadas caducan tras 30 minutos.
+- Todos los inputs monetarios muestran separadores de miles en tiempo real con formato español, manteniendo decimales y cálculos internos sin perder precisión.
+- Los presupuestos y su PDF aplican y presentan primero los descuentos por línea y, sobre ese subtotal, el descuento general.
+- Al anular una factura vinculada, el presupuesto vuelve automáticamente a estado enviado y queda desbloqueado para su edición.
+
+- Las confirmaciones críticas usan ahora un diálogo visual integrado en el CRM; se han eliminado los `alert`, `confirm` y `prompt` nativos del navegador.
+- Los presupuestos convertidos pueden reabrirse para edición anulando de forma segura la factura vinculada, siempre que no tenga cobros ni abonos.
+
+- Los PDF de presupuestos con descuento muestran el valor original y el valor final por línea, el importe total sin descuento, el ahorro conseguido y la inversión final ofrecida al cliente.
+- La economía del proyecto pasa a ser una vista de consulta: muestra subvenciones sin controles de edición y resume la inversión y los préstamos recibidos por la empresa vinculada; la gestión permanece centralizada en Finanzas. Las tareas de proyectos para cliente incorporan doble validación: primero revisión interna y después aprobación o solicitud de cambios desde el portal del cliente antes de marcarlas como hechas.
+- Finanzas: inversiones y préstamos recibidos se sincronizan como entradas de financiación, visibles en el dashboard y en la visión consolidada sin mezclarse con facturación ni IVA.
+- Financiación: alta de inversión por rondas con valoración pre-money/post-money, varios participantes y dilución automática del cap table; inversores y préstamos incorporan resúmenes y filas financieras completas.
+
+- Añadido el apartado empresarial de Financiación para centralizar subvenciones vinculadas, inversores y préstamos por empresa.
+
+- La economía de cada proyecto permite registrar y seguir subvenciones en preparación, negociación, adjudicadas, cobradas, rechazadas o cerradas, diferenciando ayudas a fondo perdido de financiación reembolsable y controlando importes, organismo, expediente, fechas, devolución pendiente y la comisión porcentual de la empresa gestora para obtener el importe neto disponible. El importe efectivamente cobrado se sincroniza como entrada de Caja sin duplicarse al editar y computa como ingreso realizado en el dashboard y las gráficas, separado internamente de la facturación para no alterar el IVA.
+- Trabajo incorpora sprints completos para equipos híbridos: backlog y Kanban del sprint separados, refinamiento con controles de preparación, Sprint Poker asistido por IA, planificación de capacidad humana/IA, revisor humano obligatorio para ejecuciones automáticas, activación, revisión, retrospectiva, cierre e historial con puntos y cumplimiento. La duración parte de dos semanas y ofrece accesos de una a cuatro semanas o un intervalo personalizado.
+- El dashboard, la cartera y la economía de cada proyecto calculan de forma coherente la facturación desde las facturas emitidas por fecha de operación, aunque todavía estén pendientes de cobro y no exista un movimiento de ingreso en Caja.
+- El objetivo económico mensual del centro de proyectos se obtiene prioritariamente de los hitos previstos del mes; el objetivo manual de empresa solo se usa cuando no existen hitos aplicables.
+
+- Mover tareas o subtareas entre columnas del Kanban actualiza la tarjeta y el estado automático de su padre sin recargar la ficha completa, anima suavemente el traslado y desplaza el tablero solo cuando la tarjeta destino queda fuera de la zona visible.
+- Al arrastrar una tarea o subtarea hacia un borde lateral, el Kanban se desplaza automáticamente para descubrir y alcanzar columnas que estaban fuera de la pantalla.
+- Pulsar `Escape` durante un arrastre cancela el movimiento de la tarea o subtarea sin guardar ningún cambio.
+- El Kanban conserva un ancho mínimo legible por columna también en portátiles y usa desplazamiento horizontal cuando no caben todas; las subtareas reservan espacio para mostrar al menos una línea de título, las cabeceras permanecen visibles y alineadas al bajar toda la página y todas las columnas alcanzan la altura de la más larga para facilitar cualquier destino al arrastrar.
+- La ficha muestra primero el proyecto base y carga bajo demanda únicamente los datos de la pestaña activa; al navegar reutiliza tareas, equipo, clientes o contabilidad ya consultados sin bloquear Resumen con módulos ajenos.
+- Las pestañas y el progreso global distinguen la carga diferida de un resultado vacío: muestran indicadores de carga y no enseñan temporalmente «Sin tareas», ceros o mensajes equivalentes antes de recibir los datos.
+- La descripción de cabecera del proyecto aparece compactada a dos líneas, con degradado y el control «Ver más / Ver menos» alineado al extremo derecho de la fila de fechas, para mantener las pestañas accesibles en la primera pantalla.
+- Las empresas Dev pueden crear perfiles de cliente vinculados a un proyecto. El portal aislado permite consultar resumen, hitos, facturas enviadas y tareas en modo lectura, y crear o responder únicamente a las solicitudes del propio cliente.
+- Al dar de alta un perfil cliente con teléfono, se envía automáticamente un WhatsApp de bienvenida con el proyecto asignado, las funciones disponibles y el canal adecuado para documentos, bugs y sugerencias.
+- Los presupuestos admiten descuentos por línea y generales, configurables como porcentaje o importe fijo; se reparten por línea antes de calcular el IVA, se conservan al editar o duplicar y aparecen reflejados en el PDF comercial.
+- Los presupuestos se pueden descargar directamente como PDF desde su ficha y desde la vista previa, conservando la plantilla comercial, el logo y los datos de la empresa activa.
+- Presupuestos y facturas comparten una nueva plantilla comercial inspirada en propuestas multipágina: cabecera de marca, alcance estructurado con títulos, subtítulos, tarjetas de fases y fichas de tecnologías utilizadas o previstas, tabla económica, totales y condiciones en estilo editorial oscuro; la vista previa y el PDF impreso cargan automáticamente el nombre, logo y datos fiscales de la empresa activa.
+- Crear, editar y duplicar presupuestos abre ahora un editor modal a pantalla completa, coherente con los flujos de nueva factura y nuevo servicio, sin desplazar el listado de Presupuestos.
+- Todos los campos de fecha y periodo usan un selector HEXA unificado, legible en tema oscuro y claro, con navegación por meses o años, acciones «Hoy» y «Borrar» y sin depender del calendario nativo del navegador.
+- Los campos de fecha muestran iconos legibles en ambos temas y Facturas estrena un selector de rango moderno con accesos rápidos, dos meses, rango resaltado y acciones de borrar, cancelar y aplicar.
+- Los controles de fecha y paginación de Facturas ganan separación, alineación y áreas pulsables consistentes para que las flechas no queden pegadas a textos o bordes.
+- La navegación de Ventas integra Facturas, Presupuestos y Servicios como un submenú dentro de la barra lateral, evitando el panel flotante que ocultaba el contenido.
+- Proyectos se convierte en un centro integral con centro de mando, cronología, carga de equipo, economía y actualizaciones de cartera; cada proyecto incorpora Plan, Trabajo, Equipo, Documentos y Actividad, además de actualizaciones periódicas, hitos operativos, riesgos, decisiones, dependencias, ciclos, capacidad y estimaciones. Se retira el envío manual a Orca de la interfaz de Proyectos para delegar la futura automatización en el orquestador HEXA.
+
+- La cartera carga los contadores desde la empresa de tareas de cada proyecto interno: VOURA vuelve a mostrar sus 376 tareas sin mezclar tenants. Sus tarjetas enseñan además el objetivo del mes previsto (o el próximo hito) y lo ingresado en ese mismo periodo.
+- La recarga directa de `/proyectos/<id>` deja de responder 404/500: la ruta dinámica queda registrada en el servidor Node sin intentar prerenderar identificadores de proyecto.
+- Las subtareas sin responsable o vencimiento propio muestran y usan los valores efectivos de la tarea padre en filtros y avisos, sin asignarlos ni guardarlos como datos propios.
+- Los proyectos internos de empresas del grupo vuelven a permitir crear, editar y visualizar hitos mensuales de facturación prevista; al guardar ya no se eliminan sus previsiones por no ser un «producto propio» del estudio.
+- Se completa la cobertura del modo claro en modales, desplegables, paneles de IA, tarjetas editoriales y superficies de Ventas, Trabajo, Caja y Ajustes; los estados informativos usan tonos oscuros legibles y los botones principales mantienen contraste suficiente.
+- Se incorpora el área administrativa «Personal»: altas y fichas laborales separadas de los usuarios del CRM, vínculo opcional entre ambos, registro de nóminas por periodo y documentación, importes en céntimos y pago conectado con una salida de Caja. Los datos quedan aislados por empresa y restringidos a administradores; el módulo registra la nómina de la asesoría, sin sustituir su cálculo laboral.
+- La configuración que antes vivía en un espacio global (IVA, Ollama, objetivos, nombre y copias) se guarda ahora por empresa con compatibilidad de lectura para instalaciones antiguas; las copias ya no incluyen ajustes de otros tenants.
+- El arranque central bloquea de forma estricta la restauración destructiva, añade perfiles fiscales y ajustes por defecto para todas las empresas activas, y refuerza las relaciones y numeración por empresa en PostgreSQL.
+- Las ventas sincronizan el libro de stock legado con el nuevo saldo por ubicación; se validan cantidades, precios, IVA, movimientos de inventario y estados de gastos antes de persistirlos.
+
+- Los proyectos internos pueden designar una empresa propietaria: sus tareas se guardan en ese espacio y al abrir el proyecto se cambia automáticamente a la empresa correcta. Los productos propios heredan el logo de su empresa mientras no tengan una imagen personalizada.
+- La clasificación visible de proyectos deja claro que todos pertenecen al área Dev; la empresa propietaria y el tipo económico siguen siendo datos independientes.
+- El acceso de Visión pasa a llamarse Dashboard y se corrige la consulta de saldo que estaba intentando leer `task_company_id` desde caja.
+- El alta y la ficha de empresa permiten escoger y modificar el tipo de negocio (Dev, tienda u otra actividad); las empresas nuevas creadas desde Dev parten como Dev.
+- WhatsApp permite reutilizar el número ya vinculado en otra empresa accesible, sin escanear un segundo QR, manteniendo el enrutado documental por empresa.
+- Los proyectos internos heredan también el logo de la empresa de tareas/propietaria cuando no tienen una imagen propia, incluidos los proyectos de empresas del grupo como NIU.
+- El formulario de proyectos adapta sus datos al tipo: los productos propios no piden logo, empresa cliente ni contacto; los proyectos para cliente ofrecen el catálogo de contactos de HEXA y limpian relaciones antiguas al cambiar de tipo.
+- Los proyectos para clientes no muestran logos heredados: solo enseñan una imagen si se ha subido expresamente en su ficha.
+- Los proyectos para clientes se guardan directamente con un cliente del catálogo de HEXA; la empresa propietaria solo se exige para proyectos internos del grupo.
+- El selector de clientes de proyectos Dev carga siempre el catálogo de HEXA, aunque el espacio de trabajo activo sea otra empresa del grupo.
+- Ajustes ya no duplica el nombre de la tienda; el IVA por defecto queda integrado junto a los datos fiscales de la empresa activa.
+- Ajustes llama «Empresa» a los datos de la organización activa; WhatsApp queda dentro de Integraciones/Plugins y conserva su panel completo mediante un acceso de configuración.
+- Las tarjetas de integraciones muestran marcas inline de PostgreSQL, Stripe y Google Drive para que sigan visibles sin conexión y en la app nativa.
+- WhatsApp aparece como una integración más junto a PostgreSQL, Stripe y Google Drive, con acceso directo a su configuración QR y de recepción documental.
+- La configuración de WhatsApp se despliega dentro de su propia tarjeta; una sesión desconectada ya no muestra el teléfono antiguo del perfil y el número visible procede de la sesión real conectada.
+- La reconexión QR reutiliza el dispositivo compartido cuando está desconectado y no muestra una empresa origen arbitraria.
+- El alta de usuarios del equipo central genera y guarda correctamente contraseñas temporales alfanuméricas de 14 caracteres.
+- El alta y edición de usuarios del equipo los vincula a la empresa activa; se reparó la membresía del usuario Sergi para recuperar el espacio Dev y sus proyectos en nuevas sesiones.
+- La navegación de proyectos se muestra para cualquier empresa de tipo Dev/estudio de desarrollo, no solo para el código histórico DEV.
+- El detalle de cada proyecto identifica siempre el bloque «Apartados del proyecto» y ofrece un alta clara cuando todavía no hay trabajo asociado.
+- El asistente de puesta en marcha ya no se muestra en cada navegador cuando se usa el CRM central; los datos existentes se abren directamente y la configuración queda en Ajustes.
+- Impuestos ya no inventa modelos por el simple hecho de ser autónomo o sociedad: el perfil fiscal guarda un cuestionario por empresa en PostgreSQL y calcula la lista de modelos a partir de IVA, IRPF, retenciones, operaciones UE, terceros, empleados, Sociedades y activos en el extranjero.
+- El cuestionario separa tener empleados de practicar retenciones; identifica 111/190 solo cuando se responde esa obligación y deja explícito que nóminas, altas/bajas y Sistema RED quedan para el módulo laboral.
+- La configuración fiscal se separa del área de trabajo: el cuestionario y VERI*FACTU pasan a Ajustes, mientras Impuestos muestra un aviso con acceso directo cuando la empresa aún no está configurada.
+- El detalle de proyecto se divide en Resumen, Información, Gestión, Solicitudes y Economía, con URLs compartibles y una portada que concentra salud, progreso y accesos rápidos.
+- Las tareas antiguas de proyectos internos se reasocian a la empresa propietaria cuando quedaron en el tenant del estudio durante la migración multiempresa, sin tocar filas con categorías o responsables vinculados.
+- La navegación distingue cartera y empresa independiente: HEXA Studio conserva «Proyectos», mientras una empresa con un único proyecto muestra «Gestión» y entra directamente en el resumen de su espacio.
+- Los indicadores de proyectos reconocen fechas ISO completas al calcular tareas vencidas y próximas, tanto en el resumen como en la cartera.
+- Al cambiar de empresa se reinicia el contexto en el Dashboard, evitando arrastrar rutas de proyectos o registros pertenecientes al tenant anterior.
+
 ### Added
+
+- Recepción documental por WhatsApp con enlace público temporal: previsualización, selección de tipo, caducidad de 30 minutos, uso único y metadatos Open Graph seguros para la vista previa del enlace.
+- La configuración de empresa permite subir un logo PNG/JPG/WebP (máximo 1 MB), que se muestra en el selector de empresa, la navegación y la página pública de recepción de documentos.
+- La sección «Tienda» incorpora la ficha completa de la empresa activa: razón social, nombre comercial, NIF/CIF, tipo de entidad, dirección fiscal y datos de contacto.
+- Los logos de empresa ya no usan fondos blancos: adoptan el marco y halo lila de Hexa, con la marca Hexa como fallback cuando no hay logo configurado.
+- El dashboard incorpora una visión consolidada de las empresas autorizadas, con emitido, cobrado, pendiente y recibido por empresa, manteniendo la contabilidad aislada.
+- Los proyectos distinguen explícitamente entre producto propio, trabajo para cliente y proyecto interno de grupo, con empresa propietaria/cliente, contacto opcional y migración compatible con proyectos existentes.
+- Ajustes permite crear una empresa legal independiente (por ejemplo, Voura), asignarla al usuario administrador y activarla para gestionar su facturación, caja e impuestos de forma aislada.
+- El webhook de documentos de WhatsApp solo acepta remitentes cuyo teléfono esté registrado en un usuario activo miembro de la empresa receptora; los remitentes desconocidos se ignoran sin respuesta.
+- Las cabeceras de los listados tabulares principales (facturas, ventas, caja, impuestos e inventario) permiten ordenar ascendente/descendente con indicador visual.
+- Las facturas manuales pueden guardarse como borrador editable; al emitirlas pasan a estado inmutable y solo admiten cobro, anulación o abono rectificativo, sin volver a modificar sus datos registrados.
+- El registro de cobros se realiza desde un popup con validación de importe pendiente y mensajes de error visibles.
+
+- Primera base de la bandeja de gastos y facturas recibidas: adjuntos PDF/imagen, revisión, proyecto asociado y aprobación que genera el movimiento de Caja.
+- Webhook firmado de WhatsApp para convertir mensajes con documentos en borradores de gastos. El teléfono receptor determina la empresa y, si el mismo número está vinculado a varias, el remitente elige primero el destino desde WhatsApp.
+- El flujo de recepción por WhatsApp envía una encuesta para clasificar tickets y facturas; el parche de GOWA descifra el voto y lo entrega al webhook, con fallback textual para instalaciones antiguas.
+- Botón «Leer WhatsApp» para consultar multimedia de GOWA, descargar la última foto/documento y extraer sus datos mediante un modelo de visión Ollama antes de crear el borrador.
+- Primera fase fiscal: perfil fiscal por empresa, IVA repercutido y soportado, retenciones y borrador revisable del modelo 303 con exportación CSV. No realiza presentación ante la AEAT.
+- Facturación emitida separada de las facturas recibidas: series y numeración por empresa, conversión de ventas a factura o simplificada, IVA/IRPF, estados de emisión/anulación e impresión del documento.
+- El ciclo de factura incorpora fecha de operación y vencimiento, cobros parciales por método, estado pendiente/parcial/pagada y emisión de rectificativas/abonos vinculados.
+- Las facturas recibidas admiten pagos parciales por método, estados pendiente/parcial/pagada y un movimiento de Caja por cada pago registrado.
+- Preparación VERI*FACTU por empresa: registros de alta y anulación encadenados con SHA-256, URL del QR tributario de pruebas, exportación JSON y comprobación de integridad local. La remisión automática a la AEAT queda pendiente de certificado, firma y conexión homologada.
+- Las facturas emitidas pueden crearse directamente sin venta, con cliente, líneas, IVA, IRPF, vencimiento, notas e impresión, manteniendo la trazabilidad VERI*FACTU.
+- El editor de facturas usa un flujo por secciones con selector de productos, líneas y totales automáticos, y abre una vista previa limpia tras emitir para imprimir o guardar en PDF.
+- La serie de facturación queda configurada por empresa en el perfil fiscal; la factura toma automáticamente los datos de la empresa activa y permite crear o actualizar el cliente desde el propio formulario.
+- El listado de facturas incorpora una vista tabular con búsqueda, filtros por estado, cobro, cliente, serie y rango de fechas, además de acciones rápidas para PDF, cobro, abono y anulación.
+- Los filtros del listado incluyen periodos rápidos de mes, trimestre actual/anterior, año actual/anterior y rango personalizado; el editor de nueva factura ocupa ahora toda la pantalla.
+- El periodo personalizado del listado se selecciona mediante calendario y las líneas de factura aceptan cantidades/precios numéricos correctamente para actualizar base, IVA e importe total en tiempo real.
+- El selector de periodo personalizado muestra dos meses en un único calendario para elegir inicio y fin, y el editor de factura muestra el error de emisión dentro del formulario.
+
+### Fixed
+
+- La recepción de facturas por WhatsApp ya no requiere una sesión web para guardar el borrador y tolera reintentos del webhook sin duplicar ni reabrir documentos procesados.
+
+- La página Trabajo selecciona inicialmente al usuario conectado en el filtro de responsable, sin impedir cambiar después a otro usuario o a todos.
+- Los hitos económicos no permiten repetir mes y, después de elegir uno, los siguientes selectores solo ofrecen meses posteriores disponibles.
+- Las tareas entregadas en Validación dejan de contarse como pendientes o vencidas del responsable y no aparecen en sus avisos operativos; permanecen separadas como trabajo pendiente de revisión.
+
+- El Kanban de proyectos distribuye correctamente sus seis columnas; «Hecho» permanece visible en escritorio y accesible mediante desplazamiento horizontal en pantallas más estrechas.
+
+- El resumen de tareas por WhatsApp excluye estrictamente registros sin fecha o con fechas no válidas.
+- Al editar el teléfono del usuario que tiene la sesión iniciada, la sección WhatsApp actualiza inmediatamente el perfil y habilita la conexión QR sin exigir volver a iniciar sesión.
+- La subida de documentación de proyectos a Google Drive muestra ahora la ficha recién creada al principio, permite editar inmediatamente su título, limpia el selector al finalizar y presenta los errores dentro del formulario.
+
+### Added
+
+- Las zonas de subida de documentos, logos de proyecto y fotos de usuario aceptan ahora arrastrar y soltar, con realce visual y las mismas validaciones de formato y tamaño.
+- Cada proyecto incorpora un registro de solicitudes y sugerencias con tipo, solicitante, impacto, prioridad, responsable, estados de revisión, conversación y conversión trazable a tarea.
+- Al crear tareas, subtareas, capturas rápidas o importaciones, se preselecciona como responsable al usuario que mantiene la sesión iniciada.
+- El stack de cada proyecto usa un catálogo visual con logos, selección rápida y valores personalizados; añade categorías específicas para App móvil/escritorio y Plugins/streaming, incluyendo Twitch, YouTube y OBS.
+- El flujo de tareas incorpora una columna de Validación entre En progreso y Hecho, con historial de comentarios, solicitud de cambios y aprobación; no se permite completar una tarea sin pasar antes por revisión.
+- Los usuarios del equipo pueden tener una foto de perfil propia, editable desde Ajustes → Equipo y visible en el listado de miembros.
+- Cada proyecto admite una imagen/logo propia (PNG, JPG o WebP) y el resumen semanal por WhatsApp agrupa el avance por proyecto, muestra actividad de los últimos siete días y enlaza directamente a sus tareas pendientes.
+
+- El panel de proyectos permite enviar al WhatsApp del admin un resumen confirmado de tareas vencidas y de los próximos siete días, dividido en mensajes legibles con fecha, prioridad, proyecto y enlace a Hexa CRM.
+- Integración inicial de WhatsApp mediante GOWA: teléfono internacional por usuario, sesión QR aislada por empresa/usuario, estado, desconexión y envío individual con confirmación y auditoría; el modo local incorpora un puente de pruebas sin PostgreSQL.
+- Cada proyecto puede reunir documentación mediante enlaces, rutas de archivos y notas internas, con gestión administrativa y persistencia local/PostgreSQL.
+- La ficha de proyecto incorpora un PRD con formato y un stack tecnológico estructurado para centralizar la definición funcional y técnica.
+- La definición de proyecto se amplía con resumen, problema, objetivos, usuarios, alcance, requisitos, aceptación, riesgos, dependencias y métricas; la vista rápida agrupa frontend, backend, datos, infraestructura, despliegue, integraciones, IA y herramientas, con accesos a repositorio y entornos.
+- Los modales de edición de proyectos, tareas, definición, documentación e importación usan anchos amplios adaptados a formularios complejos.
+- Capa extensible de almacenamiento documental con Google Drive como primer proveedor: conexión OAuth de un solo clic, renovación automática, credencial cifrada, carpeta configurable y subida de ficheros de hasta 20 MB desde la ficha del proyecto.
 
 - Integración inicial de tareas con Orca: despacho desde la ficha, cola RPC autenticada, worker local con worktree Codex y cierre automático condicionado a tests, build y commit.
 - Ajustes incorpora una sección administrativa de Orca para guardar la configuración local no sensible y copiar el comando de arranque sin persistir el token de sesión.
@@ -30,6 +174,14 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 - Los márgenes negativos se muestran con signo y color rojo; el gráfico mensual representa los gastos como barras rojas bajo una línea de cero proporcional al rango real.
 
 ### Changed
+
+- Las tarjetas del listado de proyectos muestran un logo compacto y usan la inicial del proyecto cuando todavía no se ha cargado una imagen.
+- Las tareas que vencen en siete días o menos se destacan en amarillo; las vencidas permanecen en rojo y la tarea principal hereda la alerta más grave de cualquiera de sus subtareas.
+- Una tarea principal se marca visualmente en peligro cuando cualquiera de sus subtareas está bloqueada o vencida, mostrando el origen del riesgo en la propia tarjeta.
+- El estado técnico `inbox` se presenta como «Backlog», siguiendo la nomenclatura habitual de Kanban, y Validación adopta una identidad visual azul en columna, etiquetas, chat y avatares.
+- Las subtareas aparecen plegadas por defecto al entrar en un proyecto y se despliegan bajo demanda mediante la flecha de su tarea principal.
+- Las tareas se ordenan consistentemente desde la fecha de vencimiento más próxima hasta la más lejana, dejando las que no tienen fecha al final; las tareas y subtareas abiertas que ya han vencido se resaltan en rojo.
+- Las tareas y subtareas muestran el avatar del responsable en lugar de su nombre; cuando no existe una foto se utiliza su inicial y el nombre permanece disponible como ayuda accesible.
 
 - El progreso de proyectos y del portafolio excluye las tareas archivadas del total para no penalizar artificialmente los porcentajes.
 - El portafolio excluye proyectos archivados de sus indicadores operativos; los formularios validan fechas e importes, y la planificación económica ofrece siempre 36 meses.

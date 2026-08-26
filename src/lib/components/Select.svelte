@@ -5,6 +5,7 @@
     value: string;
     label: string;
     hint?: string;
+    icon?: string;
     disabled?: boolean;
   };
 
@@ -15,6 +16,7 @@
     placeholder = "Seleccionar…",
     required = false,
     disabled = false,
+    showSelectedHint = false,
     onvaluechange,
     class: className = "",
   }: {
@@ -24,6 +26,7 @@
     placeholder?: string;
     required?: boolean;
     disabled?: boolean;
+    showSelectedHint?: boolean;
     onvaluechange?: (value: string) => void;
     class?: string;
   } = $props();
@@ -82,11 +85,15 @@
       }}
     >
       <span
-        class="min-w-0 truncate {selected
+        class="flex min-w-0 items-center gap-2 truncate {selected
           ? 'text-[var(--color-text)]'
           : 'text-[var(--color-muted-dim)]'}"
       >
-        {display}
+        {#if selected?.icon}<img src={selected.icon} alt="" class="company-logo-frame h-8 w-8 shrink-0 rounded-lg object-contain" />{/if}
+        <span class="min-w-0 truncate">
+          <span class="block truncate">{display}</span>
+          {#if showSelectedHint && selected?.hint}<small class="block truncate text-[0.58rem] font-bold uppercase tracking-[0.14em] text-[var(--color-muted-dim)]">{selected.hint}</small>{/if}
+        </span>
       </span>
       <span
         class="select-chevron shrink-0 text-[var(--color-purple)] transition-transform duration-200 {open
@@ -124,7 +131,7 @@
               }}
             >
               <span class="min-w-0 flex-1">
-                <span class="block font-medium">{opt.label}</span>
+                <span class="flex items-center gap-3 font-medium">{#if opt.icon}<img src={opt.icon} alt="" class="company-logo-frame h-10 w-10 shrink-0 rounded-lg object-contain" />{/if}<span>{opt.label}</span></span>
                 {#if opt.hint}
                   <span class="mt-0.5 block text-[11px] text-[var(--color-muted-dim)]">{opt.hint}</span>
                 {/if}

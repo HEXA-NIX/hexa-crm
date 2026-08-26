@@ -9,7 +9,7 @@ function endpoint(config: RemoteOperatorConfig, path: string) {
 }
 
 function asUser(operator: RemoteLogin["operator"]): AuthUser {
-  return { id: 0, username: operator.username, display_name: operator.display_name, role: operator.role, active: true, created_at: new Date().toISOString(), must_change_password: false, temp_password_issued_at: null };
+  return { id: 0, username: operator.username, display_name: operator.display_name, phone: "", role: operator.role, active: true, created_at: new Date().toISOString(), must_change_password: false, temp_password_issued_at: null };
 }
 
 async function request<T>(config: RemoteOperatorConfig, token: string, path: string, fetchImpl: typeof fetch = fetch) {

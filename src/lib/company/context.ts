@@ -7,6 +7,24 @@ import type { Company, CompanyMember, UserRole } from "../types";
 export const DEFAULT_COMPANY_CODE = "SHOP";
 export const PROJECT_COMPANY_CODE = "DEV";
 
+/**
+ * Dev workspaces are identified by their business kind, not only by the
+ * historical DEV code. This keeps projects, tasks and the project navigation
+ * available for group companies such as NIU, NIX-0 or Voura as well.
+ */
+export function isProjectCompany(
+  company: Pick<Company, "kind" | "code"> | null | undefined,
+): boolean {
+  return company?.kind === "software_studio" || company?.code === PROJECT_COMPANY_CODE;
+}
+
+/** The studio manages a portfolio; product companies manage their own workspace directly. */
+export function isProjectPortfolioCompany(
+  company: Pick<Company, "code"> | null | undefined,
+): boolean {
+  return company?.code?.toUpperCase() === PROJECT_COMPANY_CODE;
+}
+
 export function seedCompanies(createdAt: string): Company[] {
   return [
     {

@@ -42,6 +42,8 @@ export const POST: RequestHandler = async ({ request }) => {
       return json({ error: "Comando ausente" }, { status: 400 });
     }
 
+    await postgresApi.assert_rpc_access(String(cmd), token);
+
     let result: any;
 
     switch (cmd) {
@@ -57,6 +59,24 @@ export const POST: RequestHandler = async ({ request }) => {
       case "session_me":
         result = await postgresApi.session_me(token);
         break;
+      case "whatsapp_status":
+        result = await postgresApi.whatsapp_status(token);
+        break;
+      case "whatsapp_available_links":
+        result = await postgresApi.whatsapp_available_links(token);
+        break;
+      case "whatsapp_use_shared_link":
+        result = await postgresApi.whatsapp_use_shared_link(Number(args?.source_company_id), token);
+        break;
+      case "whatsapp_login_qr":
+        result = await postgresApi.whatsapp_login_qr(token);
+        break;
+      case "whatsapp_logout":
+        result = await postgresApi.whatsapp_logout(token);
+        break;
+      case "whatsapp_send":
+        result = await postgresApi.whatsapp_send(String(args?.phone ?? ""), String(args?.message ?? ""), !!args?.confirmed, token);
+        break;
       case "list_companies":
         result = await postgresApi.list_companies(token, !!args?.include_all);
         break;
@@ -66,8 +86,17 @@ export const POST: RequestHandler = async ({ request }) => {
       case "set_active_company":
         result = await postgresApi.set_active_company(args?.company_id as number, token);
         break;
+      case "update_company_profile":
+        result = await postgresApi.update_company_profile(args?.input ?? {}, token);
+        break;
+      case "create_company":
+        result = await postgresApi.create_company(args?.input ?? {}, token);
+        break;
       case "billing_by_company":
         result = await postgresApi.billing_by_company(token);
+        break;
+      case "group_financial_summary":
+        result = await postgresApi.group_financial_summary(token);
         break;
       case "list_plugins":
         result = await postgresApi.list_plugins(token);
@@ -107,6 +136,18 @@ export const POST: RequestHandler = async ({ request }) => {
       case "list_users":
         result = await postgresApi.list_users(token);
         break;
+      case "list_employees":
+        result = await postgresApi.list_employees(token);
+        break;
+      case "upsert_employee":
+        result = await postgresApi.upsert_employee(args?.input, token);
+        break;
+      case "list_payrolls":
+        result = await postgresApi.list_payrolls(args?.employee_id == null ? null : Number(args.employee_id), token);
+        break;
+      case "upsert_payroll":
+        result = await postgresApi.upsert_payroll(args?.input, token);
+        break;
       case "upsert_user":
         result = await postgresApi.upsert_user(args?.input, token);
         break;
@@ -116,6 +157,11 @@ export const POST: RequestHandler = async ({ request }) => {
       case "complete_forced_password_change":
         result = await postgresApi.complete_forced_password_change(args?.current_password as string, args?.new_password as string, token);
         break;
+      case "portal_list_projects": result = await postgresApi.portal_list_projects(token); break;
+      case "portal_get_project": result = await postgresApi.portal_get_project(String(args?.reference ?? ""), token); break;
+      case "portal_create_request": result = await postgresApi.portal_create_request(String(args?.reference ?? ""), args?.input ?? {}, token); break;
+      case "portal_add_request_message": result = await postgresApi.portal_add_request_message(String(args?.reference ?? ""), String(args?.request_id ?? ""), String(args?.text ?? ""), token); break;
+      case "portal_validate_task": result = await postgresApi.portal_validate_task(String(args?.reference ?? ""), Number(args?.task_id), args?.decision === "approved" ? "approved" : "changes_requested", String(args?.message ?? ""), token); break;
       case "list_products":
         result = await postgresApi.list_products(!!args?.active_only, token);
         break;
@@ -132,7 +178,7 @@ export const POST: RequestHandler = async ({ request }) => {
         result = await postgresApi.adjust_stock(args?.product_id as number, args?.delta as number, args?.reason as string, token);
         break;
       case "list_customers":
-        result = await postgresApi.list_customers(token);
+        result = await postgresApi.list_customers(token, args?.company_id == null ? null : Number(args.company_id));
         break;
       case "upsert_customer":
         result = await postgresApi.upsert_customer(args?.input, token);
@@ -162,11 +208,45 @@ export const POST: RequestHandler = async ({ request }) => {
       case "create_cash_movement":
         result = await postgresApi.create_cash_movement(args?.input, token);
         break;
+      case "sync_project_grant_income":
+        result = await postgresApi.sync_project_grant_income(args?.input, token);
+        break;
+      case "sync_company_financing_income":
+        result = await postgresApi.sync_company_financing_income(args?.input, token);
+        break;
+      case "list_expense_documents": result = await postgresApi.list_expense_documents(token); break;
+      case "upsert_expense_document": result = await postgresApi.upsert_expense_document(args?.input, token); break;
+      case "approve_expense_document": result = await postgresApi.approve_expense_document(Number(args?.id), token); break;
+      case "list_invoices": result = await postgresApi.list_invoices(token); break;
+      case "issue_invoice": result = await postgresApi.issue_invoice(args?.input, token); break;
+      case "cancel_invoice": result = await postgresApi.cancel_invoice(Number(args?.id), token); break;
+      case "list_budgets": result = await postgresApi.list_budgets(token); break;
+      case "get_budget": result = await postgresApi.get_budget(Number(args?.id), token); break;
+      case "upsert_budget": result = await postgresApi.upsert_budget(args?.input, token); break;
+      case "update_budget_status": result = await postgresApi.update_budget_status(Number(args?.id), args?.status, token); break;
+      case "convert_budget_to_invoice": result = await postgresApi.convert_budget_to_invoice(Number(args?.id), token); break;
+      case "delete_budget": result = await postgresApi.delete_budget(Number(args?.id), token); break;
+      case "list_invoice_payments": result = await postgresApi.list_invoice_payments(Number(args?.invoice_id), token); break;
+      case "add_invoice_payment": result = await postgresApi.add_invoice_payment(args?.input, token); break;
+      case "list_expense_payments": result = await postgresApi.list_expense_payments(Number(args?.expense_id), token); break;
+      case "add_expense_payment": result = await postgresApi.add_expense_payment(args?.input, token); break;
+      case "list_verifactu_records": result = await postgresApi.list_verifactu_records(token); break;
+      case "verify_verifactu_chain": result = await postgresApi.verify_verifactu_chain(token); break;
+      case "sync_whatsapp_expense": result = await postgresApi.sync_whatsapp_expense(token, args?.kind); break;
       case "get_cash_balance":
         result = await postgresApi.get_cash_balance(token);
         break;
       case "vat_summary":
         result = await postgresApi.vat_summary(args?.from as string, args?.to as string, token);
+        break;
+      case "list_fiscal_profiles":
+        result = await postgresApi.list_fiscal_profiles(token);
+        break;
+      case "upsert_fiscal_profile":
+        result = await postgresApi.upsert_fiscal_profile(args?.input, token);
+        break;
+      case "model303_draft":
+        result = await postgresApi.model303_draft(args?.from as string, args?.to as string, token);
         break;
       case "dashboard_stats":
         result = await postgresApi.dashboard_stats(token);
@@ -176,6 +256,9 @@ export const POST: RequestHandler = async ({ request }) => {
         break;
       case "update_settings":
         result = await postgresApi.update_settings(args?.partial, token);
+        break;
+      case "upload_project_file":
+        result = await postgresApi.upload_project_file(args?.input, token);
         break;
       case "ai_chat":
         result = await postgresApi.ai_chat(args?.messages, token);
@@ -200,6 +283,9 @@ export const POST: RequestHandler = async ({ request }) => {
         break;
       case "upsert_work_item":
         result = await postgresApi.upsertWorkItem(args?.input, token);
+        break;
+      case "submit_task_for_client_validation":
+        result = await postgresApi.submit_task_for_client_validation(Number(args?.task_id), token);
         break;
       case "archive_work_item":
         result = await postgresApi.archiveWorkItem(args?.id as number, token);
@@ -274,7 +360,10 @@ export const POST: RequestHandler = async ({ request }) => {
         return json({ error: `Comando no soportado: ${cmd}` }, { status: 400 });
     }
 
-    return json(result);
+    // SvelteKit serializes `undefined` as an empty response.  The browser
+    // client expects JSON for every RPC call (including void commands such as
+    // logout), so always return a small acknowledgement for those commands.
+    return json(result === undefined ? { ok: true } : result);
   } catch (error: any) {
     console.error(`Error en rpc endpoint [POST]:`, error);
     const code = error?.code || error?.errors?.[0]?.code;

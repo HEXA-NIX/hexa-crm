@@ -24,6 +24,12 @@ describe("ajustes layout — category navigation", () => {
     expect(src).toContain("data-ajustes-shell");
   });
 
+  it("permite arrastrar una foto al editor de usuario", () => {
+    expect(src).toContain("data-user-avatar-dropzone");
+    expect(src).toContain("dropUserAvatar");
+    expect(src).toContain("userAvatarDragActive");
+  });
+
   it("exposes one active panel at a time (not all sections stacked)", () => {
     // Conditional branches per section — not a flat monoblock of every Card at once
     expect(src).toMatch(/activeSection === ["']cuenta["']/);
@@ -46,9 +52,11 @@ describe("ajustes layout — category navigation", () => {
     // Labels come from catalog; page iterates navSections
     expect(src).toMatch(/sec\.label/);
     // Catalog itself has Spanish labels
-    for (const label of ["Cuenta", "Tienda", "Equipo", "Asistente IA", "Actualizaciones", "Sistema"]) {
+    for (const label of ["Cuenta", "Empresa", "Equipo", "Asistente IA", "Actualizaciones", "Sistema"]) {
       expect(AJUSTES_SECTIONS.some((s) => s.label === label)).toBe(true);
     }
+    expect(visibleAjustesSections(true).some((s) => s.id === "whatsapp")).toBe(false);
+    expect(src).toContain("<PluginManager />");
   });
 
   it("separates danger zone from everyday save", () => {
