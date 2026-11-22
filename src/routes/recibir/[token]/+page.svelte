@@ -22,7 +22,7 @@
   let data = $state<UploadData | null>(null);
   let kind = $state("invoice");
   let companyId = $state<number | null>(null);
-  let { data: pageMeta } = $props<{ data: { public_url: string } }>();
+  let { data: pageMeta }: { data: { public_url: string } } = $props();
 
   function token() {
     return encodeURIComponent($page.params.token ?? "");
