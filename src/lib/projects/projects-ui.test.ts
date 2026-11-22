@@ -6,6 +6,13 @@ const PORTFOLIO = readFileSync(resolve(__dirname, "../../routes/proyectos/+page.
 const DETAIL = readFileSync(resolve(__dirname, "../../routes/proyectos/[id]/+page.svelte"), "utf8");
 
 describe("estructura UI de proyectos", () => {
+  it("permite volver siempre a la cartera aunque solo exista un proyecto", () => {
+    expect(DETAIL).toContain("← Ver proyectos");
+    expect(DETAIL).not.toContain("projectsList.length !== 1");
+    expect(PORTFOLIO).not.toContain("projList.length === 1");
+    expect(PORTFOLIO).not.toContain("replaceState: true");
+  });
+
   it("protege la creación de proyectos por rol", () => {
     expect(PORTFOLIO).toMatch(/\{#if \$isAdmin\}[\s\S]*?\+ Nuevo proyecto/);
   });

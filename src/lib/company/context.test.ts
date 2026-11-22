@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   billingByCompany,
+  canAccessProjectModule,
   canAccessCompany,
   companiesForUser,
   companiesVisibleToUser,
@@ -15,6 +16,13 @@ const companies = seedCompanies(t);
 const members = seedCompanyMembers({ adminId: 1, cajeroId: 2 });
 
 describe("company access", () => {
+  it("grants projects by internal role regardless of company kind", () => {
+    expect(canAccessProjectModule("admin")).toBe(true);
+    expect(canAccessProjectModule("cajero")).toBe(true);
+    expect(canAccessProjectModule("cliente")).toBe(false);
+    expect(canAccessProjectModule(null)).toBe(false);
+  });
+
   it("admin sees both companies; cajero only SHOP", () => {
     const adminCos = companiesForUser(1, members, companies);
     expect(adminCos.map((c) => c.code).sort()).toEqual(["DEV", "SHOP"]);

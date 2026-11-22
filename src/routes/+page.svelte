@@ -197,7 +197,8 @@
   );
   const receivedInvestmentCents = $derived(devCashMovements.filter((movement) => movement.kind === "income" && movement.category === "inversion_recibida").reduce((sum, movement) => sum + movement.amount_cents, 0));
   const receivedLoanCents = $derived(devCashMovements.filter((movement) => movement.kind === "income" && movement.category === "prestamo_recibido").reduce((sum, movement) => sum + movement.amount_cents, 0));
-  const billedProjectCents = $derived((activeCompanyFinancialSummary?.issued_total_cents ?? 0) + collectedGrantCents);
+  const billedProjectCents = $derived(activeCompanyFinancialSummary?.issued_total_cents ?? 0);
+  const collectedAndGrantedCents = $derived((activeCompanyFinancialSummary?.issued_paid_cents ?? 0) + collectedGrantCents);
   const totalExpenseMovements = $derived(
     devCashMovements.filter((movement) => movement.kind === "expense"),
   );
@@ -205,7 +206,7 @@
     totalExpenseMovements
       .reduce((sum, movement) => sum + movement.amount_cents, 0),
   );
-  const billedMarginCents = $derived(billedProjectCents - totalSpentCents);
+  const availableCashCents = $derived(collectedAndGrantedCents + receivedFinancingCents - totalSpentCents);
   const projectRevenueProjection = $derived(
     buildProjectRevenueProjection(devProjects, devCashMovements, new Date(), 5, 6, devInvoices),
   );
@@ -362,18 +363,18 @@
       <p class="section-label mb-3">Estado de la cartera</p>
       <div class="pulse-metrics grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
         <KpiCard label="Valor conseguido" value={formatEUR(wonProjectValueCents)} hint={`${activeDevProjects.length} proyectos en cartera`} icon="◫" accent="violet" />
-        <KpiCard label="Ingresos realizados" value={formatEUR(billedProjectCents)} hint={`${formatEUR(activeCompanyFinancialSummary?.issued_total_cents ?? 0)} facturado · ${formatEUR(collectedGrantCents)} subvenciones`} icon="€" accent="emerald" />
+        <KpiCard label="Facturado" value={formatEUR(billedProjectCents)} hint={`${formatEUR(activeCompanyFinancialSummary?.issued_paid_cents ?? 0)} cobrado · ${formatEUR(activeCompanyFinancialSummary?.issued_pending_cents ?? 0)} pendiente`} icon="€" accent="emerald" />
+        <KpiCard label="Cobrado y ayudas" value={formatEUR(collectedAndGrantedCents)} hint={`${formatEUR(activeCompanyFinancialSummary?.issued_paid_cents ?? 0)} de clientes · ${formatEUR(collectedGrantCents)} subvenciones`} icon="↓" accent="emerald" />
         <KpiCard label="Financiación recibida" value={formatEUR(receivedFinancingCents)} hint={`${formatEUR(receivedInvestmentCents)} inversión · ${formatEUR(receivedLoanCents)} préstamos`} icon="↗" accent="cyan" />
         <KpiCard label="Gastado" value={formatEUR(totalSpentCents)} hint={`${totalExpenseMovements.length} gastos registrados en Caja`} icon="−" accent="amber" />
         <KpiCard
-          label="Margen realizado"
-          value={formatEUR(billedMarginCents)}
-          hint="Facturación y subvenciones cobradas menos gastos"
+          label="Disponible"
+          value={formatEUR(availableCashCents)}
+          hint="Cobros, ayudas y financiación menos gastos de Caja"
           icon="◇"
-          accent={billedMarginCents < 0 ? "rose" : "cyan"}
-          valueTone={billedMarginCents < 0 ? "danger" : "default"}
+          accent={availableCashCents < 0 ? "rose" : "cyan"}
+          valueTone={availableCashCents < 0 ? "danger" : "default"}
         />
-        <KpiCard label="Objetivo mensual" value={currentEconomicGoalCents ? `${currentEconomicGoalProgress}%` : "Sin definir"} hint={currentEconomicGoalCents ? `${formatEUR(currentRevenueProjection?.income_cents ?? 0)} de ${formatEUR(currentEconomicGoalCents)}${(currentRevenueProjection?.projection_cents ?? 0) ? " · hitos" : ""}` : "Defínelo en Proyectos"} icon="◎" accent={currentEconomicGoalProgress >= 100 ? "emerald" : "violet"} />
       </div>
 
       {#if devProjects.length === 0}
@@ -387,7 +388,7 @@
       <Card class="relative mt-4 overflow-visible" lift={false}>
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h2 class="section-label !normal-case !tracking-wide !text-sm">Ingresos y proyección propia</h2>
+            <h2 class="section-label !normal-case !tracking-wide !text-sm">Facturación, ayudas y proyección propia</h2>
             <p class="mt-1 max-w-2xl text-xs text-[var(--color-muted)]">
               Los hitos de cada proyecto propio se mantienen mes a mes hasta que un nuevo hito cambia la estimación.
             </p>
@@ -395,7 +396,7 @@
           <div class="flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px]">
             <span class="inline-flex items-center gap-1.5 text-[var(--color-muted)]">
               <span class="h-2.5 w-2.5 rounded-sm bg-emerald-400"></span>
-              Ingresos reales
+              Facturación y ayudas
             </span>
             <span class="inline-flex items-center gap-1.5 text-[var(--color-muted)]">
               <span class="h-2.5 w-2.5 rounded-sm bg-gradient-to-t from-purple-600 to-violet-300"></span>
@@ -410,7 +411,7 @@
 
         <div class="mt-4 grid gap-3 sm:grid-cols-3">
           <div class="rounded-xl border border-[var(--color-border)] bg-black/20 px-3 py-2.5">
-            <p class="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Ingresado este mes</p>
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Facturado y ayudas este mes</p>
             <p class="mt-1 text-lg font-semibold tabular text-emerald-300">
               {formatEUR(currentRevenueProjection?.income_cents ?? 0)}
             </p>
@@ -449,7 +450,7 @@
         {/if}
 
         <div class="mt-5 overflow-x-auto pb-1">
-          <div class="flex h-64 min-w-[780px]" aria-label="Gráfica mensual de ingresos, proyección propia y gastos">
+          <div class="flex h-64 min-w-[780px]" aria-label="Gráfica mensual de facturación, ayudas, proyección propia y gastos">
             <div class="relative w-20 shrink-0 pb-9 pr-3 text-right">
               <div class="absolute inset-x-0 bottom-9 top-0">
                 <span class="absolute right-3 top-0 text-[10px] tabular text-[var(--color-muted-dim)]">{formatEUR(projectRevenuePositiveMax)}</span>
@@ -479,7 +480,7 @@
                       </p>
                       <div class="mt-2 space-y-1">
                         <p class="flex items-center justify-between gap-2 text-[11px] text-[var(--color-muted)]">
-                          <span>Ingresos</span>
+                          <span>Facturación y ayudas</span>
                           <strong class="tabular text-emerald-300">{formatEUR(month.income_cents)}</strong>
                         </p>
                         <p class="flex items-center justify-between gap-2 text-[11px] text-[var(--color-muted)]">

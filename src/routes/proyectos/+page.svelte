@@ -20,9 +20,6 @@
   import RichDescription from "$lib/components/RichDescription.svelte";
   import RichDescriptionEditor from "$lib/components/RichDescriptionEditor.svelte";
   import { browser } from "$app/environment";
-  import { goto } from "$app/navigation";
-  import { activeCompany } from "$lib/stores/session";
-  import { isProjectPortfolioCompany } from "$lib/company/context";
   import { isTaskDueSoon, isTaskOverdue, isTaskPendingWork } from "$lib/work/task-dates";
   import { latestProjectUpdate, normalizeProjectManagement, projectUpdateIsStale } from "$lib/projects/management";
 
@@ -144,10 +141,6 @@
         api.getSettings(),
       ]);
       projects = projList;
-      if (!isProjectPortfolioCompany($activeCompany) && projList.length === 1) {
-        await goto(`/proyectos/${projList[0].uid}`, { replaceState: true });
-        return;
-      }
       items = (await Promise.all(
         projList.map((project) => api.listWorkItems({ project_id: project.id })),
       )).flat();

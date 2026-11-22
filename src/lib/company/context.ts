@@ -18,6 +18,15 @@ export function isProjectCompany(
   return company?.kind === "software_studio" || company?.code === PROJECT_COMPANY_CODE;
 }
 
+/**
+ * Project visibility is an account permission, not a business-kind feature.
+ * Internal users may use the module in any company; client accounts stay in
+ * their read-only portal and only see explicitly assigned projects there.
+ */
+export function canAccessProjectModule(role: UserRole | null | undefined): boolean {
+  return role === "admin" || role === "cajero";
+}
+
 /** The studio manages a portfolio; product companies manage their own workspace directly. */
 export function isProjectPortfolioCompany(
   company: Pick<Company, "code"> | null | undefined,

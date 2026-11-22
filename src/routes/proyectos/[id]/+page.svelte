@@ -1882,14 +1882,12 @@
   {:else}
     <!-- Top Nav / Back Button -->
     <div class="mb-4 flex items-center justify-between">
-      {#if projectsList.length !== 1}
-        <a
-          href="/proyectos"
-          class="inline-flex items-center gap-2 text-xs font-medium text-[var(--color-muted)] hover:text-[var(--color-purple-bright)] transition"
-        >
-          ← Volver a Proyectos
-        </a>
-      {:else}<span></span>{/if}
+      <a
+        href="/proyectos"
+        class="inline-flex items-center gap-2 text-xs font-medium text-[var(--color-muted)] hover:text-[var(--color-purple-bright)] transition"
+      >
+        ← Ver proyectos
+      </a>
       {#if $isAdmin}
         <div class="flex items-center gap-2">
           <Button variant="secondary" onclick={openEditProjectModal} class="text-xs">

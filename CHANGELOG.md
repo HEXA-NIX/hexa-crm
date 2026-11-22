@@ -9,6 +9,16 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+- La ruta `/proyectos` deja de redirigir automáticamente al detalle cuando solo existe un proyecto y muestra siempre la cartera completa.
+
+- La ficha de proyecto muestra siempre «Ver proyectos» para regresar a la cartera, incluso cuando la empresa solo tiene un proyecto.
+
+- El menú conserva siempre el acceso al listado de Proyectos aunque la empresa solo tenga uno, permitiendo consultar la cartera y crear proyectos adicionales.
+
+- La visibilidad de Proyectos depende del rol del usuario y no del tipo de empresa: los usuarios internos pueden acceder al módulo también desde empresas `shop`, mientras los clientes conservan su portal restringido.
+
+- El dashboard financiero separa valor de cartera, facturación, cobros y subvenciones, financiación, gastos de Caja y disponible; deja de presentar como margen una resta que mezclaba devengo y tesorería.
+
 - La recepción visual de tickets por WhatsApp ya no marca como correcta una lectura fallida: conserva el original y deja el documento pendiente para releerlo con el modelo de visión configurado.
 - Los Kanban de proyectos para cliente separan «Validación» interna de «Validar cliente». Solo un administrador puede realizar el envío y, al hacerlo, el CRM avisa por WhatsApp a los contactos vinculados; el portal mantiene la tarea pendiente hasta que el cliente la aprueba o solicita cambios.
 - Los tickets y facturas recibidos por WhatsApp conservan una extensión reconocible, permiten abrir el original desde la bandeja o el formulario de revisión, pueden releerse con IA desde su revisión y avisan cuando la lectura automática quedó incompleta. El OCR utiliza un modelo visual independiente del modelo conversacional y Ajustes distingue entre servidor disponible y modelo configurado realmente instalado.
