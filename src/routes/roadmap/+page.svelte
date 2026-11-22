@@ -4,6 +4,7 @@
   import type { WorkItem } from "$lib/types";
   import Card from "$lib/components/Card.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
+  import { taskDueDate } from "$lib/work/task-dates";
 
   let items = $state<WorkItem[]>([]);
   let loading = $state(true);
@@ -19,9 +20,11 @@
   }
 
   function compareByDueDate(a: WorkItem, b: WorkItem) {
-    if (!a.due_date) return 1;
-    if (!b.due_date) return -1;
-    return a.due_date.localeCompare(b.due_date);
+    const aDue = taskDueDate(a);
+    const bDue = taskDueDate(b);
+    if (!aDue) return 1;
+    if (!bDue) return -1;
+    return aDue.localeCompare(bDue);
   }
 
   const activeItems = $derived(
@@ -29,10 +32,10 @@
       .filter((item) => item.status !== "done" && item.status !== "archived")
       .sort(compareByDueDate),
   );
-  const overdue = $derived(activeItems.filter((item) => item.due_date && toLocalDate(item.due_date) < today));
-  const next = $derived(activeItems.filter((item) => item.due_date && toLocalDate(item.due_date) >= today && toLocalDate(item.due_date) <= nextWeek));
-  const later = $derived(activeItems.filter((item) => item.due_date && toLocalDate(item.due_date) > nextWeek));
-  const unscheduled = $derived(activeItems.filter((item) => !item.due_date));
+  const overdue = $derived(activeItems.filter((item) => taskDueDate(item) && toLocalDate(taskDueDate(item)!) < today));
+  const next = $derived(activeItems.filter((item) => taskDueDate(item) && toLocalDate(taskDueDate(item)!) >= today && toLocalDate(taskDueDate(item)!) <= nextWeek));
+  const later = $derived(activeItems.filter((item) => taskDueDate(item) && toLocalDate(taskDueDate(item)!) > nextWeek));
+  const unscheduled = $derived(activeItems.filter((item) => !taskDueDate(item)));
 
   function formatDate(value: string | null) {
     if (!value) return "Sin fecha";
@@ -92,7 +95,7 @@
               <a href={`/trabajo?item=${item.id}`} class="rounded-xl border {section.tone} bg-black/15 p-4 transition hover:-translate-y-0.5 hover:bg-purple-500/[0.08]">
                 <div class="flex items-start justify-between gap-3">
                   <h4 class="font-medium text-[var(--color-text)]">{item.title}</h4>
-                  <span class="shrink-0 text-xs text-[var(--color-muted)]">{formatDate(item.due_date)}</span>
+                  <span class="shrink-0 text-xs text-[var(--color-muted)]">{formatDate(taskDueDate(item))}</span>
                 </div>
                 <p class="mt-2 line-clamp-2 text-sm text-[var(--color-muted)]">{item.description || "Sin descripción"}</p>
                 <p class="mt-3 text-xs text-[var(--color-muted-dim)]">{item.category?.name || "Sin categoría"} · {item.assignee_name || "Sin asignar"}</p>

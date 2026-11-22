@@ -1,4 +1,4 @@
-import type { CashMovement, WorkProject } from "../types";
+import type { CashMovement, Invoice, WorkProject } from "../types";
 
 export type ProjectEconomicPoint = {
   month: string;
@@ -23,13 +23,17 @@ export function buildProjectEconomicSeries(
   project: WorkProject,
   movements: CashMovement[],
   referenceDate = new Date(),
+  invoices?: Invoice[],
 ): ProjectEconomicPoint[] {
   const income = movements.filter((movement) => movement.kind === "income" && movement.project_id === project.id);
+  const issuedInvoices = invoices?.filter((invoice) => invoice.status === "issued" && invoice.project_id === project.id);
+  const grantIncome = income.filter((movement) => movement.category === "subvencion_cobrada");
   const milestoneMonths = project.revenue_milestones.map((milestone) => milestone.target_month);
   const movementMonths = income.map((movement) => movement.occurred_at.slice(0, 7));
+  const invoiceMonths = issuedInvoices?.map((invoice) => invoice.operation_date.slice(0, 7)) ?? [];
   const fallbackMonth = monthKey(referenceDate);
   const startMonth = project.start_date?.slice(0, 7) || project.created_at.slice(0, 7) || milestoneMonths[0] || movementMonths[0] || fallbackMonth;
-  const endMonth = [project.target_date?.slice(0, 7), ...milestoneMonths, ...movementMonths, fallbackMonth]
+  const endMonth = [project.target_date?.slice(0, 7), ...milestoneMonths, ...movementMonths, ...invoiceMonths, fallbackMonth]
     .filter((value): value is string => Boolean(value))
     .sort()
     .at(-1) || fallbackMonth;
@@ -46,9 +50,15 @@ export function buildProjectEconomicSeries(
 
   return dates.map((date, index) => {
     const month = monthKey(date);
-    const billed = income
-      .filter((movement) => movement.occurred_at.slice(0, 7) <= month)
-      .reduce((sum, movement) => sum + movement.amount_cents, 0);
+    const billed = (issuedInvoices
+      ? issuedInvoices
+          .filter((invoice) => invoice.operation_date.slice(0, 7) <= month)
+          .reduce((sum, invoice) => sum + invoice.total_cents, 0)
+      : income
+          .filter((movement) => movement.category !== "subvencion_cobrada")
+          .filter((movement) => movement.occurred_at.slice(0, 7) <= month)
+          .reduce((sum, movement) => sum + movement.amount_cents, 0))
+      + grantIncome.filter((movement) => movement.occurred_at.slice(0, 7) <= month).reduce((sum, movement) => sum + movement.amount_cents, 0);
     const elapsedPlanMonths = Math.max(1, (date.getFullYear() - start.getFullYear()) * 12 + date.getMonth() - start.getMonth() + 1);
     const planned = project.customer_id != null
       ? Math.round(project.value_cents * Math.min(1, elapsedPlanMonths / plannedMonthCount))

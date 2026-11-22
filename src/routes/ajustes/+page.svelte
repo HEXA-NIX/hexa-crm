@@ -1,7 +1,8 @@
 <script lang="ts">
+  import { confirmDialog } from "$lib/stores/confirm-dialog";
   import { onMount } from "svelte";
   import { api, supportsOrcaWorker, usesLocalOrcaBridge } from "$lib/api/client";
-  import type { AuthUser, Settings, UserInput, UserRole } from "$lib/types";
+  import type { AuthUser, Company, CompanyEntityType, Settings, UserInput, UserRole, WorkProject } from "$lib/types";
   import { VAT_RATES, vatLabel, type VatRate } from "$lib/vat";
   import Button from "$lib/components/Button.svelte";
   import Card from "$lib/components/Card.svelte";
@@ -10,18 +11,25 @@
   import Modal from "$lib/components/Modal.svelte";
   import Select from "$lib/components/Select.svelte";
   import PluginManager from "$lib/components/PluginManager.svelte";
+  import FiscalSettings from "$lib/components/FiscalSettings.svelte";
   import { showToast } from "$lib/stores/ui";
   import {
     currentUser,
+    activeCompany,
     isAdmin,
     session,
     clearSession,
+    setActiveCompanyLocal,
+    updateCurrentUser,
+    setCompaniesLocal,
     setIdleTimeoutMinutes,
   } from "$lib/stores/session";
   import { normalizeIdleTimeoutMinutes } from "$lib/auth/idle-timeout";
   import { parseBackupJson, type BackupEnvelope } from "$lib/backup/backup";
   import { theme, toggleTheme } from "$lib/stores/theme";
   import { TEMP_PASSWORD_LENGTH } from "$lib/auth/password-policy";
+  import { userAvatarDataUrl } from "$lib/users/user-avatar";
+  import { projectLogoDataUrl } from "$lib/projects/project-logo";
   import {
     applyGitHubUpdate,
     checkGitHubUpdate,
@@ -49,9 +57,46 @@
   let settings = $state<Settings | null>(null);
   let health = $state<{ ok: boolean; models: string[] } | null>(null);
   let users = $state<AuthUser[]>([]);
+  let clientProjects = $state<WorkProject[]>([]);
   let loading = $state(true);
   let defaultVatStr = $state("21");
   let roleStr = $state<string>("cajero");
+  let clientProjectStr = $state("");
+  let whatsappStatus = $state<{ connected: boolean; logged_in: boolean; user_phone: string; shared_from_company_id?: number | null; shared_from_company_name?: string | null; webhook_trace?: { at?: string; state?: string; error?: string; event?: string; reason?: string } | null } | null>(null);
+  let whatsappLinks = $state<{ company_id: number; trade_name: string; phone: string }[]>([]);
+  let selectedWhatsAppCompany = $state("");
+  let whatsappQr = $state("");
+  let whatsappBusy = $state(false);
+  let whatsappForm = $state({ phone: "", message: "", confirmed: false });
+  let whatsappError = $state("");
+  let companyLogoBusy = $state(false);
+  let companyLogoError = $state("");
+  let companyBusy = $state(false);
+  let companyError = $state("");
+  let companyForm = $state<{ legal_name: string; trade_name: string; nif: string; kind: Company["kind"]; entity_type: CompanyEntityType; address: string; postal_code: string; city: string; province: string; country: string; email: string; phone: string }>({ legal_name: "", trade_name: "", nif: "", kind: "generic", entity_type: "otra", address: "", postal_code: "", city: "", province: "", country: "España", email: "", phone: "" });
+  let createCompanyModal = $state(false);
+  let createCompanyBusy = $state(false);
+  let createCompanyError = $state("");
+  let createCompanyForm = $state({ legal_name: "", trade_name: "", nif: "", kind: "software_studio" as Company["kind"], entity_type: "otra" as CompanyEntityType });
+
+  $effect(() => {
+    const company = $activeCompany;
+    if (!company) return;
+    companyForm = {
+      legal_name: company.legal_name,
+      trade_name: company.trade_name,
+      nif: company.nif,
+      kind: company.kind,
+      entity_type: company.entity_type ?? "otra",
+      address: company.address ?? "",
+      postal_code: company.postal_code ?? "",
+      city: company.city ?? "",
+      province: company.province ?? "",
+      country: company.country ?? "España",
+      email: company.email ?? "",
+      phone: company.phone ?? "",
+    };
+  });
 
   let appVersion = $state(getAppVersion());
   let updateStatus = $state<UpdateStatus | null>(null);
@@ -60,10 +105,13 @@
   let activeSection = $state<AjustesSectionId>("tienda");
 
   let userModal = $state(false);
+  let userAvatarDragActive = $state(false);
   let editingUser = $state<AuthUser | null>(null);
   let userForm = $state({
     username: "",
     display_name: "",
+    phone: "",
+    avatar_data_url: "",
     role: "cajero" as UserRole,
     active: true,
   });
@@ -86,12 +134,98 @@
 
   function setSection(id: AjustesSectionId) {
     activeSection = resolveActiveSection(id, $isAdmin);
+    if (activeSection === "whatsapp" || activeSection === "plugins") loadWhatsAppStatus();
     if (typeof sessionStorage !== "undefined") {
       try {
         sessionStorage.setItem(AJUSTES_SECTION_STORAGE_KEY, activeSection);
       } catch {
         /* ignore */
       }
+    }
+  }
+
+  function openWhatsAppPanel() {
+    // WhatsApp is an integration, not a separate business area. Keep the
+    // legacy panel reachable from Plugins without exposing a duplicate tab.
+    activeSection = "whatsapp";
+    loadWhatsAppStatus();
+    try {
+      sessionStorage.setItem(AJUSTES_SECTION_STORAGE_KEY, activeSection);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function loadWhatsAppStatus() {
+    whatsappError = "";
+    try {
+      const [status, links] = await Promise.all([api.whatsappStatus(), api.whatsappAvailableLinks()]);
+      whatsappStatus = status;
+      whatsappLinks = links;
+      if (!links.some((link) => String(link.company_id) === selectedWhatsAppCompany)) selectedWhatsAppCompany = links[0] ? String(links[0].company_id) : "";
+    } catch (error) {
+      whatsappStatus = null;
+      whatsappLinks = [];
+      whatsappError = error instanceof Error ? error.message : "No se pudo consultar WhatsApp";
+    }
+  }
+
+  async function useSharedWhatsApp() {
+    const sourceCompanyId = Number(selectedWhatsAppCompany);
+    if (!Number.isInteger(sourceCompanyId) || whatsappBusy) return;
+    whatsappBusy = true;
+    whatsappError = "";
+    try {
+      await api.whatsappUseSharedLink(sourceCompanyId);
+      whatsappQr = "";
+      await loadWhatsAppStatus();
+      showToast("Número de WhatsApp compartido con esta empresa");
+    } catch (error) {
+      whatsappError = error instanceof Error ? error.message : "No se pudo compartir el número";
+    } finally {
+      whatsappBusy = false;
+    }
+  }
+
+  async function connectWhatsApp() {
+    whatsappBusy = true;
+    whatsappError = "";
+    try {
+      const result = await api.whatsappLoginQr();
+      whatsappQr = result.qr_data || result.qr_url;
+      showToast("Escanea el QR desde Dispositivos vinculados de WhatsApp");
+    } catch (error) {
+      whatsappError = error instanceof Error ? error.message : "No se pudo generar el QR";
+    } finally {
+      whatsappBusy = false;
+    }
+  }
+
+  async function disconnectWhatsApp() {
+    whatsappBusy = true;
+    try {
+      await api.whatsappLogout();
+      whatsappQr = "";
+      await loadWhatsAppStatus();
+      showToast("WhatsApp desconectado");
+    } catch (error) {
+      whatsappError = error instanceof Error ? error.message : "No se pudo desconectar";
+    } finally {
+      whatsappBusy = false;
+    }
+  }
+
+  async function sendWhatsApp() {
+    whatsappBusy = true;
+    whatsappError = "";
+    try {
+      await api.whatsappSend(whatsappForm.phone, whatsappForm.message, whatsappForm.confirmed);
+      whatsappForm = { phone: "", message: "", confirmed: false };
+      showToast("WhatsApp enviado");
+    } catch (error) {
+      whatsappError = error instanceof Error ? error.message : "No se pudo enviar el WhatsApp";
+    } finally {
+      whatsappBusy = false;
     }
   }
 
@@ -110,6 +244,7 @@
       }
       if ($isAdmin) {
         users = await api.listUsers();
+        clientProjects = (await api.listWorkProjects()).filter((project) => project.status !== "archived");
       }
     } catch (e) {
       showToast(e instanceof Error ? e.message : "Error", "err");
@@ -127,7 +262,9 @@
         stored = null;
       }
     }
-    activeSection = resolveActiveSection(stored, $isAdmin);
+    const requested = new URLSearchParams(window.location.search).get("seccion");
+    activeSection = resolveActiveSection(requested ?? stored, $isAdmin);
+    if (activeSection === "plugins") loadWhatsAppStatus();
     orcaConfig = loadOrcaLocalConfig();
     orcaBridgeToken = loadOrcaBridgeToken();
     load();
@@ -135,7 +272,10 @@
 
   // If role flips and current section is admin-only, land on a safe tab.
   $effect(() => {
-    activeSection = resolveActiveSection(activeSection, $isAdmin);
+    // The WhatsApp panel is a legacy deep-link now opened from Plugins.
+    if (activeSection !== "whatsapp") {
+      activeSection = resolveActiveSection(activeSection, $isAdmin);
+    }
   });
 
   async function save() {
@@ -151,7 +291,7 @@
   }
 
   async function resetDemo() {
-    if (!confirm("¿Restaurar datos de demostración? Se perderán los datos actuales.")) {
+    if (!await confirmDialog("Se perderán los datos actuales y se restaurarán los datos de demostración.", { title: "Restaurar datos de demostración", confirmLabel: "Restaurar", danger: true })) {
       return;
     }
     try {
@@ -200,14 +340,16 @@
 
   async function restoreBackup() {
     if (!restorePreview) return;
-    if (!confirm("Se sustituirán los datos locales por esta copia y se cerrará la sesión. ¿Continuar?")) {
+    if (!await confirmDialog("Se sustituirán los datos locales por esta copia y se cerrará la sesión.", { title: "Restaurar copia de seguridad", confirmLabel: "Restaurar copia", danger: true })) {
       return;
     }
     restoreBusy = true;
     try {
-      await api.restoreBackup(restorePreview);
+      const result = await api.restoreBackup(restorePreview);
       clearSession();
-      showToast("Copia restaurada. Inicia sesión de nuevo.");
+      const imported = result?.imported;
+      const totalImported = imported ? Object.values(imported).reduce((sum, value) => sum + Number(value || 0), 0) : 0;
+      showToast(totalImported ? `Migración completada: ${totalImported} registros importados. Inicia sesión de nuevo.` : "Copia restaurada. Inicia sesión de nuevo.");
     } catch (e) {
       showToast(e instanceof Error ? e.message : "No se pudo restaurar la copia", "err");
     } finally {
@@ -217,8 +359,9 @@
 
   function openCreateUser() {
     editingUser = null;
-    userForm = { username: "", display_name: "", role: "cajero", active: true };
+    userForm = { username: "", display_name: "", phone: "", avatar_data_url: "", role: "cajero", active: true };
     roleStr = "cajero";
+    clientProjectStr = "";
     userModal = true;
   }
 
@@ -227,10 +370,13 @@
     userForm = {
       username: u.username,
       display_name: u.display_name,
+      phone: u.phone,
+      avatar_data_url: u.avatar_data_url ?? "",
       role: u.role,
       active: u.active,
     };
     roleStr = u.role;
+    clientProjectStr = String(u.project_ids?.[0] ?? "");
     userModal = true;
   }
 
@@ -239,11 +385,30 @@
       id: editingUser?.id,
       username: userForm.username,
       display_name: userForm.display_name,
-      role: (roleStr === "admin" ? "admin" : "cajero") as UserRole,
+      phone: userForm.phone,
+      avatar_data_url: userForm.avatar_data_url,
+      role: (roleStr === "cliente" ? "cliente" : roleStr === "admin" ? "admin" : "cajero") as UserRole,
+      project_ids: roleStr === "cliente" && clientProjectStr ? [Number(clientProjectStr)] : [],
       active: userForm.active,
     };
     try {
       const result = await api.upsertUser(input);
+      let welcomeWarning = "";
+      if (!editingUser && input.role === "cliente" && input.phone?.trim()) {
+        const project = clientProjects.find((entry) => entry.id === input.project_ids?.[0]);
+        const rawPhone = input.phone.trim();
+        const destination = /^\d{9}$/.test(rawPhone.replace(/\D/g, ""))
+          ? `+34${rawPhone.replace(/\D/g, "")}`
+          : rawPhone;
+        const projectName = project?.name ?? "tu proyecto";
+        const message = `¡Bienvenido/a! 👋\n\nTe hemos dado de alta en el proyecto ${projectName}.\n\nDesde tu portal podrás consultar el resumen y el estado del proyecto, sus hitos, las tareas en modo lectura y las facturas que te enviemos. También podrás crear solicitudes y conversar con el equipo sobre bugs, sugerencias, mejoras o preguntas.\n\nPor WhatsApp puedes enviarnos documentos y contactar con el equipo. Para registrar bugs o sugerencias y seguir su estado, utiliza la sección Solicitudes del portal.`;
+        try {
+          await api.whatsappSend(destination, message, true);
+        } catch (cause) {
+          welcomeWarning = cause instanceof Error ? cause.message : "No se pudo enviar el WhatsApp de bienvenida";
+        }
+      }
+      if ($currentUser?.id === result.user.id) updateCurrentUser(result.user);
       userModal = false;
       if (result.temporary_password) {
         createdTempPassword = result.temporary_password;
@@ -253,15 +418,104 @@
         showToast(editingUser ? "Usuario actualizado" : "Usuario creado");
       }
       users = await api.listUsers();
+      if (welcomeWarning) showToast(`Usuario creado, pero el WhatsApp no se envió: ${welcomeWarning}`, "err");
     } catch (e) {
       showToast(e instanceof Error ? e.message : "Error", "err");
     }
   }
 
+  async function handleUserAvatar(file: File | undefined) {
+    if (!file) return;
+    try {
+      userForm.avatar_data_url = await userAvatarDataUrl(file);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo cargar la foto", "err");
+    }
+  }
+
+  async function handleCompanyLogo(file: File | undefined) {
+    if (!file || companyLogoBusy || !$activeCompany) return;
+    companyLogoBusy = true;
+    companyLogoError = "";
+    try {
+      const updated = await api.updateCompanyProfile({ logo_data_url: await projectLogoDataUrl(file) });
+      setCompaniesLocal($session.companies.map((company) => company.id === updated.id ? updated : company));
+      showToast("Logo de la empresa actualizado");
+    } catch (error) {
+      companyLogoError = error instanceof Error ? error.message : "No se pudo guardar el logo";
+    } finally {
+      companyLogoBusy = false;
+    }
+  }
+
+  async function removeCompanyLogo() {
+    if (companyLogoBusy || !$activeCompany) return;
+    companyLogoBusy = true;
+    companyLogoError = "";
+    try {
+      const updated = await api.updateCompanyProfile({ logo_data_url: "" });
+      setCompaniesLocal($session.companies.map((company) => company.id === updated.id ? updated : company));
+      showToast("Logo eliminado");
+    } catch (error) {
+      companyLogoError = error instanceof Error ? error.message : "No se pudo eliminar el logo";
+    } finally {
+      companyLogoBusy = false;
+    }
+  }
+
+  async function saveCompanyProfile() {
+    if (!$activeCompany || companyBusy) return;
+    companyBusy = true;
+    companyError = "";
+    try {
+      const updated = await api.updateCompanyProfile(companyForm);
+      setCompaniesLocal($session.companies.map((company) => company.id === updated.id ? updated : company));
+      showToast("Datos de empresa guardados");
+    } catch (error) {
+      companyError = error instanceof Error ? error.message : "No se pudieron guardar los datos de la empresa";
+    } finally {
+      companyBusy = false;
+    }
+  }
+
+  function openCreateCompany() {
+    createCompanyForm = { legal_name: "", trade_name: "", nif: "", kind: $activeCompany?.kind === "retail_secondhand" ? "retail_secondhand" : "software_studio", entity_type: "otra" };
+    createCompanyError = "";
+    createCompanyModal = true;
+  }
+
+  async function createCompany() {
+    if (!createCompanyForm.legal_name.trim() || !createCompanyForm.trade_name.trim()) {
+      createCompanyError = "Indica el nombre legal y el nombre comercial";
+      return;
+    }
+    createCompanyBusy = true;
+    createCompanyError = "";
+    try {
+      const created = await api.createCompany({ ...createCompanyForm, legal_name: createCompanyForm.legal_name.trim(), trade_name: createCompanyForm.trade_name.trim() });
+      await api.setActiveCompany(created.id);
+      setCompaniesLocal([...$session.companies, created]);
+      setActiveCompanyLocal(created);
+      createCompanyModal = false;
+      showToast(`Empresa ${created.trade_name} creada y activada`);
+    } catch (error) {
+      createCompanyError = error instanceof Error ? error.message : "No se pudo crear la empresa";
+    } finally {
+      createCompanyBusy = false;
+    }
+  }
+
+  function dropUserAvatar(event: DragEvent) {
+    event.preventDefault();
+    userAvatarDragActive = false;
+    void handleUserAvatar(event.dataTransfer?.files?.[0]);
+  }
+
   async function regenTemp(u: AuthUser) {
     if (
-      !confirm(
+      !await confirmDialog(
         `¿Generar nueva contraseña temporal de ${TEMP_PASSWORD_LENGTH} caracteres para @${u.username}?`,
+        { title: "Regenerar contraseña temporal", confirmLabel: "Generar contraseña", danger: true },
       )
     ) {
       return;
@@ -384,6 +638,12 @@
     if (settings) settings.ollama_model = m;
   }
 
+  function isConfiguredModelAvailable() {
+    if (!settings || !health?.models.length) return false;
+    const selected = settings.ollama_model.replace(/:latest$/, "");
+    return health.models.some((model) => model.replace(/:latest$/, "") === selected);
+  }
+
   async function onCheckUpdate() {
     updateBusy = true;
     updateStatus = null;
@@ -462,7 +722,7 @@
       <p class="hidden text-xs text-[var(--color-muted-dim)] sm:block" data-ajustes-context>
         {$currentUser?.display_name ?? "—"}
         ·
-        {settings.shop_name || "Sin tienda"}
+        {settings.shop_name || "Sin empresa"}
       </p>
       <Button variant="secondary" onclick={load}>Recargar</Button>
       {#if activeMeta.hasSave}
@@ -515,7 +775,7 @@
           <div
             class="pointer-events-none absolute -right-8 -top-8 h-28 w-28 rounded-full bg-purple-500/10 blur-2xl"
           ></div>
-          <div class="relative max-w-lg">
+          <div class="relative max-w-3xl">
             <p class="section-label mb-1">Seguridad</p>
             <h2 class="text-lg font-semibold text-[var(--color-text)]">{activeMeta.title}</h2>
             <p class="mt-1 mb-5 text-sm text-[var(--color-muted)]">{activeMeta.hint}</p>
@@ -588,6 +848,81 @@
             {/if}
           </div>
         </Card>
+      {:else if activeSection === "whatsapp"}
+        <Card lift={false} class="border border-emerald-400/20 !p-5">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p class="section-label mb-1 !text-emerald-300/80">Mensajería de empresa</p>
+              <h2 class="text-lg font-semibold text-[var(--color-text)]">{activeMeta.title}</h2>
+              <p class="mt-1 text-sm text-[var(--color-muted)]">{activeMeta.hint}</p>
+            </div>
+            <Badge tone={whatsappStatus?.connected || whatsappStatus?.logged_in ? "ok" : "warn"}>
+              {whatsappStatus?.connected || whatsappStatus?.logged_in ? "Conectado" : "Sin conectar"}
+            </Badge>
+          </div>
+
+          <div class="mt-4 rounded-xl border border-[var(--color-border)] bg-black/20 p-4">
+            <p class="text-sm font-medium text-[var(--color-text)]">Número de WhatsApp conectado: {whatsappStatus?.user_phone || "Sin configurar"}</p>
+            {#if whatsappStatus?.shared_from_company_name}
+              <p class="mt-1 text-xs text-emerald-200">Usando el WhatsApp vinculado en <strong>{whatsappStatus.shared_from_company_name}</strong>. No necesitas escanear otro QR.</p>
+            {:else}
+              <p class="mt-1 text-xs text-[var(--color-muted)]">Este número queda vinculado a la empresa activa. Si se comparte entre varias empresas, al recibir un documento se preguntará primero a cuál pertenece.</p>
+            {/if}
+            <div class="mt-3 flex flex-wrap gap-2">
+              {#if whatsappStatus?.connected || whatsappStatus?.logged_in}
+                <Button variant="danger" disabled={whatsappBusy} onclick={disconnectWhatsApp}>{whatsappStatus?.shared_from_company_id ? "Dejar de usar este número" : "Desconectar"}</Button>
+              {:else}
+                <Button disabled={whatsappBusy || !($currentUser?.phone)} onclick={connectWhatsApp}>{whatsappBusy ? "Preparando…" : "Conectar con QR"}</Button>
+              {/if}
+              <Button variant="secondary" disabled={whatsappBusy} onclick={loadWhatsAppStatus}>Actualizar estado</Button>
+            </div>
+            {#if !whatsappStatus?.connected && !whatsappStatus?.logged_in && whatsappLinks.length > 0}
+              <div class="mt-4 border-t border-[var(--color-border)] pt-4">
+                <Select
+                  label="Usar un número ya vinculado en otra empresa"
+                  bind:value={selectedWhatsAppCompany}
+                  options={whatsappLinks.map((link) => ({ value: String(link.company_id), label: `${link.trade_name} · ${link.phone}` }))}
+                  placeholder="Seleccionar empresa…"
+                  disabled={whatsappBusy}
+                />
+                <Button class="mt-2" variant="secondary" disabled={whatsappBusy || !selectedWhatsAppCompany} onclick={useSharedWhatsApp}>Usar este número</Button>
+                <p class="mt-2 text-[11px] text-[var(--color-muted-dim)]">La empresa activa podrá enviar mensajes y recibir documentos con ese mismo número. Cada empresa seguirá manteniendo sus datos separados.</p>
+              </div>
+            {/if}
+          </div>
+
+          {#if whatsappQr}
+            <div class="mt-4 rounded-xl border border-emerald-400/25 bg-white p-4 text-center">
+              <img src={whatsappQr} alt="Código QR para vincular WhatsApp" class="mx-auto h-64 w-64 object-contain" />
+              <p class="mt-2 text-xs text-slate-700">WhatsApp → Dispositivos vinculados → Vincular dispositivo</p>
+            </div>
+          {/if}
+
+          {#if whatsappStatus?.connected || whatsappStatus?.logged_in}
+            <form class="mt-5 grid gap-3" onsubmit={(event) => { event.preventDefault(); sendWhatsApp(); }}>
+              <Input label="Destinatario" bind:value={whatsappForm.phone} placeholder="+34 600 111 222" required />
+              <label class="text-sm"><span class="mb-1 block font-medium text-[var(--color-muted)]">Mensaje</span><textarea class="field min-h-28 w-full" maxlength="4000" bind:value={whatsappForm.message} required></textarea></label>
+              <label class="flex items-start gap-2 rounded-xl border border-amber-400/20 bg-amber-500/[0.06] p-3 text-sm text-amber-100">
+                <input class="mt-1" type="checkbox" bind:checked={whatsappForm.confirmed} />
+                <span>Confirmo el envío de este mensaje desde el WhatsApp de la empresa.</span>
+              </label>
+              <div><Button type="submit" disabled={whatsappBusy || !whatsappForm.confirmed}>{whatsappBusy ? "Enviando…" : "Enviar WhatsApp"}</Button></div>
+            </form>
+          {/if}
+
+          {#if whatsappError}
+            <p class="mt-4 rounded-xl border border-rose-500/25 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert">{whatsappError}</p>
+          {/if}
+          <div class="mt-4 rounded-xl border border-[var(--color-border)] bg-black/20 px-3 py-2 text-xs text-[var(--color-muted)]">
+            <strong class="text-[var(--color-text)]">Última traza del webhook:</strong>
+            {#if whatsappStatus?.webhook_trace}
+              {whatsappStatus.webhook_trace.at || "sin fecha"} · {whatsappStatus.webhook_trace.state || "desconocido"}{whatsappStatus.webhook_trace.event ? ` · ${whatsappStatus.webhook_trace.event}` : ""}{whatsappStatus.webhook_trace.reason ? ` · ${whatsappStatus.webhook_trace.reason}` : ""}{whatsappStatus.webhook_trace.error ? ` · ${whatsappStatus.webhook_trace.error}` : ""}
+            {:else}
+              No se ha recibido ningún evento firmado desde el último arranque.
+            {/if}
+          </div>
+          <p class="mt-4 text-[11px] text-[var(--color-muted-dim)]">Integración autohospedada mediante GOWA/WhatsApp Web. No usar para campañas masivas; WhatsApp puede cerrar sesiones o limitar números.</p>
+        </Card>
       {:else if activeSection === "tienda"}
         <Card
           lift={false}
@@ -596,28 +931,74 @@
           <div
             class="pointer-events-none absolute -left-6 -bottom-6 h-24 w-24 rounded-full bg-fuchsia-500/10 blur-2xl"
           ></div>
-          <div class="relative max-w-lg">
+          <div class="relative w-full">
             <div class="mb-5 flex flex-wrap items-start justify-between gap-3">
               <div>
-                <p class="section-label mb-1">Comercio</p>
+                <p class="section-label mb-1">Empresa activa</p>
                 <h2 class="text-lg font-semibold text-[var(--color-text)]">{activeMeta.title}</h2>
                 <p class="mt-1 text-sm text-[var(--color-muted)]">{activeMeta.hint}</p>
               </div>
-              <Button onclick={save} data-ajustes-save>Guardar ajustes</Button>
+              <div class="flex flex-wrap gap-2">
+                {#if $isAdmin}<Button variant="secondary" onclick={openCreateCompany}>+ Nueva empresa</Button>{/if}
+                <Button onclick={save} data-ajustes-save>Guardar ajustes</Button>
+              </div>
             </div>
-            <div class="grid grid-cols-1 gap-3">
-              <Input label="Nombre de la tienda" bind:value={settings.shop_name} />
-              <Select
-                label="IVA por defecto"
-                bind:value={defaultVatStr}
-                options={VAT_RATES.map((r) => ({ value: String(r), label: vatLabel(r) }))}
-              />
-            </div>
+            {#if $activeCompany}
+              <div class="mt-5 rounded-xl border border-cyan-400/20 bg-cyan-400/[0.05] p-4">
+                <p class="section-label mb-1 !text-cyan-300/80">Identidad y datos fiscales</p>
+                <div class="mt-3 flex items-center gap-3">
+                  {#if $activeCompany.logo_data_url}
+                    <img src={$activeCompany.logo_data_url} alt="Logo de {$activeCompany.trade_name}" class="company-logo-frame h-14 w-14 rounded-xl object-contain" />
+                  {:else}
+                    <img src="/logo-mark.svg" alt="Hexa" class="company-logo-frame h-14 w-14 rounded-xl object-contain" />
+                  {/if}
+                  <div class="min-w-0">
+                    <p class="font-medium text-[var(--color-text)]">{$activeCompany.legal_name}</p>
+                    <p class="mt-1 text-sm text-[var(--color-muted)]">NIF: {$activeCompany.nif || "Sin configurar"} · Nombre comercial: {$activeCompany.trade_name}</p>
+                  </div>
+                </div>
+                {#if $isAdmin}
+                  <div class="mt-4 flex flex-wrap items-center gap-2">
+                    <label class="inline-flex cursor-pointer items-center rounded-lg border border-cyan-300/25 px-3 py-2 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/10 {companyLogoBusy ? 'pointer-events-none opacity-50' : ''}">
+                      {companyLogoBusy ? "Guardando…" : ($activeCompany.logo_data_url ? "Cambiar logo" : "Subir logo")}
+                      <input class="sr-only" type="file" accept="image/png,image/jpeg,image/webp" onchange={(event) => handleCompanyLogo(event.currentTarget.files?.[0])} />
+                    </label>
+                    {#if $activeCompany.logo_data_url}
+                      <button type="button" class="rounded-lg border border-rose-300/20 px-3 py-2 text-xs text-rose-200 transition hover:bg-rose-500/10" disabled={companyLogoBusy} onclick={removeCompanyLogo}>Quitar</button>
+                    {/if}
+                  </div>
+                  <p class="mt-2 text-[11px] text-[var(--color-muted-dim)]">PNG, JPG o WebP · máximo 1 MB. Se mostrará en la recepción pública de documentos y en el selector de empresa.</p>
+                  {#if companyLogoError}<p class="mt-2 text-xs text-rose-200" role="alert">{companyLogoError}</p>{/if}
+                {/if}
+                <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                  <Input label="Nombre legal / razón social" bind:value={companyForm.legal_name} />
+                  <Input label="Nombre comercial" bind:value={companyForm.trade_name} />
+                  <Input label="NIF / CIF" bind:value={companyForm.nif} placeholder="B12345678 o 12345678A" />
+                  <Select label="Tipo de empresa" bind:value={companyForm.kind} options={[{ value: "software_studio", label: "Dev · estudio de desarrollo" }, { value: "retail_secondhand", label: "Tienda · comercio" }, { value: "generic", label: "Otra actividad" }]} />
+                  <Select label="Tipo de entidad" bind:value={companyForm.entity_type} options={[{ value: "autonomo", label: "Autónomo / persona física" }, { value: "sl", label: "Sociedad limitada (SL)" }, { value: "sa", label: "Sociedad anónima (SA)" }, { value: "cooperativa", label: "Cooperativa" }, { value: "otra", label: "Otra" }]} />
+                  <Select label="IVA por defecto" bind:value={defaultVatStr} options={VAT_RATES.map((r) => ({ value: String(r), label: vatLabel(r) }))} />
+                  <Input label="Dirección fiscal" bind:value={companyForm.address} />
+                  <Input label="Código postal" bind:value={companyForm.postal_code} />
+                  <Input label="Municipio" bind:value={companyForm.city} />
+                  <Input label="Provincia" bind:value={companyForm.province} />
+                  <Input label="País" bind:value={companyForm.country} />
+                  <Input label="Email de empresa" type="email" bind:value={companyForm.email} />
+                  <Input label="Teléfono de empresa" type="tel" bind:value={companyForm.phone} />
+                </div>
+                <div class="mt-4 flex flex-wrap items-center gap-3">
+                  <Button onclick={saveCompanyProfile} disabled={companyBusy}>{companyBusy ? "Guardando…" : "Guardar datos de empresa"}</Button>
+                  {#if companyError}<p class="text-xs text-rose-200" role="alert">{companyError}</p>{/if}
+                </div>
+                <p class="mt-3 text-xs text-[var(--color-muted-dim)]">Estos datos se toman automáticamente de la empresa activa y aparecen en las facturas y documentos públicos.</p>
+              </div>
+            {/if}
             <p class="mt-4 text-xs text-[var(--color-muted-dim)]">
               Los cambios de nombre e IVA no se aplican hasta pulsar «Guardar ajustes».
             </p>
           </div>
         </Card>
+      {:else if activeSection === "fiscal" && $isAdmin}
+        <FiscalSettings />
       {:else if activeSection === "equipo" && $isAdmin}
         <Card lift={false} class="border border-[var(--color-border)] !p-0">
           <div
@@ -644,11 +1025,13 @@
                   class="flex flex-col gap-3 px-5 py-3.5 transition hover:bg-purple-500/[0.04] sm:flex-row sm:items-center sm:justify-between"
                 >
                   <div class="flex min-w-0 items-center gap-3">
-                    <div
+                    {#if u.avatar_data_url}
+                      <img src={u.avatar_data_url} alt="Foto de {u.display_name}" class="h-9 w-9 shrink-0 rounded-full border border-purple-400/30 object-cover" />
+                    {:else}<div
                       class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-purple-400/30 bg-purple-500/15 text-sm font-semibold text-[var(--color-purple-bright)]"
                     >
                       {(u.display_name || u.username || "?").slice(0, 1).toUpperCase()}
-                    </div>
+                    </div>{/if}
                     <div class="min-w-0">
                       <p class="font-medium text-[var(--color-text)]">
                         {u.display_name}
@@ -660,7 +1043,7 @@
                         {/if}
                       </p>
                       <p class="text-xs text-[var(--color-muted-dim)]">
-                        @{u.username} · <span class="capitalize">{u.role}</span>
+                        @{u.username} · <span class="capitalize">{u.role}</span>{u.phone ? ` · ${u.phone}` : " · Sin teléfono"}
                       </p>
                     </div>
                   </div>
@@ -701,8 +1084,8 @@
                 <p class="mt-1 text-sm text-[var(--color-muted)]">{activeMeta.hint}</p>
               </div>
               <div class="flex flex-wrap items-center gap-2">
-                <Badge tone={health?.ok ? "ok" : "danger"}>
-                  {health?.ok ? "Conectado" : "Offline"}
+                <Badge tone={!health?.ok ? "danger" : isConfiguredModelAvailable() ? "ok" : "warn"}>
+                  {!health?.ok ? "Offline" : isConfiguredModelAvailable() ? "Modelo conectado" : "Servidor conectado · modelo no disponible"}
                 </Badge>
                 <Button onclick={save} data-ajustes-save>Guardar ajustes</Button>
               </div>
@@ -712,6 +1095,7 @@
               <Input label="Modelo" bind:value={settings.ollama_model} placeholder="qwen3.5:4b" />
             </div>
             {#if health?.models?.length}
+              <p class="mt-3 text-xs text-[var(--color-muted)]">La lectura de tickets e imágenes usa automáticamente <strong class="text-purple-200">llama3.2-vision</strong>; el campo “Modelo” corresponde al asistente de texto.</p>
               <p class="section-label mt-4 mb-2 !normal-case !tracking-wide">Modelos detectados</p>
               <div class="flex flex-wrap gap-2">
                 {#each health.models.slice(0, 16) as m}
@@ -994,14 +1378,53 @@ npm run orca:worker</pre>
   >
     <Input label="Usuario (login)" bind:value={userForm.username} required />
     <Input label="Nombre visible" bind:value={userForm.display_name} required />
+    <div
+      class="rounded-xl border border-dashed p-3 transition {userAvatarDragActive ? 'border-purple-400 bg-purple-500/10' : 'border-[var(--color-border)]'}"
+      role="group"
+      aria-label="Subir foto de perfil"
+      ondragenter={(event) => { event.preventDefault(); userAvatarDragActive = true; }}
+      ondragover={(event) => { event.preventDefault(); userAvatarDragActive = true; }}
+      ondragleave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) userAvatarDragActive = false; }}
+      ondrop={dropUserAvatar}
+      data-user-avatar-dropzone
+    >
+      <div class="flex items-center gap-3">
+        {#if userForm.avatar_data_url}
+          <img src={userForm.avatar_data_url} alt="Vista previa" class="h-16 w-16 shrink-0 rounded-full border border-white/10 object-cover" />
+        {:else}
+          <div class="grid h-16 w-16 shrink-0 place-items-center rounded-full border border-dashed border-[var(--color-border)] text-lg text-[var(--color-muted)]">{(userForm.display_name || userForm.username || "?").slice(0, 1).toUpperCase()}</div>
+        {/if}
+        <div class="space-y-2">
+          <div>
+            <p class="text-xs font-medium text-[var(--color-text)]">Foto de perfil</p>
+            <p class="text-[11px] text-[var(--color-muted-dim)]">Arrastra aquí una foto o selecciónala. PNG, JPG o WebP, máximo 1 MB.</p>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <label class="cursor-pointer rounded-lg border border-[var(--color-border)] px-3 py-2 text-xs hover:bg-white/5">Subir foto<input class="sr-only" type="file" accept="image/png,image/jpeg,image/webp" onchange={(event) => handleUserAvatar(event.currentTarget.files?.[0])} /></label>
+            {#if userForm.avatar_data_url}<Button type="button" variant="ghost" onclick={() => (userForm.avatar_data_url = "")}>Quitar</Button>{/if}
+          </div>
+        </div>
+      </div>
+    </div>
+    <Input label="Teléfono de WhatsApp" bind:value={userForm.phone} placeholder="+34 600 111 222" />
     <Select
       label="Rol"
       bind:value={roleStr}
       options={[
         { value: "admin", label: "Administrador" },
         { value: "cajero", label: "Cajero" },
+        ...($activeCompany?.kind === "software_studio" ? [{ value: "cliente", label: "Cliente (portal)" }] : []),
       ]}
     />
+    {#if roleStr === "cliente"}
+      <Select
+        label="Proyecto visible"
+        bind:value={clientProjectStr}
+        options={clientProjects.map((project) => ({ value: String(project.id), label: project.name }))}
+        placeholder="Selecciona un proyecto"
+      />
+      <p class="text-xs text-[var(--color-muted)]">Podrá consultar este proyecto y conversar únicamente en sus solicitudes. Las tareas son de solo lectura.</p>
+    {/if}
     {#if !editingUser}
       <p
         class="rounded-xl border border-purple-400/20 bg-purple-500/10 px-3 py-2 text-xs text-[var(--color-muted)]"
@@ -1019,6 +1442,22 @@ npm run orca:worker</pre>
     <div class="flex flex-wrap justify-end gap-2">
       <Button variant="ghost" type="button" onclick={() => (userModal = false)}>Cancelar</Button>
       <Button type="submit">Guardar</Button>
+    </div>
+  </form>
+</Modal>
+
+<Modal open={createCompanyModal} title="Nueva empresa" onclose={() => (createCompanyModal = false)}>
+  <form class="grid gap-3" onsubmit={(event) => { event.preventDefault(); void createCompany(); }}>
+    <p class="text-sm text-[var(--color-muted)]">Crea una entidad legal independiente para gestionar sus proyectos, facturas e impuestos desde su propio espacio.</p>
+    <Input label="Nombre legal / razón social" bind:value={createCompanyForm.legal_name} required />
+    <Input label="Nombre comercial" bind:value={createCompanyForm.trade_name} required />
+    <Input label="NIF / CIF" bind:value={createCompanyForm.nif} placeholder="B12345678 o 12345678A" />
+    <Select label="Tipo de empresa" bind:value={createCompanyForm.kind} options={[{ value: "software_studio", label: "Dev · estudio de desarrollo" }, { value: "retail_secondhand", label: "Tienda · comercio" }, { value: "generic", label: "Otra actividad" }]} />
+    <Select label="Tipo de entidad" bind:value={createCompanyForm.entity_type} options={[{ value: "autonomo", label: "Autónomo / persona física" }, { value: "sl", label: "Sociedad limitada (SL)" }, { value: "sa", label: "Sociedad anónima (SA)" }, { value: "cooperativa", label: "Cooperativa" }, { value: "otra", label: "Otra" }]} />
+    {#if createCompanyError}<p class="text-xs text-rose-200" role="alert">{createCompanyError}</p>{/if}
+    <div class="flex flex-wrap justify-end gap-2">
+      <Button type="button" variant="ghost" onclick={() => (createCompanyModal = false)}>Cancelar</Button>
+      <Button type="submit" disabled={createCompanyBusy}>{createCompanyBusy ? "Creando…" : "Crear y activar"}</Button>
     </div>
   </form>
 </Modal>

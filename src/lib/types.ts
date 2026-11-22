@@ -1,10 +1,11 @@
 import type { VatRate } from "./vat";
 
 /** app roles */
-export type UserRole = "admin" | "cajero";
+export type UserRole = "admin" | "cajero" | "cliente";
 
 /** Multi-empresa: kind de negocio (docs/MULTI_COMPANY_ANALYSIS.md) */
 export type CompanyKind = "retail_secondhand" | "software_studio" | "generic";
+export type CompanyEntityType = "autonomo" | "sl" | "sa" | "cooperativa" | "otra";
 
 export type Company = {
   id: number;
@@ -13,8 +14,25 @@ export type Company = {
   trade_name: string;
   nif: string;
   kind: CompanyKind;
+  entity_type?: CompanyEntityType;
+  address?: string;
+  postal_code?: string;
+  city?: string;
+  province?: string;
+  country?: string;
+  email?: string;
+  phone?: string;
+  /** Logo de la empresa en data URL (PNG/JPG/WebP, máximo 1 MB). */
+  logo_data_url?: string;
   active: boolean;
   created_at: string;
+};
+
+export type CompanyInput = Partial<Pick<Company, "logo_data_url" | "nif" | "entity_type" | "address" | "postal_code" | "city" | "province" | "country" | "email" | "phone">> & {
+  legal_name: string;
+  trade_name: string;
+  kind?: CompanyKind;
+  code?: string;
 };
 
 export type CompanyMember = {
@@ -184,6 +202,372 @@ export type CashInput = {
   occurred_at?: string | null;
 };
 
+export type ProjectGrantIncomeInput = {
+  project_id: number;
+  beneficiary_company_id: number;
+  grant_id: string;
+  amount_cents: number;
+  description: string;
+  occurred_at?: string | null;
+};
+
+export type CompanyFinancingIncomeInput = {
+  source_type: "investment" | "loan";
+  source_id: string;
+  amount_cents: number;
+  description: string;
+  occurred_at?: string | null;
+};
+
+export type ExpenseStatus = "draft" | "review" | "approved" | "paid" | "rejected";
+export type ExpenseSource = "manual" | "whatsapp" | "upload";
+export type ExpenseAttachment = {
+  id: string;
+  name: string;
+  mime_type: string;
+  size: number;
+  data_url?: string;
+  href?: string;
+};
+export type ExpenseDocument = {
+  id: number;
+  company_id: number;
+  status: ExpenseStatus;
+  kind: "ticket" | "invoice" | "simplified_invoice" | "credit_note" | "receipt";
+  title: string;
+  supplier_name: string;
+  supplier_tax_id: string;
+  invoice_number: string;
+  issued_at: string | null;
+  /** Fecha contable usada para el periodo fiscal; por defecto fecha de emisión. */
+  accounting_date?: string | null;
+  /** Permite separar gastos deducibles de justificantes no deducibles. */
+  deductible?: boolean;
+  deduction_period?: string | null;
+  due_at: string | null;
+  project_id: number | null;
+  category: string;
+  base_cents: number;
+  vat_rate: VatRate;
+  vat_cents: number;
+  withholding_cents: number;
+  total_cents: number;
+  paid_cents?: number;
+  payment_status?: "pending" | "partial" | "paid";
+  currency: string;
+  notes: string;
+  attachments: ExpenseAttachment[];
+  source: ExpenseSource;
+  source_phone: string | null;
+  ocr_confidence: number | null;
+  created_by: number;
+  created_at: string;
+  updated_at: string;
+  approved_at: string | null;
+};
+export type ExpenseDocumentInput = Partial<Omit<ExpenseDocument, "id" | "company_id" | "created_by" | "created_at" | "updated_at">> & { id?: number | null };
+
+export type FiscalRegime = "general" | "simplified" | "recargo_equivalencia" | "other";
+export type FiscalPeriod = "monthly" | "quarterly";
+export type FiscalEntityType = "autonomo" | "sociedad" | "otra";
+export type FiscalIncomeRegime = "direct_estimation" | "objective_estimation" | "none";
+export type FiscalVatActivity = "taxable" | "mixed" | "exempt" | "not_applicable";
+export type FiscalTaxSetup = {
+  tax_residency: "spain" | "non_resident";
+  census_changes: boolean;
+  income_regime: FiscalIncomeRegime;
+  vat_registered: boolean;
+  vat_activity: FiscalVatActivity;
+  annual_vat_summary: boolean;
+  intra_community_operations: boolean;
+  imports_exports: boolean;
+  third_party_operations: boolean;
+  has_employees: boolean;
+  withholds_employees: boolean;
+  withholds_professionals: boolean;
+  withholds_rent: boolean;
+  withholds_capital: boolean;
+  corporate_tax: boolean;
+  corporate_tax_installments: boolean;
+  foreign_assets: boolean;
+  crypto_assets: boolean;
+};
+export type TaxModelDefinition = {
+  code: string;
+  label: string;
+  frequency: "monthly" | "quarterly" | "annual" | "eventual";
+  reason: string;
+};
+
+export type EmployeeStatus = "active" | "leave" | "ended";
+export type Employee = {
+  id: number; company_id: number; user_id: number | null; first_name: string; last_name: string;
+  tax_id: string; social_security_number: string; email: string; phone: string; position: string;
+  contract_type: string; work_schedule: string; collective_agreement: string; professional_group: string;
+  start_date: string | null; end_date: string | null; annual_gross_cents: number; payments_per_year: number;
+  iban: string; status: EmployeeStatus; notes: string; documents: { title: string; url: string }[];
+  created_at: string; updated_at: string;
+};
+export type EmployeeInput = Partial<Omit<Employee, "id" | "company_id" | "created_at" | "updated_at">> & { id?: number | null; first_name: string; last_name: string };
+export type PayrollStatus = "draft" | "reviewed" | "paid" | "cancelled";
+export type Payroll = {
+  id: number; company_id: number; employee_id: number; period: string; gross_cents: number;
+  employee_ss_cents: number; irpf_cents: number; other_deductions_cents: number; net_cents: number;
+  employer_ss_cents: number; total_cost_cents: number; status: PayrollStatus; document_name: string;
+  document_url: string; paid_at: string | null; cash_movement_id: number | null; notes: string;
+  created_at: string; updated_at: string;
+};
+export type PayrollInput = Partial<Omit<Payroll, "id" | "company_id" | "created_at" | "updated_at">> & { id?: number | null; employee_id: number; period: string };
+export type VerifactuMode = "disabled" | "test" | "production";
+export type VerifactuRecordType = "alta" | "anulacion";
+export type VerifactuRecordStatus = "generated" | "queued" | "sent" | "accepted" | "accepted_with_errors" | "rejected";
+export type FiscalProfile = {
+  company_id: number;
+  invoice_series?: string;
+  regime: FiscalRegime;
+  period: FiscalPeriod;
+  entity_type?: FiscalEntityType;
+  tax_models?: string[];
+  tax_setup?: Partial<FiscalTaxSetup>;
+  profile_completed?: boolean;
+  irpf_enabled: boolean;
+  default_irpf_rate: number;
+  sii_enabled: boolean;
+  verifactu_mode?: VerifactuMode;
+  verifactu_software_id?: string;
+  verifactu_software_name?: string;
+  verifactu_software_version?: string;
+  verifactu_producer_name?: string;
+  verifactu_producer_nif?: string;
+  updated_at: string;
+};
+
+export type Model303Bucket = {
+  vat_rate: VatRate;
+  base_cents: number;
+  vat_cents: number;
+};
+export type Model303Draft = {
+  company_id: number;
+  from: string;
+  to: string;
+  output_buckets: Model303Bucket[];
+  input_buckets: Model303Bucket[];
+  output_base_cents: number;
+  output_vat_cents: number;
+  input_base_cents: number;
+  input_vat_cents: number;
+  net_vat_cents: number;
+  withholding_cents: number;
+  status: "draft";
+  warnings: string[];
+  generated_at: string;
+};
+
+export type InvoiceStatus = "draft" | "issued" | "cancelled";
+export type InvoiceKind = "complete" | "simplified" | "rectifying";
+export type InvoiceLine = {
+  description: string;
+  quantity: number;
+  unit_price_cents: number;
+  vat_rate: VatRate;
+  base_cents: number;
+  vat_cents: number;
+  total_cents: number;
+};
+export type InvoiceLineInput = {
+  description: string;
+  quantity: number;
+  unit_price_cents: number;
+  vat_rate: VatRate;
+};
+export type Invoice = {
+  id: number;
+  company_id: number;
+  sale_id: number | null;
+  project_id?: number | null;
+  series: string;
+  number: string;
+  kind: InvoiceKind;
+  status: InvoiceStatus;
+  issued_at: string;
+  operation_date: string;
+  due_at: string | null;
+  seller_legal_name: string;
+  seller_nif: string;
+  seller_trade_name: string;
+  customer_id: number | null;
+  customer_name: string;
+  customer_nif: string;
+  customer_email: string;
+  lines: InvoiceLine[];
+  base_cents: number;
+  vat_cents: number;
+  irpf_rate: number;
+  irpf_cents: number;
+  total_cents: number;
+  paid_cents: number;
+  payment_status: "pending" | "partial" | "paid";
+  notes: string;
+  created_by: number;
+  created_at: string;
+  updated_at: string;
+};
+export type InvoiceInput = {
+  /** Drafts are never sent to VERI*FACTU; omitting status issues the invoice immediately. */
+  status?: InvoiceStatus;
+  draft_id?: number | null;
+  sale_id?: number;
+  project_id?: number | null;
+  customer_id?: number | null;
+  customer_name?: string;
+  customer_nif?: string;
+  customer_email?: string;
+  lines?: InvoiceLineInput[];
+  series?: string;
+  kind?: InvoiceKind;
+  rectifies_invoice_id?: number | null;
+  operation_date?: string | null;
+  due_at?: string | null;
+  irpf_rate?: number;
+  notes?: string;
+};
+export type InvoicePayment = {
+  id: number;
+  invoice_id: number;
+  company_id: number;
+  amount_cents: number;
+  paid_at: string;
+  method: "cash" | "bank_transfer" | "card" | "other";
+  notes: string;
+  created_by: number;
+};
+export type InvoicePaymentInput = {
+  invoice_id: number;
+  amount_cents: number;
+  paid_at?: string | null;
+  method?: InvoicePayment["method"];
+  notes?: string;
+};
+
+export type BudgetStatus = "draft" | "sent" | "accepted" | "rejected" | "expired" | "invoiced" | "cancelled";
+export type BudgetLine = {
+  description: string;
+  quantity: number;
+  unit_price_cents: number;
+  discount_type: "percent" | "amount";
+  discount_value: number;
+  discount_cents: number;
+  global_discount_cents: number;
+  original_base_cents: number;
+  vat_rate: VatRate;
+  base_cents: number;
+  vat_cents: number;
+  total_cents: number;
+};
+export type BudgetLineInput = {
+  description: string;
+  quantity: number;
+  unit_price_cents: number;
+  discount_type?: "percent" | "amount";
+  discount_value?: number;
+  vat_rate: VatRate;
+};
+export type Budget = {
+  id: number;
+  company_id: number;
+  series: string;
+  number: string;
+  status: BudgetStatus;
+  operation_date: string;
+  due_at: string | null;
+  customer_id: number | null;
+  customer_name: string;
+  customer_nif: string;
+  customer_email: string;
+  project_explanation: string;
+  lines: BudgetLine[];
+  global_discount_type: "percent" | "amount";
+  global_discount_value: number;
+  discount_cents: number;
+  base_cents: number;
+  vat_cents: number;
+  irpf_rate: number;
+  irpf_cents: number;
+  total_cents: number;
+  payment_method: string;
+  account: string;
+  tags: string[];
+  notes: string;
+  invoice_id: number | null;
+  created_by: number;
+  created_at: string;
+  updated_at: string;
+  accepted_at: string | null;
+  rejected_at: string | null;
+  converted_at: string | null;
+};
+export type BudgetInput = {
+  id?: number | null;
+  series?: string;
+  number?: string;
+  status?: BudgetStatus;
+  operation_date?: string | null;
+  due_at?: string | null;
+  customer_id?: number | null;
+  customer_name?: string;
+  customer_nif?: string;
+  customer_email?: string;
+  project_explanation: string;
+  lines: BudgetLineInput[];
+  global_discount_type?: "percent" | "amount";
+  global_discount_value?: number;
+  irpf_rate?: number;
+  payment_method?: string;
+  account?: string;
+  tags?: string[];
+  notes?: string;
+};
+export type VerifactuRecord = {
+  id: number;
+  company_id: number;
+  invoice_id: number;
+  record_type: VerifactuRecordType;
+  issuer_nif: string;
+  issuer_name: string;
+  invoice_series: string;
+  invoice_number: string;
+  invoice_date: string;
+  invoice_type: string;
+  vat_cents: number;
+  total_cents: number;
+  previous_hash: string;
+  hash: string;
+  generated_at: string;
+  mode: VerifactuMode;
+  status: VerifactuRecordStatus;
+  qr_url: string;
+  payload_json: string;
+  error: string | null;
+};
+export type ExpensePayment = {
+  id: number;
+  expense_id: number;
+  company_id: number;
+  amount_cents: number;
+  paid_at: string;
+  method: InvoicePayment["method"];
+  notes: string;
+  created_by: number;
+};
+export type ExpensePaymentInput = {
+  expense_id: number;
+  amount_cents: number;
+  paid_at?: string | null;
+  method?: InvoicePayment["method"];
+  notes?: string;
+};
+
 export type VatBucket = {
   vat_rate: VatRate;
   base_cents: number;
@@ -211,6 +595,24 @@ export type DashboardStats = {
   base_month_cents: number;
 };
 
+/** Resumen de lectura consolidado por empresa autorizada. */
+export type CompanyFinancialSummary = {
+  company_id: number;
+  code: string;
+  trade_name: string;
+  issued_total_cents: number;
+  issued_paid_cents: number;
+  issued_pending_cents: number;
+  received_total_cents: number;
+  received_paid_cents: number;
+  cash_income_cents: number;
+  grant_income_cents: number;
+  financing_income_cents: number;
+  investment_income_cents: number;
+  loan_income_cents: number;
+  cash_expense_cents: number;
+};
+
 export type Settings = {
   shop_name: string;
   ollama_model: string;
@@ -222,9 +624,61 @@ export type Settings = {
   last_backup_at: string | null;
   /** Objetivos de ingresos en céntimos, indexados por `companyId:YYYY-MM`. */
   monthly_economic_goals: Record<string, number>;
+  company_financing: CompanyFinancing;
 };
 
-export type PluginKey = "database_bridge" | "stripe_mcp";
+export type CompanyInvestor = {
+  id: string;
+  name: string;
+  status: "contact" | "negotiating" | "committed" | "invested" | "exited";
+  committed_cents: number;
+  received_cents: number;
+  equity_percent: number;
+  investment_date: string | null;
+  notes: string;
+  round_id?: string | null;
+};
+
+export type CompanyFounder = {
+  id: string;
+  name: string;
+  equity_percent: number;
+  notes: string;
+};
+
+export type CompanyInvestmentRound = {
+  id: string;
+  name: string;
+  status: "planned" | "open" | "closed";
+  valuation_basis: "pre_money" | "post_money";
+  pre_money_cents: number;
+  new_money_cents: number;
+  post_money_cents: number;
+  investment_date: string | null;
+  notes: string;
+};
+
+export type CompanyLoan = {
+  id: string;
+  lender: string;
+  status: "negotiating" | "approved" | "active" | "paid" | "defaulted";
+  principal_cents: number;
+  received_cents: number;
+  outstanding_cents: number;
+  interest_percent: number;
+  start_date: string | null;
+  maturity_date: string | null;
+  notes: string;
+};
+
+export type CompanyFinancing = {
+  founders: CompanyFounder[];
+  investors: CompanyInvestor[];
+  rounds: CompanyInvestmentRound[];
+  loans: CompanyLoan[];
+};
+
+export type PluginKey = "database_bridge" | "stripe_mcp" | "google_drive";
 
 export type PluginConfig = {
   display_name?: string;
@@ -235,13 +689,15 @@ export type PluginConfig = {
   environment?: "sandbox" | "live";
   allow_write_tools?: boolean;
   require_approval?: boolean;
+  folder_id?: string;
+  folder_name?: string;
 };
 
 export type TenantPlugin = {
   plugin_key: PluginKey;
   name: string;
   description: string;
-  category: "datos" | "pagos";
+  category: "datos" | "pagos" | "almacenamiento";
   capabilities: string[];
   enabled: boolean;
   config: PluginConfig;
@@ -273,6 +729,23 @@ export type PluginTestResult = {
   details?: Record<string, unknown>;
 };
 
+export type StorageUploadInput = {
+  provider: "google_drive";
+  project_id: number;
+  name: string;
+  mime_type: string;
+  content_base64: string;
+};
+
+export type StorageUploadResult = {
+  provider: "google_drive";
+  remote_id: string;
+  name: string;
+  mime_type: string;
+  size: number;
+  web_url: string;
+};
+
 export type PluginToolResult = {
   ok: boolean;
   plugin_key: PluginKey;
@@ -295,6 +768,9 @@ export type AuthUser = {
   id: number;
   username: string;
   display_name: string;
+  /** Teléfono internacional (E.164) usado para WhatsApp, p. ej. +34600111222. */
+  phone: string;
+  avatar_data_url?: string;
   role: UserRole;
   active: boolean;
   created_at: string;
@@ -302,13 +778,19 @@ export type AuthUser = {
   temp_password_issued_at: string | null;
   /** Puede desplegar y operar todos los tenants, manteniendo una vista de empresas asignadas. */
   is_master?: boolean;
+  /** Proyectos asignados al perfil cuando el rol es cliente. */
+  project_ids?: number[];
 };
 
 export type UserInput = {
   id?: number | null;
   username: string;
   display_name: string;
+  phone?: string;
+  avatar_data_url?: string;
   role: UserRole;
+  /** Proyectos visibles para un usuario cliente. Se ignora para personal interno. */
+  project_ids?: number[];
   /** Optional permanent credential on edit only; create always issues a 14-char temp password. */
   pin?: string | null;
   active?: boolean;
@@ -338,11 +820,206 @@ export type WorkStatus =
   | "inbox"
   | "planned"
   | "in_progress"
+  | "validation"
   | "blocked"
   | "done"
   | "archived";
 
 export type WorkPriority = "low" | "normal" | "high" | "urgent";
+
+export type WorkReviewMessage = {
+  id: string;
+  author_id: number;
+  author_name: string;
+  message: string;
+  created_at: string;
+  kind: "comment" | "changes_requested" | "approved" | "internal_approved" | "client_approved";
+};
+
+export type WorkProjectDocumentKind = "link" | "file" | "note";
+
+export type WorkProjectDocument = {
+  id: string;
+  title: string;
+  kind: WorkProjectDocumentKind;
+  location: string;
+  notes: string;
+  updated_at: string;
+};
+
+export type WorkProjectDocumentInput = Omit<WorkProjectDocument, "id" | "updated_at"> & {
+  id?: string;
+};
+
+export type WorkProjectKind = "own" | "client" | "internal";
+
+export type ProjectHealth = "on_track" | "at_risk" | "off_track" | "on_hold";
+export type ProjectManagementStatus = "open" | "mitigated" | "resolved" | "closed";
+
+export type ProjectUpdate = {
+  id: string;
+  health: ProjectHealth;
+  summary: string;
+  achievements: string;
+  blockers: string;
+  next_steps: string;
+  decisions_needed: string;
+  author: string;
+  created_at: string;
+};
+
+export type ProjectOperationalMilestone = {
+  id: string;
+  title: string;
+  kind: "delivery" | "contractual" | "internal";
+  target_date: string | null;
+  owner_id: number | null;
+  status: "pending" | "in_progress" | "done" | "missed";
+  completion_criteria: string;
+};
+
+export type ProjectRisk = {
+  id: string;
+  title: string;
+  probability: "low" | "medium" | "high";
+  impact: "low" | "medium" | "high";
+  owner_id: number | null;
+  mitigation: string;
+  review_date: string | null;
+  status: ProjectManagementStatus;
+};
+
+export type ProjectDecision = {
+  id: string;
+  title: string;
+  context: string;
+  decision: string;
+  owner_id: number | null;
+  due_date: string | null;
+  status: "pending" | "decided" | "discarded";
+  decided_at: string | null;
+};
+
+export type ProjectDependency = {
+  id: string;
+  project_id: number;
+  relation: "blocked_by" | "blocks" | "related";
+  notes: string;
+};
+
+export type ProjectCycle = {
+  id: string;
+  name: string;
+  goal: string;
+  start_date: string;
+  end_date: string;
+  capacity_points: number;
+  status: "planned" | "active" | "completed" | "cancelled";
+  stage?: "refinement" | "poker" | "planning" | "active" | "review" | "retrospective" | "completed";
+  task_ids?: number[];
+  poker_points?: Record<string, number>;
+  ai_estimates?: Record<string, {
+    points: number;
+    confidence: "low" | "medium" | "high";
+    rationale: string;
+    suggested_assignee_id?: number | null;
+    suggested_execution_mode?: "human" | "ai" | "hybrid";
+    suggested_reviewer_id?: number | null;
+    /** Autoridad que calculó la propuesta. El CRM no estima por su cuenta. */
+    source?: "hexa";
+    external_task_id?: string | null;
+  }>;
+  execution_modes?: Record<string, "human" | "ai" | "hybrid">;
+  reviewer_ids?: Record<string, number | null>;
+  assignee_ids?: Record<string, number | null>;
+  definition_of_done?: string;
+  human_capacity_hours?: number;
+  ai_concurrency?: number;
+  ai_budget_cents?: number;
+  review_notes?: string;
+  retrospective_went_well?: string;
+  retrospective_improve?: string;
+  retrospective_action?: string;
+  completed_at?: string | null;
+};
+
+export type ProjectCapacity = {
+  user_id: number;
+  weekly_capacity_hours: number;
+};
+
+export type ProjectGrant = {
+  id: string;
+  name: string;
+  authority: string;
+  beneficiary_company_id?: number | null;
+  managing_company: string;
+  management_fee_percent: number;
+  status: "preparing" | "negotiating" | "awarded" | "received" | "rejected" | "closed";
+  funding_type: "non_repayable" | "repayable";
+  requested_cents: number;
+  awarded_cents: number;
+  received_cents: number;
+  repayable_cents: number;
+  application_date: string | null;
+  resolution_date: string | null;
+  received_date?: string | null;
+  repayment_date: string | null;
+  reference: string;
+  notes: string;
+};
+
+export type ProjectManagement = {
+  lead_id: number | null;
+  update_frequency_days: number;
+  task_estimates: Record<string, number>;
+  updates: ProjectUpdate[];
+  milestones: ProjectOperationalMilestone[];
+  risks: ProjectRisk[];
+  decisions: ProjectDecision[];
+  dependencies: ProjectDependency[];
+  cycles: ProjectCycle[];
+  capacity: ProjectCapacity[];
+  grants: ProjectGrant[];
+};
+
+export type ProjectTechnicalProfile = {
+  frontend: string[];
+  backend: string[];
+  app: string[];
+  database: string[];
+  infrastructure: string[];
+  deployment: string[];
+  integrations: string[];
+  plugins: string[];
+  ai: string[];
+  tools: string[];
+  repository_url: string;
+  documentation_url: string;
+  staging_url: string;
+  production_url: string;
+};
+
+export type ProjectBrief = {
+  summary: string;
+  problem: string;
+  objectives: string;
+  users: string;
+  scope: string;
+  out_of_scope: string;
+  functional_requirements: string;
+  non_functional_requirements: string;
+  acceptance_criteria: string;
+  risks: string;
+  dependencies: string;
+  success_metrics: string;
+  notes: string;
+  technology: ProjectTechnicalProfile;
+};
+
+export type ProjectBriefInput = Partial<Omit<ProjectBrief, "technology">> & {
+  technology?: Partial<ProjectTechnicalProfile>;
+};
 
 export type WorkCategory = {
   id: number;
@@ -359,11 +1036,24 @@ export type WorkProject = {
   id: number;
   uid: string;
   company_id: number;
+  /** Empresa que gestiona el proyecto (tenant actual). */
+  project_type?: WorkProjectKind;
+  /** Empresa cliente o propietaria, cuando el proyecto no es propio. */
+  client_company_id?: number | null;
+  /** Empresa cuyo espacio de trabajo contiene las tareas del proyecto. */
+  task_company_id?: number | null;
   customer_id: number | null;
   value_cents: number;
   monthly_estimate_cents: number;
   revenue_target_date: string | null;
   revenue_milestones: WorkProjectRevenueMilestone[];
+  documents: WorkProjectDocument[];
+  requests?: WorkProjectRequest[];
+  prd?: string;
+  tech_stack?: string[];
+  brief?: ProjectBrief;
+  management?: ProjectManagement;
+  logo_data_url?: string;
   name: string;
   description: string;
   status: "planned" | "active" | "paused" | "done" | "archived";
@@ -376,16 +1066,54 @@ export type WorkProject = {
 
 export type WorkProjectInput = {
   id?: number | null;
+  project_type?: WorkProjectKind;
+  client_company_id?: number | null;
+  task_company_id?: number | null;
   customer_id?: number | null;
   value_cents?: number;
   monthly_estimate_cents?: number;
   revenue_target_date?: string | null;
   revenue_milestones?: WorkProjectRevenueMilestoneInput[];
+  documents?: WorkProjectDocumentInput[];
+  requests?: WorkProjectRequest[];
+  prd?: string;
+  tech_stack?: string[];
+  brief?: ProjectBriefInput;
+  management?: Partial<ProjectManagement>;
+  logo_data_url?: string;
   name: string;
   description?: string;
   status?: "planned" | "active" | "paused" | "done" | "archived";
   start_date?: string | null;
   target_date?: string | null;
+};
+
+export type WorkProjectRequestType = "suggestion" | "improvement" | "issue" | "feature" | "question";
+export type WorkProjectRequestStatus = "new" | "reviewing" | "accepted" | "rejected" | "converted";
+
+export type WorkProjectRequestMessage = {
+  id: string;
+  author: string;
+  text: string;
+  created_at: string;
+};
+
+export type WorkProjectRequest = {
+  id: string;
+  type: WorkProjectRequestType;
+  title: string;
+  description: string;
+  requester: string;
+  /** Identidad del cliente creador; las solicitudes internas no la incluyen. */
+  requester_user_id?: number;
+  priority: WorkPriority;
+  impact: string;
+  status: WorkProjectRequestStatus;
+  reviewer_id: number | null;
+  task_id: number | null;
+  messages: WorkProjectRequestMessage[];
+  created_at: string;
+  updated_at: string;
 };
 
 export type WorkProjectRevenueMilestone = {
@@ -415,22 +1143,45 @@ export type WorkItem = {
   priority: WorkPriority;
   start_date: string | null;
   due_date: string | null;
+  /** Responsable efectivo; hereda del padre sin modificar assignee_id. */
+  effective_assignee_id?: number | null;
+  /** Vencimiento efectivo; hereda del padre sin modificar due_date. */
+  effective_due_date?: string | null;
   sort_order: number;
   source_type: string | null;
   source_key: string | null;
   source_href: string | null;
   completed_at: string | null;
+  review_messages?: WorkReviewMessage[];
   created_at: string;
   updated_at: string;
   category?: WorkCategory | null;
   assignee_name?: string | null;
+  assignee_avatar_data_url?: string | null;
   parent_title?: string | null;
+};
+
+export type ClientPortalTask = Pick<WorkItem, "id" | "parent_id" | "title" | "status" | "priority" | "due_date" | "effective_due_date" | "review_messages">;
+export type ClientPortalInvoice = Pick<Invoice, "id" | "series" | "number" | "kind" | "status" | "issued_at" | "operation_date" | "due_at" | "total_cents" | "paid_cents" | "payment_status">;
+export type ClientPortalProject = {
+  id: number;
+  uid: string;
+  name: string;
+  description: string;
+  status: WorkProject["status"];
+  start_date: string | null;
+  target_date: string | null;
+  logo_data_url?: string;
+  milestones: ProjectOperationalMilestone[];
+  tasks: ClientPortalTask[];
+  invoices: ClientPortalInvoice[];
+  requests: WorkProjectRequest[];
 };
 
 export type WorkMember = {
   id: number;
   display_name: string;
-  role: "admin" | "cajero";
+  role: UserRole;
 };
 
 export type WorkItemFilters = {
@@ -469,6 +1220,7 @@ export type WorkItemInput = {
   source_type?: string | null;
   source_key?: string | null;
   source_href?: string | null;
+  review_messages?: WorkReviewMessage[];
 };
 
 /* -------------------------------------------------------------

@@ -8,12 +8,25 @@ import type {
   AuthUser,
   CashInput,
   CashMovement,
+  ProjectGrantIncomeInput,
+  CompanyFinancingIncomeInput,
   Company,
+  CompanyInput,
   CompanyMember,
   CreateInventoryMovementInput,
   CreateUserResult,
   Customer,
   CustomerInput,
+  ExpenseDocument,
+  ExpenseDocumentInput,
+  ExpensePayment,
+  ExpensePaymentInput,
+  FiscalProfile,
+  Invoice,
+  InvoiceInput,
+  InvoicePayment,
+  InvoicePaymentInput,
+  Model303Draft,
   DashboardStats,
   InventoryMovement,
   InventoryMovementType,
@@ -30,12 +43,15 @@ import type {
   Sale,
   SaleLineInput,
   Settings,
+  StorageUploadInput,
+  StorageUploadResult,
   StockBalance,
   StockLocation,
   TenantPlugin,
   UserInput,
   UserRole,
   VatSummary,
+  VerifactuRecord,
   Warehouse,
   WorkCategory,
   WorkItem,
@@ -46,6 +62,10 @@ import type {
   WorkProjectInput,
   WorkStatus,
 } from "../types";
+import { buildModel303Draft } from "../taxes/model303";
+import { deriveTaxModels, normalizeTaxSetup } from "../taxes/models";
+import { buildInvoiceFromSale, buildManualInvoice, buildRectifyingInvoice } from "../invoicing/invoice";
+import { createVerifactuRecord, verifyVerifactuChain } from "../verifactu/records";
 import {
   PLUGIN_CATALOG,
   listStripeTools,
@@ -63,6 +83,12 @@ import {
   seedCompanies,
   seedCompanyMembers,
 } from "../company/context";
+import { normalizeProjectDocuments, validateProjectDocuments } from "../projects/project-documents";
+import { normalizeProjectBrief, normalizeProjectPrd, normalizeTechStack } from "../projects/project-brief";
+import { normalizeProjectManagement } from "../projects/management";
+import { validateProjectLogo } from "../projects/project-logo";
+import { validateUserAvatar } from "../users/user-avatar";
+import { decodeBase64File, testGoogleDrive, uploadToGoogleDrive } from "../storage/google-drive";
 import type { VatRate } from "../vat";
 import { isVatRate, splitInclusive } from "../vat";
 import { hashCredential, hashPin, validatePin, verifyCredential } from "../auth/pin";
@@ -146,6 +172,12 @@ type Store = {
   sales: Sale[];
   saleLines: NonNullable<Sale["lines"]>;
   cash: CashMovement[];
+  expenses: ExpenseDocument[];
+  invoices: Invoice[];
+  invoicePayments: InvoicePayment[];
+  expensePayments: ExpensePayment[];
+  verifactuRecords: VerifactuRecord[];
+  fiscalProfiles: FiscalProfile[];
   stockMovements: {
     id: number;
     product_id: number;
@@ -171,6 +203,11 @@ type Store = {
     sale: number;
     line: number;
     cash: number;
+    expense: number;
+    invoice: number;
+    invoicePayment: number;
+    expensePayment: number;
+    verifactuRecord: number;
     stock: number;
     user: number;
     company: number;
@@ -188,6 +225,18 @@ function now() {
   return new Date().toISOString();
 }
 
+function appendVerifactuRecord(s: Store, invoice: Invoice, recordType: "alta" | "anulacion") {
+  const profile = s.fiscalProfiles.find((candidate) => candidate.company_id === invoice.company_id);
+  if (!profile || (profile.verifactu_mode ?? "disabled") === "disabled") return;
+  const previous = s.verifactuRecords
+    .filter((record) => record.company_id === invoice.company_id)
+    .sort((a, b) => b.id - a.id)[0]?.hash ?? "";
+  const draft = createVerifactuRecord({ invoice, profile, recordType, previousHash: previous });
+  if (!draft) return;
+  s.seq.verifactuRecord += 1;
+  s.verifactuRecords.push({ id: s.seq.verifactuRecord, ...draft });
+}
+
 function defaultSettings(): Settings {
   return {
     shop_name: "Mi Tienda",
@@ -197,6 +246,7 @@ function defaultSettings(): Settings {
     idle_timeout_minutes: 15,
     last_backup_at: null,
     monthly_economic_goals: {},
+    company_financing: { founders: [], investors: [], rounds: [], loans: [] },
   };
 }
 
@@ -206,6 +256,7 @@ async function defaultUsers(t: string): Promise<StoredUser[]> {
       id: 1,
       username: "admin",
       display_name: "Administrador",
+      phone: "",
       role: "admin",
       active: true,
       created_at: t,
@@ -217,6 +268,7 @@ async function defaultUsers(t: string): Promise<StoredUser[]> {
       id: 2,
       username: "cajero",
       display_name: "Cajero",
+      phone: "",
       role: "cajero",
       active: true,
       created_at: t,
@@ -336,6 +388,12 @@ function seed(): Store {
     sales: [],
     saleLines: [],
     cash: [],
+    expenses: [],
+    invoices: [],
+    invoicePayments: [],
+    expensePayments: [],
+    verifactuRecords: [],
+    fiscalProfiles: [],
     stockMovements: [],
     warehouses: [],
     stockLocations: [],
@@ -355,6 +413,11 @@ function seed(): Store {
       sale: 0,
       line: 0,
       cash: 0,
+      expense: 0,
+      invoice: 0,
+      invoicePayment: 0,
+      expensePayment: 0,
+      verifactuRecord: 0,
       stock: 0,
       user: 0,
       company: 2,
@@ -372,6 +435,8 @@ function seed(): Store {
 function normalizeUser(u: StoredUser): StoredUser {
   return {
     ...u,
+    phone: u.phone ?? "",
+    avatar_data_url: u.avatar_data_url ?? "",
     must_change_password: !!u.must_change_password,
     temp_password_issued_at: u.temp_password_issued_at ?? null,
   };
@@ -386,11 +451,20 @@ function normalizeWorkProject(project: WorkProject): WorkProject {
   return {
     ...project,
     uid: project.uid || newProjectUid(),
+    project_type: project.project_type ?? (project.customer_id != null ? "client" : "own"),
+    client_company_id: project.client_company_id ?? null,
+    task_company_id: project.task_company_id ?? project.company_id,
     customer_id: project.customer_id ?? null,
     value_cents: project.value_cents ?? 0,
     monthly_estimate_cents: project.monthly_estimate_cents ?? 0,
     revenue_target_date: project.revenue_target_date ?? null,
     revenue_milestones: project.revenue_milestones ?? [],
+    documents: Array.isArray(project.documents) ? project.documents : [],
+    prd: normalizeProjectPrd(project.prd),
+    tech_stack: normalizeTechStack(project.tech_stack),
+    brief: normalizeProjectBrief(project.brief, project.tech_stack),
+    management: normalizeProjectManagement(project.management),
+    logo_data_url: project.logo_data_url ?? "",
   };
 }
 
@@ -409,6 +483,14 @@ function load(): Store {
     else memoryStore.workItems = memoryStore.workItems.map((item) => ({ ...item, parent_id: item.parent_id ?? null }));
     if (!memoryStore.tenantPlugins) memoryStore.tenantPlugins = [];
     if (!memoryStore.pluginAuditLogs) memoryStore.pluginAuditLogs = [];
+    if (!memoryStore.fiscalProfiles) memoryStore.fiscalProfiles = [];
+    if (!memoryStore.invoices) memoryStore.invoices = [];
+    if (!memoryStore.invoicePayments) memoryStore.invoicePayments = [];
+    if (!memoryStore.expensePayments) memoryStore.expensePayments = [];
+    if (!memoryStore.verifactuRecords) memoryStore.verifactuRecords = [];
+    if (memoryStore.seq.expensePayment == null) memoryStore.seq.expensePayment = memoryStore.expensePayments.length;
+    if (memoryStore.seq.verifactuRecord == null) memoryStore.seq.verifactuRecord = memoryStore.verifactuRecords.length;
+    if (memoryStore.seq.invoicePayment == null) memoryStore.seq.invoicePayment = memoryStore.invoicePayments.length;
     if (memoryStore.seq.warehouse == null) memoryStore.seq.warehouse = 0;
     if (memoryStore.seq.stockLocation == null) memoryStore.seq.stockLocation = 0;
     if (memoryStore.seq.inventoryMovement == null) memoryStore.seq.inventoryMovement = 0;
@@ -416,6 +498,7 @@ function load(): Store {
     if (memoryStore.seq.workProject == null) memoryStore.seq.workProject = 0;
     if (memoryStore.seq.workItem == null) memoryStore.seq.workItem = 0;
     if (memoryStore.seq.pluginAuditLog == null) memoryStore.seq.pluginAuditLog = 0;
+    if (memoryStore.seq.invoice == null) memoryStore.seq.invoice = memoryStore.invoices.length;
     return memoryStore;
   }
   let raw = localStorage.getItem(KEY);
@@ -454,6 +537,12 @@ function load(): Store {
     else parsed.workItems = parsed.workItems.map((item) => ({ ...item, parent_id: item.parent_id ?? null }));
     if (!parsed.tenantPlugins) parsed.tenantPlugins = [];
     if (!parsed.pluginAuditLogs) parsed.pluginAuditLogs = [];
+    if (!parsed.expenses) parsed.expenses = [];
+    if (!parsed.fiscalProfiles) parsed.fiscalProfiles = [];
+    if (!parsed.invoices) parsed.invoices = [];
+    if (!parsed.invoicePayments) parsed.invoicePayments = [];
+    if (!parsed.expensePayments) parsed.expensePayments = [];
+    if (!parsed.verifactuRecords) parsed.verifactuRecords = [];
     if (!parsed.seq) {
       parsed.seq = {
         product: 0,
@@ -461,6 +550,11 @@ function load(): Store {
         sale: 0,
         line: 0,
         cash: 0,
+        expense: 0,
+        invoice: 0,
+        invoicePayment: 0,
+        expensePayment: 0,
+        verifactuRecord: 0,
         stock: 0,
         user: 0,
         company: 0,
@@ -474,6 +568,11 @@ function load(): Store {
       };
     }
     if (parsed.seq.user == null) parsed.seq.user = parsed.users.length;
+    if (parsed.seq.expense == null) parsed.seq.expense = parsed.expenses.length;
+    if (parsed.seq.invoice == null) parsed.seq.invoice = parsed.invoices.length;
+    if (parsed.seq.invoicePayment == null) parsed.seq.invoicePayment = parsed.invoicePayments.length;
+    if (parsed.seq.expensePayment == null) parsed.seq.expensePayment = parsed.expensePayments.length;
+    if (parsed.seq.verifactuRecord == null) parsed.seq.verifactuRecord = parsed.verifactuRecords.length;
     if (parsed.seq.company == null) parsed.seq.company = parsed.companies?.length ?? 0;
     if (parsed.seq.warehouse == null) parsed.seq.warehouse = parsed.warehouses.length;
     if (parsed.seq.stockLocation == null) parsed.seq.stockLocation = parsed.stockLocations.length;
@@ -504,6 +603,22 @@ function save(s: Store) {
   if (typeof localStorage !== "undefined") {
     localStorage.setItem(KEY, JSON.stringify(s));
   }
+}
+
+function localPluginSecretKey(companyId: number, pluginKey: PluginKey): string {
+  return `hexa-crm-plugin-secret:${companyId}:${pluginKey}`;
+}
+
+function setLocalPluginSecret(companyId: number, pluginKey: PluginKey, secret: string | null) {
+  if (typeof sessionStorage === "undefined") return;
+  const key = localPluginSecretKey(companyId, pluginKey);
+  if (secret) sessionStorage.setItem(key, secret);
+  else sessionStorage.removeItem(key);
+}
+
+function getLocalPluginSecret(companyId: number, pluginKey: PluginKey): string {
+  if (typeof sessionStorage === "undefined") return "";
+  return sessionStorage.getItem(localPluginSecretKey(companyId, pluginKey)) ?? "";
 }
 
 /** Test helper: wipe store. */
@@ -710,6 +825,8 @@ function publicUser(u: StoredUser): AuthUser {
     id: u.id,
     username: u.username,
     display_name: u.display_name,
+    phone: u.phone ?? "",
+    avatar_data_url: u.avatar_data_url ?? "",
     role: u.role,
     active: u.active,
     created_at: u.created_at,
@@ -765,15 +882,23 @@ function populateWorkItem(item: WorkItem, s: Store): WorkItem {
     item.category_id != null
       ? s.workCategories.find((c) => c.id === item.category_id && c.company_id === item.company_id) ?? null
       : null;
-  const assignee =
-    item.assignee_id != null ? s.users.find((u) => u.id === item.assignee_id) : null;
   const parent =
     item.parent_id != null ? s.workItems.find((candidate) => candidate.id === item.parent_id) : null;
+  const effectiveAssigneeId = item.assignee_id ?? parent?.assignee_id ?? null;
   return {
     ...item,
     parent_id: item.parent_id ?? null,
+    // Empty subtask fields inherit the planning context of their parent. Keep
+    // the stored values nullable so changing a parent also updates its children.
+    effective_assignee_id: effectiveAssigneeId,
+    effective_due_date: item.due_date ?? parent?.due_date ?? null,
     category: category ? { ...category } : null,
-    assignee_name: assignee ? assignee.display_name : null,
+    assignee_name: effectiveAssigneeId != null
+      ? s.users.find((u) => u.id === effectiveAssigneeId)?.display_name ?? null
+      : null,
+    assignee_avatar_data_url: effectiveAssigneeId != null
+      ? s.users.find((u) => u.id === effectiveAssigneeId)?.avatar_data_url ?? null
+      : null,
     parent_title: parent?.title ?? null,
   };
 }
@@ -795,8 +920,10 @@ function syncWorkItemParent(s: Store, child: WorkItem, timestamp: string) {
     ? "done"
     : children.some((item) => item.status === "blocked")
       ? "blocked"
-      : children.some((item) => item.status === "in_progress")
-        ? "in_progress"
+      : children.some((item) => item.status === "validation")
+        ? "validation"
+        : children.some((item) => item.status === "in_progress")
+          ? "in_progress"
         : children.some((item) => item.status === "planned")
           ? "planned"
           : "inbox";
@@ -860,7 +987,11 @@ function tenantPluginLocal(s: Store, companyId: number, key: PluginKey): TenantP
   );
   const config = sanitizePluginConfig(key, stored?.config ?? definition.defaultConfig);
   const enabled = !!stored?.enabled;
-  const secretConfigured = key === "stripe_mcp" ? !!stored?.secret_configured : true;
+  const secretConfigured = key === "google_drive"
+    ? !!stored?.secret_configured && !!getLocalPluginSecret(companyId, key)
+    : key === "stripe_mcp"
+      ? !!stored?.secret_configured
+      : true;
   const logs = (s.pluginAuditLogs || []).filter(
     (l) => l.company_id === companyId && l.plugin_key === key,
   );
@@ -979,11 +1110,93 @@ export const browserApi = {
     return c;
   },
 
+  update_company_profile(input: Partial<Pick<Company, "logo_data_url" | "legal_name" | "trade_name" | "nif" | "kind" | "entity_type" | "address" | "postal_code" | "city" | "province" | "country" | "email" | "phone">>, token?: string | null): Company {
+    const s = load();
+    ensureCompanies(s);
+    requireAdmin(s, token);
+    const cid = sessionCompanyId(s, token);
+    const company = s.companies.find((c) => c.id === cid && c.active);
+    if (!company) throw new Error("Empresa no encontrada");
+    const logo = input.logo_data_url === undefined ? (company.logo_data_url ?? "") : String(input.logo_data_url ?? "");
+    const logoError = validateProjectLogo(logo);
+    if (logoError) throw new Error(logoError);
+    const legalName = input.legal_name === undefined ? company.legal_name : String(input.legal_name ?? "").trim();
+    const tradeName = input.trade_name === undefined ? company.trade_name : String(input.trade_name ?? "").trim();
+    if (!legalName || !tradeName) throw new Error("El nombre legal y el nombre comercial son obligatorios");
+    const entityType = input.entity_type === undefined ? (company.entity_type ?? "otra") : String(input.entity_type);
+    if (!["autonomo", "sl", "sa", "cooperativa", "otra"].includes(entityType)) throw new Error("Tipo de entidad no válido");
+    const kind = input.kind === undefined ? company.kind : input.kind;
+    if (!["retail_secondhand", "software_studio", "generic"].includes(kind)) throw new Error("Tipo de empresa no válido");
+    Object.assign(company, { logo_data_url: logo, legal_name: legalName, trade_name: tradeName, nif: input.nif === undefined ? company.nif : String(input.nif ?? "").trim(), kind, entity_type: entityType, address: input.address === undefined ? (company.address ?? "") : String(input.address ?? "").trim(), postal_code: input.postal_code === undefined ? (company.postal_code ?? "") : String(input.postal_code ?? "").trim(), city: input.city === undefined ? (company.city ?? "") : String(input.city ?? "").trim(), province: input.province === undefined ? (company.province ?? "") : String(input.province ?? "").trim(), country: input.country === undefined ? (company.country ?? "España") : String(input.country ?? "España").trim(), email: input.email === undefined ? (company.email ?? "") : String(input.email ?? "").trim(), phone: input.phone === undefined ? (company.phone ?? "") : String(input.phone ?? "").trim() });
+    save(s);
+    return company;
+  },
+
+  create_company(input: CompanyInput, token?: string | null): Company {
+    const s = load();
+    ensureCompanies(s);
+    const user = requireAdmin(s, token);
+    const legalName = String(input.legal_name ?? "").trim();
+    const tradeName = String(input.trade_name ?? legalName).trim();
+    if (!legalName || !tradeName) throw new Error("El nombre legal y el nombre comercial son obligatorios");
+    const entityType = String(input.entity_type ?? "otra");
+    if (!["autonomo", "sl", "sa", "cooperativa", "otra"].includes(entityType)) throw new Error("Tipo de entidad no válido");
+    const kind = input.kind ?? "generic";
+    if (!["retail_secondhand", "software_studio", "generic"].includes(kind)) throw new Error("Tipo de negocio no válido");
+    const logo = String(input.logo_data_url ?? "");
+    const logoError = validateProjectLogo(logo);
+    if (logoError) throw new Error(logoError);
+    const baseCode = String(input.code ?? tradeName)
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 12) || `EMPRESA-${s.seq.company + 1}`;
+    let code = baseCode;
+    let suffix = 2;
+    while (s.companies.some((company) => company.code === code)) code = `${baseCode.slice(0, Math.max(1, 12 - String(suffix).length - 1))}-${suffix++}`;
+    const company: Company = {
+      id: ++s.seq.company,
+      code,
+      legal_name: legalName,
+      trade_name: tradeName,
+      nif: String(input.nif ?? "").trim(),
+      kind,
+      entity_type: entityType as Company["entity_type"],
+      address: String(input.address ?? "").trim(),
+      postal_code: String(input.postal_code ?? "").trim(),
+      city: String(input.city ?? "").trim(),
+      province: String(input.province ?? "").trim(),
+      country: String(input.country ?? "España").trim() || "España",
+      email: String(input.email ?? "").trim(),
+      phone: String(input.phone ?? "").trim(),
+      logo_data_url: logo,
+      active: true,
+      created_at: now(),
+    };
+    s.companies.push(company);
+    s.company_members.push({ company_id: company.id, user_id: user.id, role: "admin" });
+    save(s);
+    return company;
+  },
+
   billing_by_company(token?: string | null) {
     const s = load();
     ensureCompanies(s);
     auth(s, token);
     return billingByCompany(s.sales, s.companies);
+  },
+
+  group_financial_summary(token?: string | null) {
+    const s = load();
+    const user = auth(s, token);
+    const visible = companiesForUser(user.id, s.company_members, s.companies);
+    return visible.map((company) => {
+      const invoices = s.invoices.filter((invoice) => invoice.company_id === company.id && invoice.status === "issued");
+      const expenses = s.expenses.filter((expense) => expense.company_id === company.id && ["review", "approved", "paid"].includes(expense.status));
+      const expensePayments = s.expensePayments.filter((payment) => payment.company_id === company.id);
+      const cash = s.cash.filter((movement) => movement.company_id === company.id);
+      const issuedTotal = invoices.reduce((sum, invoice) => sum + invoice.total_cents, 0);
+      const issuedPaid = invoices.reduce((sum, invoice) => sum + invoice.paid_cents, 0);
+      return { company_id: company.id, code: company.code, trade_name: company.trade_name, issued_total_cents: issuedTotal, issued_paid_cents: issuedPaid, issued_pending_cents: Math.max(0, issuedTotal - issuedPaid), received_total_cents: expenses.reduce((sum, expense) => sum + expense.total_cents, 0), received_paid_cents: expensePayments.reduce((sum, payment) => sum + payment.amount_cents, 0), cash_income_cents: cash.filter((movement) => movement.kind === "income").reduce((sum, movement) => sum + movement.amount_cents, 0), grant_income_cents: cash.filter((movement) => movement.kind === "income" && movement.category === "subvencion_cobrada").reduce((sum, movement) => sum + movement.amount_cents, 0), financing_income_cents: cash.filter((movement) => movement.kind === "income" && ["inversion_recibida","prestamo_recibido"].includes(movement.category)).reduce((sum, movement) => sum + movement.amount_cents, 0), investment_income_cents: cash.filter((movement) => movement.kind === "income" && movement.category === "inversion_recibida").reduce((sum, movement) => sum + movement.amount_cents, 0), loan_income_cents: cash.filter((movement) => movement.kind === "income" && movement.category === "prestamo_recibido").reduce((sum, movement) => sum + movement.amount_cents, 0), cash_expense_cents: cash.filter((movement) => movement.kind === "expense").reduce((sum, movement) => sum + movement.amount_cents, 0) };
+    });
   },
 
   async list_users(token?: string | null): Promise<AuthUser[]> {
@@ -998,9 +1211,11 @@ export const browserApi = {
     const s = await ensureUsers(load());
     requireAdmin(s, token);
 
-    const role: UserRole = input.role === "cajero" ? "cajero" : "admin";
+    const role: UserRole = input.role === "cliente" ? "cliente" : input.role === "cajero" ? "cajero" : "admin";
     const username = input.username.trim().toLowerCase();
     if (!username) throw new Error("Usuario obligatorio");
+    const avatarError = validateUserAvatar(input.avatar_data_url);
+    if (avatarError) throw new Error(avatarError);
 
     if (input.id) {
       const i = s.users.findIndex((u) => u.id === input.id);
@@ -1017,6 +1232,8 @@ export const browserApi = {
         ...s.users[i],
         username,
         display_name: input.display_name.trim() || username,
+        phone: input.phone?.trim() ?? s.users[i].phone ?? "",
+        avatar_data_url: input.avatar_data_url ?? s.users[i].avatar_data_url ?? "",
         role,
         active: input.active ?? s.users[i].active,
       };
@@ -1056,6 +1273,8 @@ export const browserApi = {
       id: s.seq.user,
       username,
       display_name: input.display_name.trim() || username,
+      phone: input.phone?.trim() ?? "",
+      avatar_data_url: input.avatar_data_url ?? "",
       role,
       active: input.active ?? true,
       created_at: now(),
@@ -1603,10 +1822,16 @@ export const browserApi = {
     return this.create_inventory_movement(reversalInput, token);
   },
 
-  list_customers(token?: string | null): Customer[] {
+  list_customers(token?: string | null, companyId?: number | null): Customer[] {
     const s = load();
     ensureCompanies(s);
-    const cid = sessionCompanyId(s, token);
+    const cid = companyId == null ? sessionCompanyId(s, token) : companyId;
+    if (companyId != null) {
+      const user = auth(s, token);
+      if (!canAccessCompany(user.id, companyId, s.company_members)) {
+        throw new Error("No tienes acceso a esa empresa");
+      }
+    }
     return filterByCompanyId(s.customers, cid).sort((a, b) =>
       a.name.localeCompare(b.name, "es"),
     );
@@ -1892,13 +2117,232 @@ export const browserApi = {
     );
   },
 
+  list_expense_documents(token?: string | null): ExpenseDocument[] {
+    const s = load();
+    const cid = sessionCompanyId(s, token);
+    return filterByCompanyId(s.expenses, cid).sort((a, b) => b.created_at.localeCompare(a.created_at));
+  },
+
+  upsert_expense_document(input: ExpenseDocumentInput, token?: string | null): ExpenseDocument {
+    const s = load();
+    const user = requireSession(s, token);
+    const cid = sessionCompanyId(s, token);
+    if (!input.title?.trim()) throw new Error("El título del gasto es obligatorio.");
+    if ((input.total_cents ?? 0) < 0 || (input.base_cents ?? 0) < 0 || (input.vat_cents ?? 0) < 0) throw new Error("Los importes del gasto no pueden ser negativos.");
+    const nowTs = now();
+    const existing = input.id ? s.expenses.find((item) => item.id === input.id && item.company_id === cid) : undefined;
+    const saved: ExpenseDocument = {
+      id: existing?.id ?? ++s.seq.expense, company_id: cid,
+      status: input.status ?? existing?.status ?? "review", kind: input.kind ?? existing?.kind ?? "invoice",
+      title: input.title.trim(), supplier_name: input.supplier_name ?? existing?.supplier_name ?? "",
+      supplier_tax_id: input.supplier_tax_id ?? existing?.supplier_tax_id ?? "", invoice_number: input.invoice_number ?? existing?.invoice_number ?? "",
+      issued_at: input.issued_at !== undefined ? input.issued_at : existing?.issued_at ?? null, accounting_date: input.accounting_date !== undefined ? input.accounting_date : existing?.accounting_date ?? input.issued_at ?? null, deductible: input.deductible !== undefined ? input.deductible : existing?.deductible ?? true, deduction_period: input.deduction_period !== undefined ? input.deduction_period : existing?.deduction_period ?? null, due_at: input.due_at !== undefined ? input.due_at : existing?.due_at ?? null,
+      project_id: input.project_id !== undefined ? input.project_id : existing?.project_id ?? null, category: input.category ?? existing?.category ?? "otros",
+      base_cents: input.base_cents ?? existing?.base_cents ?? 0, vat_rate: input.vat_rate ?? existing?.vat_rate ?? 21,
+      vat_cents: input.vat_cents ?? existing?.vat_cents ?? 0, withholding_cents: input.withholding_cents ?? existing?.withholding_cents ?? 0,
+      total_cents: input.total_cents ?? existing?.total_cents ?? 0, paid_cents: existing?.paid_cents ?? 0, payment_status: existing?.payment_status ?? "pending", currency: input.currency ?? existing?.currency ?? "EUR", notes: input.notes ?? existing?.notes ?? "",
+      attachments: input.attachments ?? existing?.attachments ?? [], source: input.source ?? existing?.source ?? "manual", source_phone: input.source_phone ?? existing?.source_phone ?? null,
+      ocr_confidence: input.ocr_confidence !== undefined ? input.ocr_confidence : existing?.ocr_confidence ?? null, created_by: existing?.created_by ?? user.id,
+      created_at: existing?.created_at ?? nowTs, updated_at: nowTs, approved_at: input.status === "approved" || input.status === "paid" ? (existing?.approved_at ?? nowTs) : existing?.approved_at ?? null,
+    };
+    if (existing) Object.assign(existing, saved); else s.expenses.push(saved);
+    save(s);
+    return { ...saved };
+  },
+
+  reanalyze_expense_document(_id: number, token?: string | null): ExpenseDocument {
+    const s = load();
+    requireSession(s, token);
+    throw new Error("La relectura con IA requiere el servidor central.");
+  },
+
+  approve_expense_document(id: number, token?: string | null): ExpenseDocument {
+    const s = load();
+    const user = requireSession(s, token);
+    const cid = sessionCompanyId(s, token);
+    const expense = s.expenses.find((item) => item.id === id && item.company_id === cid);
+    if (!expense) throw new Error("Gasto no encontrado.");
+    expense.status = "approved";
+    expense.approved_at = now();
+    expense.updated_at = expense.approved_at;
+    s.seq.cash += 1;
+    s.cash.push({ id: s.seq.cash, company_id: cid, project_id: expense.project_id, kind: "expense", amount_cents: expense.total_cents, category: expense.category, description: `${expense.title}${expense.supplier_name ? ` · ${expense.supplier_name}` : ""}`, sale_id: null, occurred_at: expense.approved_at });
+    void user;
+    save(s);
+    return { ...expense };
+  },
+
+  list_expense_payments(expenseId: number, token?: string | null): ExpensePayment[] {
+    const s = load();
+    const cid = sessionCompanyId(s, token);
+    return s.expensePayments.filter((payment) => payment.expense_id === expenseId && payment.company_id === cid).sort((a, b) => b.paid_at.localeCompare(a.paid_at));
+  },
+
+  add_expense_payment(input: ExpensePaymentInput, token?: string | null): ExpensePayment {
+    const s = load();
+    const user = requireSession(s, token);
+    const cid = sessionCompanyId(s, token);
+    const expense = s.expenses.find((item) => item.id === input.expense_id && item.company_id === cid);
+    if (!expense) throw new Error("Factura recibida no encontrada");
+    if (expense.status === "rejected") throw new Error("No se puede pagar un documento rechazado");
+    const amount = Math.round(Number(input.amount_cents));
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error("El importe debe ser mayor que cero");
+    const paid = expense.paid_cents ?? 0;
+    if (amount > expense.total_cents - paid) throw new Error("El pago supera el importe pendiente");
+    s.seq.expensePayment += 1;
+    const paid_at = input.paid_at || now();
+    const payment: ExpensePayment = { id: s.seq.expensePayment, expense_id: expense.id, company_id: cid, amount_cents: amount, paid_at, method: input.method ?? "bank_transfer", notes: input.notes?.trim() ?? "", created_by: user.id };
+    s.expensePayments.push(payment);
+    expense.paid_cents = paid + amount;
+    expense.payment_status = expense.paid_cents >= expense.total_cents ? "paid" : "partial";
+    if (expense.payment_status === "paid") expense.status = "paid";
+    expense.updated_at = now();
+    s.seq.cash += 1;
+    s.cash.push({ id: s.seq.cash, company_id: cid, project_id: expense.project_id, kind: "expense", amount_cents: amount, category: "pago_factura_recibida", description: `Pago ${expense.title}`, sale_id: null, occurred_at: paid_at });
+    save(s);
+    return payment;
+  },
+
+  list_invoices(token?: string | null): Invoice[] {
+    const s = load();
+    ensureCompanies(s);
+    const cid = sessionCompanyId(s, token);
+    return filterByCompanyId(s.invoices, cid).sort((a, b) => b.issued_at.localeCompare(a.issued_at));
+  },
+
+  issue_invoice(input: InvoiceInput, token?: string | null): Invoice {
+    const s = load();
+    const user = requireSession(s, token);
+    ensureCompanies(s);
+    const cid = sessionCompanyId(s, token);
+    if (input.draft_id) {
+      const draft = s.invoices.find((item) => item.id === input.draft_id && item.company_id === cid);
+      if (!draft) throw new Error("Borrador no encontrado");
+      if (draft.status !== "draft") throw new Error("Solo se pueden modificar facturas en borrador");
+      if (!input.lines?.length) throw new Error("La factura debe tener al menos una línea");
+      const company = s.companies.find((item) => item.id === cid);
+      if (!company) throw new Error("Empresa no encontrada");
+      const customer = input.customer_id ? s.customers.find((item) => item.id === input.customer_id && (item.company_id ?? 1) === cid) ?? null : (input.customer_name || input.customer_nif || input.customer_email ? { id: 0, company_id: cid, name: input.customer_name?.trim() || "Cliente contado", email: input.customer_email?.trim() || "", phone: "", nif: input.customer_nif?.trim() || "", notes: "", created_at: now() } : null);
+      const next = buildManualInvoice({ id: draft.id, company, customer, lines: input.lines, invoice: { ...input, status: input.status ?? "issued" }, created_by: draft.created_by, number: draft.number, issued_at: (input.status ?? "issued") === "issued" ? now() : draft.issued_at, profile: s.fiscalProfiles.find((item) => item.company_id === cid) ?? null });
+      s.invoices = s.invoices.map((item) => item.id === draft.id ? next : item);
+      if (next.status === "issued") appendVerifactuRecord(s, next, "alta");
+      save(s);
+      return { ...next };
+    }
+    if (input.rectifies_invoice_id) {
+      const base = s.invoices.find((item) => item.id === input.rectifies_invoice_id && item.company_id === cid);
+      if (!base) throw new Error("Factura original no encontrada");
+      if (base.status !== "issued") throw new Error("Solo se pueden rectificar facturas emitidas");
+      const company = s.companies.find((item) => item.id === cid);
+      if (!company) throw new Error("Empresa no encontrada");
+      const series = (input.series ?? base.series).trim().toUpperCase() || base.series;
+      const year = new Date().getFullYear();
+      const count = s.invoices.filter((item) => item.company_id === cid && item.series === series && item.issued_at.startsWith(String(year))).length + 1;
+      s.seq.invoice += 1;
+      const rectifying = buildRectifyingInvoice({ id: s.seq.invoice, base, number: `${year}-${String(count).padStart(5, "0")}`, created_by: user.id, notes: input.notes });
+      rectifying.series = series;
+      rectifying.operation_date = input.operation_date || base.operation_date;
+      s.invoices.push(rectifying);
+      appendVerifactuRecord(s, rectifying, "alta");
+      save(s);
+      return { ...rectifying };
+    }
+    if (!input.sale_id && input.lines?.length) {
+      const company = s.companies.find((item) => item.id === cid);
+      if (!company) throw new Error("Empresa no encontrada");
+      const customer = input.customer_id ? s.customers.find((item) => item.id === input.customer_id && (item.company_id ?? 1) === cid) ?? null : (input.customer_name || input.customer_nif || input.customer_email ? { id: 0, company_id: cid, name: input.customer_name?.trim() || "Cliente contado", email: input.customer_email?.trim() || "", phone: "", nif: input.customer_nif?.trim() || "", notes: "", created_at: now() } : null);
+      const series = (input.series ?? s.fiscalProfiles.find((item) => item.company_id === cid)?.invoice_series ?? "F").trim().toUpperCase() || "F";
+      const year = new Date().getFullYear();
+      const count = s.invoices.filter((item) => item.company_id === cid && item.series === series && item.issued_at.startsWith(String(year))).length + 1;
+      s.seq.invoice += 1;
+      const invoice = buildManualInvoice({ id: s.seq.invoice, company, customer, lines: input.lines, invoice: input, created_by: user.id, number: `${year}-${String(count).padStart(5, "0")}`, profile: s.fiscalProfiles.find((item) => item.company_id === cid) ?? null });
+      s.invoices.push(invoice);
+      if (invoice.status === "issued") appendVerifactuRecord(s, invoice, "alta");
+      save(s);
+      return { ...invoice };
+    }
+    if (!input.sale_id) throw new Error("La venta o las líneas de la factura son obligatorias");
+    const sale = s.sales.find((item) => item.id === input.sale_id && (item.company_id ?? 1) === cid);
+    if (!sale) throw new Error("Venta no encontrada");
+    const existing = s.invoices.find((item) => item.sale_id === sale.id && item.status !== "cancelled");
+    if (existing) return { ...existing };
+    const company = s.companies.find((item) => item.id === cid);
+    if (!company) throw new Error("Empresa no encontrada");
+    const customer = sale.customer_id == null ? null : s.customers.find((item) => item.id === sale.customer_id && (item.company_id ?? 1) === cid) ?? null;
+    const series = (input.series ?? s.fiscalProfiles.find((item) => item.company_id === cid)?.invoice_series ?? "F").trim().toUpperCase() || "F";
+    const year = new Date().getFullYear();
+    const count = s.invoices.filter((item) => item.company_id === cid && item.series === series && item.issued_at.startsWith(String(year))).length + 1;
+    s.seq.invoice += 1;
+    const invoice = buildInvoiceFromSale({ id: s.seq.invoice, company, customer, sale, lines: s.saleLines.filter((line) => line.sale_id === sale.id), invoice: input, created_by: user.id, number: `${year}-${String(count).padStart(5, "0")}`, profile: s.fiscalProfiles.find((item) => item.company_id === cid) ?? null });
+    s.invoices.push(invoice);
+    if (invoice.status === "issued") appendVerifactuRecord(s, invoice, "alta");
+    save(s);
+    return { ...invoice };
+  },
+
+  cancel_invoice(id: number, token?: string | null): Invoice {
+    const s = load();
+    requireSession(s, token);
+    const cid = sessionCompanyId(s, token);
+    const invoice = s.invoices.find((item) => item.id === id && item.company_id === cid);
+    if (!invoice) throw new Error("Factura no encontrada");
+    if (invoice.status === "cancelled") return { ...invoice };
+    const wasIssued = invoice.status === "issued";
+    invoice.status = "cancelled";
+    invoice.updated_at = now();
+    if (wasIssued) appendVerifactuRecord(s, invoice, "anulacion");
+    save(s);
+    return { ...invoice };
+  },
+
+  list_verifactu_records(token?: string | null): VerifactuRecord[] {
+    const s = load();
+    const cid = sessionCompanyId(s, token);
+    return s.verifactuRecords.filter((record) => record.company_id === cid).sort((a, b) => b.id - a.id);
+  },
+
+  verify_verifactu_chain(token?: string | null): { ok: boolean; error?: string } {
+    const s = load();
+    const cid = sessionCompanyId(s, token);
+    return verifyVerifactuChain(s.verifactuRecords.filter((record) => record.company_id === cid));
+  },
+
+  list_invoice_payments(invoiceId: number, token?: string | null): InvoicePayment[] {
+    const s = load();
+    const cid = sessionCompanyId(s, token);
+    return s.invoicePayments.filter((payment) => payment.invoice_id === invoiceId && payment.company_id === cid).sort((a, b) => b.paid_at.localeCompare(a.paid_at));
+  },
+
+  add_invoice_payment(input: InvoicePaymentInput, token?: string | null): InvoicePayment {
+    const s = load();
+    const user = requireSession(s, token);
+    const cid = sessionCompanyId(s, token);
+    const invoice = s.invoices.find((item) => item.id === input.invoice_id && item.company_id === cid);
+    if (!invoice) throw new Error("Factura no encontrada");
+    if (invoice.status !== "issued") throw new Error("Solo se pueden cobrar facturas emitidas");
+    const amount = Math.round(Number(input.amount_cents));
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error("El importe debe ser mayor que cero");
+    if (amount > invoice.total_cents - invoice.paid_cents) throw new Error("El cobro supera el importe pendiente");
+    const paid_at = input.paid_at || now();
+    s.seq.invoicePayment += 1;
+    const payment: InvoicePayment = { id: s.seq.invoicePayment, invoice_id: invoice.id, company_id: cid, amount_cents: amount, paid_at, method: input.method ?? "bank_transfer", notes: input.notes?.trim() ?? "", created_by: user.id };
+    s.invoicePayments.push(payment);
+    invoice.paid_cents += amount;
+    invoice.payment_status = invoice.paid_cents >= invoice.total_cents ? "paid" : "partial";
+    invoice.updated_at = now();
+    s.seq.cash += 1;
+    s.cash.push({ id: s.seq.cash, company_id: cid, project_id: null, kind: "income", amount_cents: amount, category: "cobro_factura", description: `Cobro ${invoice.series}-${invoice.number}`, sale_id: invoice.sale_id, occurred_at: paid_at });
+    save(s);
+    return payment;
+  },
+
   create_cash_movement(input: CashInput, token?: string | null): CashMovement {
     const s = load();
     ensureCompanies(s);
     const cid = sessionCompanyId(s, token);
     if (input.project_id != null) {
       const project = s.workProjects.find(
-        (candidate) => candidate.id === input.project_id && candidate.company_id === cid,
+        (candidate) => candidate.id === input.project_id && (candidate.company_id === cid || candidate.task_company_id === cid),
       );
       if (!project) throw new Error("Proyecto no encontrado.");
       if (project.customer_id == null) {
@@ -1920,6 +2364,55 @@ export const browserApi = {
     s.cash.push(m);
     save(s);
     return m;
+  },
+
+  sync_project_grant_income(input: ProjectGrantIncomeInput, token?: string | null): CashMovement | null {
+    const s = load();
+    ensureCompanies(s);
+    const activeCompanyId = sessionCompanyId(s, token);
+    const project = s.workProjects.find((candidate) => candidate.id === input.project_id && (candidate.company_id === activeCompanyId || candidate.task_company_id === activeCompanyId));
+    if (!project) throw new Error("Proyecto no encontrado.");
+    const beneficiaryCompanyId = Number(input.beneficiary_company_id);
+    if (![project.company_id, project.task_company_id].includes(beneficiaryCompanyId)) throw new Error("La empresa beneficiaria no pertenece al proyecto.");
+    const cid = beneficiaryCompanyId;
+    const marker = `[SUBVENCION:${input.grant_id}]`;
+    const matches = (movement: CashMovement) => movement.company_id === cid && movement.category === "subvencion_cobrada" && movement.description.startsWith(marker);
+    const existing = s.cash.find(matches);
+    const amount = Math.max(0, Math.round(Number(input.amount_cents) || 0));
+    if (!amount) {
+      s.cash = s.cash.filter((movement) => !matches(movement));
+      save(s);
+      return null;
+    }
+    const values = { project_id: input.project_id, kind: "income" as const, amount_cents: amount, category: "subvencion_cobrada", description: `${marker} ${input.description}`.trim(), occurred_at: input.occurred_at || now() };
+    if (existing) Object.assign(existing, values);
+    else {
+      s.seq.cash += 1;
+      s.cash.push({ id: s.seq.cash, company_id: cid, sale_id: null, ...values });
+    }
+    save(s);
+    return s.cash.find(matches) ?? null;
+  },
+
+  sync_company_financing_income(input: CompanyFinancingIncomeInput, token?: string | null): CashMovement | null {
+    const s = load();
+    ensureCompanies(s);
+    const cid = sessionCompanyId(s, token);
+    const category = input.source_type === "investment" ? "inversion_recibida" : "prestamo_recibido";
+    const marker = `[FINANCIACION:${input.source_type}:${input.source_id}]`;
+    const matches = (movement: CashMovement) => movement.company_id === cid && movement.category === category && movement.description.startsWith(marker);
+    const amount = Math.max(0, Math.round(Number(input.amount_cents) || 0));
+    if (!amount) {
+      s.cash = s.cash.filter((movement) => !matches(movement));
+      save(s);
+      return null;
+    }
+    const values = { project_id: null, kind: "income" as const, amount_cents: amount, category, description: `${marker} ${input.description}`.trim(), occurred_at: input.occurred_at || now() };
+    const existing = s.cash.find(matches);
+    if (existing) Object.assign(existing, values);
+    else { s.seq.cash += 1; s.cash.push({ id: s.seq.cash, company_id: cid, sale_id: null, ...values }); }
+    save(s);
+    return s.cash.find(matches) ?? null;
   },
 
   get_cash_balance(token?: string | null): number {
@@ -1977,6 +2470,79 @@ export const browserApi = {
       vat_cents: buckets.reduce((a, b) => a + b.vat_cents, 0),
       total_cents: buckets.reduce((a, b) => a + b.total_cents, 0),
     };
+  },
+
+  list_fiscal_profiles(token?: string | null): FiscalProfile[] {
+    const s = load();
+    ensureCompanies(s);
+    const cid = sessionCompanyId(s, token);
+    return s.fiscalProfiles.filter((profile) => profile.company_id === cid);
+  },
+
+  upsert_fiscal_profile(input: Partial<FiscalProfile>, token?: string | null): FiscalProfile {
+    const s = load();
+    const user = requireSession(s, token);
+    if (user.role !== "admin") throw new Error("Se requieren permisos de administrador");
+    const cid = sessionCompanyId(s, token);
+    const previous = s.fiscalProfiles.find((item) => item.company_id === cid);
+    const regime = input.regime ?? previous?.regime ?? "general";
+    const period = input.period ?? previous?.period ?? "quarterly";
+    const entityType = input.entity_type ?? previous?.entity_type ?? "autonomo";
+    if (!["autonomo", "sociedad", "otra"].includes(entityType)) throw new Error("Tipo de contribuyente no válido");
+    if (!["general", "simplified", "recargo_equivalencia", "other"].includes(regime)) throw new Error("Régimen fiscal no válido");
+    if (!["monthly", "quarterly"].includes(period)) throw new Error("Periodicidad no válida");
+    const rate = Number(input.default_irpf_rate ?? previous?.default_irpf_rate ?? 0);
+    if (!Number.isFinite(rate) || rate < 0 || rate > 100) throw new Error("El IRPF debe estar entre 0 y 100");
+    const verifactuMode = input.verifactu_mode ?? previous?.verifactu_mode ?? "disabled";
+    if (!["disabled", "test", "production"].includes(verifactuMode)) throw new Error("Modo VERI*FACTU no válido");
+    const producerNif = (input.verifactu_producer_nif ?? previous?.verifactu_producer_nif ?? "").trim().toUpperCase();
+    if (verifactuMode !== "disabled" && !producerNif) throw new Error("El NIF emisor es obligatorio para activar VERI*FACTU");
+    const taxSetup = normalizeTaxSetup(input.tax_setup ?? previous?.tax_setup);
+    if (entityType === "autonomo" && !["direct_estimation", "objective_estimation", "none"].includes(taxSetup.income_regime)) throw new Error("Selecciona el régimen de IRPF del autónomo");
+    const siiEnabled = input.sii_enabled === undefined ? !!previous?.sii_enabled : !!input.sii_enabled;
+    if (siiEnabled && period !== "monthly") throw new Error("El SII requiere periodicidad mensual");
+    const profileCompleted = input.profile_completed === undefined ? !!previous?.profile_completed : input.profile_completed === true;
+    const taxModels = deriveTaxModels({ entity_type: entityType as FiscalProfile["entity_type"], regime: regime as FiscalProfile["regime"], period: period as FiscalProfile["period"], sii_enabled: siiEnabled, profile_completed: profileCompleted, tax_setup: taxSetup });
+    const profile: FiscalProfile = {
+      company_id: cid,
+      invoice_series: input.invoice_series?.trim().toUpperCase() || previous?.invoice_series || "F",
+      regime: regime as FiscalProfile["regime"],
+      period: period as FiscalProfile["period"],
+      entity_type: entityType as FiscalProfile["entity_type"],
+      tax_models: taxModels.map((model) => model.code),
+      tax_setup: taxSetup,
+      profile_completed: profileCompleted,
+      irpf_enabled: !!input.irpf_enabled,
+      default_irpf_rate: rate,
+      sii_enabled: siiEnabled,
+      verifactu_mode: verifactuMode,
+      verifactu_software_id: input.verifactu_software_id?.trim() || previous?.verifactu_software_id || "hexa-crm",
+      verifactu_software_name: input.verifactu_software_name?.trim() || previous?.verifactu_software_name || "Hexa CRM",
+      verifactu_software_version: input.verifactu_software_version?.trim() || previous?.verifactu_software_version || "0.3.2",
+      verifactu_producer_name: input.verifactu_producer_name?.trim() || previous?.verifactu_producer_name || "",
+      verifactu_producer_nif: producerNif,
+      updated_at: now(),
+    };
+    const index = s.fiscalProfiles.findIndex((item) => item.company_id === cid);
+    if (index >= 0) s.fiscalProfiles[index] = profile; else s.fiscalProfiles.push(profile);
+    save(s);
+    return profile;
+  },
+
+  model303_draft(from: string, to: string, token?: string | null): Model303Draft {
+    const s = load();
+    ensureCompanies(s);
+    const cid = sessionCompanyId(s, token);
+    const profile = s.fiscalProfiles.find((item) => item.company_id === cid) ?? null;
+    return buildModel303Draft({
+      company_id: cid,
+      from,
+      to,
+      sales: filterByCompanyId(s.sales, cid),
+      saleLines: s.saleLines,
+      expenses: filterByCompanyId(s.expenses, cid),
+      profile,
+    });
   },
 
   dashboard_stats(token?: string | null): DashboardStats {
@@ -2205,12 +2771,22 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       ? payload.workProjects.map(normalizeWorkProject)
       : [];
     const workItems = Array.isArray(payload.workItems) ? payload.workItems : [];
+    const expenses = Array.isArray(payload.expenses) ? payload.expenses : [];
+    const invoices = Array.isArray(payload.invoices) ? payload.invoices : [];
+    const invoicePayments = Array.isArray(payload.invoicePayments) ? payload.invoicePayments : [];
+    const expensePayments = Array.isArray(payload.expensePayments) ? payload.expensePayments : [];
+    const verifactuRecords = Array.isArray(payload.verifactuRecords) ? payload.verifactuRecords : [];
     const seq = {
       product: payload.seq?.product ?? 0,
       customer: payload.seq?.customer ?? 0,
       sale: payload.seq?.sale ?? 0,
       line: payload.seq?.line ?? 0,
       cash: payload.seq?.cash ?? 0,
+      expense: payload.seq?.expense ?? expenses.length,
+      invoice: payload.seq?.invoice ?? invoices.length,
+      invoicePayment: payload.seq?.invoicePayment ?? invoicePayments.length,
+      expensePayment: payload.seq?.expensePayment ?? expensePayments.length,
+      verifactuRecord: payload.seq?.verifactuRecord ?? verifactuRecords.length,
       stock: payload.seq?.stock ?? 0,
       user: payload.seq?.user ?? 0,
       company: payload.seq?.company ?? 0,
@@ -2232,6 +2808,11 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       workCategories,
       workProjects,
       workItems,
+      expenses,
+      invoices,
+      invoicePayments,
+      expensePayments,
+      verifactuRecords,
       seq,
       sessions: {},
     });
@@ -2244,7 +2825,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
   async listWorkProjects(status_filter?: string, token?: string | null): Promise<WorkProject[]> {
     const s = load();
     const companyId = sessionCompanyId(s, token);
-    let projects = s.workProjects.filter((p) => p.company_id === companyId);
+    let projects = s.workProjects.filter((p) => p.company_id === companyId || p.task_company_id === companyId);
     if (status_filter && status_filter.trim() !== "" && status_filter !== "all") {
       projects = projects.filter((p) => p.status === status_filter.trim());
     }
@@ -2259,7 +2840,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       : null;
     const proj = s.workProjects.find(
       (p) =>
-        p.company_id === companyId &&
+        (p.company_id === companyId || p.task_company_id === companyId) &&
         (p.uid === String(reference) || (numericId !== null && p.id === numericId)),
     );
     if (!proj) throw new Error("Proyecto no encontrado.");
@@ -2270,42 +2851,70 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     const s = load();
     const user = requireAdminProjectManagement(s, token);
     const companyId = sessionCompanyId(s, token);
+    const existingForInput = input.id != null
+      ? s.workProjects.find((p) => p.id === input.id && (p.company_id === companyId || p.task_company_id === companyId))
+      : undefined;
 
     const name = (input.name ?? "").trim();
     if (!name) throw new Error("El nombre del proyecto es obligatorio.");
+    if (input.documents) {
+      const documentError = validateProjectDocuments(input.documents);
+      if (documentError) throw new Error(documentError);
+    }
+    const logoError = validateProjectLogo(input.logo_data_url);
+    if (logoError) throw new Error(logoError);
     if (input.value_cents !== undefined && input.value_cents < 0) {
       throw new Error("El valor del proyecto no puede ser negativo.");
     }
     if (input.monthly_estimate_cents !== undefined && input.monthly_estimate_cents < 0) {
       throw new Error("La estimación mensual no puede ser negativa.");
     }
+    const projectType = input.project_type ?? existingForInput?.project_type ?? (input.customer_id != null ? "client" : "own");
+    if (!["own", "client", "internal"].includes(projectType)) throw new Error("Tipo de proyecto no válido.");
+    // Keep older API callers valid: before project_type existed, a customer_id
+    // alone represented client work. New explicit classifications must name
+    // the legal company as well.
+    if (projectType === "internal" && input.client_company_id == null && input.project_type !== undefined) throw new Error("Selecciona la empresa propietaria.");
+    const requestedClientCompanyId = input.client_company_id !== undefined
+      ? input.client_company_id
+      : (existingForInput?.client_company_id ?? null);
+    // Own products belong only to the managing studio. Any stale company or
+    // contact from a previous client/internal classification is discarded.
+    const clientCompanyId = projectType === "own" ? null : requestedClientCompanyId;
+    if (clientCompanyId != null && !s.companies.some((company) => company.id === clientCompanyId && company.active)) throw new Error("Empresa cliente no encontrada.");
+    const taskCompanyId = projectType === "internal" ? (clientCompanyId ?? null) : companyId;
+    if (projectType === "internal" && taskCompanyId == null) throw new Error("Selecciona la empresa propietaria.");
+    if (taskCompanyId != null && !s.companies.some((company) => company.id === taskCompanyId && company.active)) throw new Error("Empresa de tareas no encontrada.");
     if (input.revenue_milestones) {
       const minimumMonth = new Date().toISOString().slice(0, 7);
+      const milestoneMonths = new Set<string>();
       for (const milestone of input.revenue_milestones) {
         if (
           milestone.amount_cents <= 0 ||
           !/^\d{4}-\d{2}$/.test(milestone.target_month) ||
-          milestone.target_month < minimumMonth
+          milestone.target_month < minimumMonth ||
+          milestoneMonths.has(milestone.target_month)
         ) {
-          throw new Error("Cada hito mensual debe tener un importe y un mes válidos.");
+          throw new Error("Cada hito mensual debe tener un importe y un mes futuro no repetido.");
         }
+        milestoneMonths.add(milestone.target_month);
       }
     }
-    const customerId = input.customer_id !== undefined
+    const requestedCustomerId = input.customer_id !== undefined
       ? input.customer_id
-      : undefined;
+      : (existingForInput?.customer_id ?? null);
+    const customerId = projectType === "client" ? requestedCustomerId : null;
     if (
       customerId != null &&
       !s.customers.some(
-        (customer) => customer.id === customerId && (customer.company_id ?? 1) === companyId,
+        (customer) => customer.id === customerId && (customer.company_id ?? 1) === (existingForInput?.company_id ?? companyId),
       )
     ) {
       throw new Error("Cliente no encontrado en la empresa activa.");
     }
 
-    let existing: WorkProject | undefined;
+    let existing: WorkProject | undefined = existingForInput;
     if (input.id != null) {
-      existing = s.workProjects.find((p) => p.id === input.id && p.company_id === companyId);
       if (!existing) throw new Error("Proyecto no encontrado.");
     }
 
@@ -2324,7 +2933,10 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     let saved: WorkProject;
     if (existing) {
       existing.name = name;
-      if (customerId !== undefined) existing.customer_id = customerId;
+      existing.project_type = projectType;
+      existing.client_company_id = clientCompanyId;
+      existing.task_company_id = taskCompanyId ?? existing.company_id;
+      existing.customer_id = customerId;
       if (input.value_cents !== undefined) existing.value_cents = input.value_cents;
       if (input.monthly_estimate_cents !== undefined) {
         existing.monthly_estimate_cents = input.monthly_estimate_cents;
@@ -2343,6 +2955,18 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
           0,
         );
       }
+      if (input.documents !== undefined) {
+        existing.documents = normalizeProjectDocuments(input.documents, nowTs);
+      }
+      if (input.requests !== undefined) existing.requests = input.requests;
+      if (input.prd !== undefined) existing.prd = normalizeProjectPrd(input.prd);
+      if (input.tech_stack !== undefined) existing.tech_stack = normalizeTechStack(input.tech_stack);
+      if (input.brief !== undefined) existing.brief = normalizeProjectBrief(input.brief, existing.tech_stack);
+      if (input.management !== undefined) existing.management = normalizeProjectManagement(input.management);
+      if (input.logo_data_url !== undefined) existing.logo_data_url = input.logo_data_url;
+      if (existing.project_type === "own" && !existing.logo_data_url) {
+        existing.logo_data_url = s.companies.find((company) => company.id === existing.company_id)?.logo_data_url ?? "";
+      }
       if (input.description !== undefined) existing.description = input.description;
       if (input.status !== undefined) existing.status = input.status;
       existing.start_date = startDate;
@@ -2355,6 +2979,9 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
         id: newId,
         uid: newProjectUid(),
         company_id: companyId,
+        project_type: input.project_type ?? (customerId != null ? "client" : "own"),
+        client_company_id: clientCompanyId,
+        task_company_id: taskCompanyId ?? companyId,
         customer_id: customerId ?? null,
         value_cents: input.value_cents ?? 0,
         monthly_estimate_cents: input.revenue_milestones
@@ -2366,6 +2993,13 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
           amount_cents: milestone.amount_cents,
           target_month: milestone.target_month,
         })),
+        documents: normalizeProjectDocuments(input.documents ?? [], nowTs),
+        requests: input.requests ?? [],
+        prd: normalizeProjectPrd(input.prd),
+        tech_stack: normalizeTechStack(input.tech_stack),
+        brief: normalizeProjectBrief(input.brief, input.tech_stack),
+        management: normalizeProjectManagement(input.management),
+        logo_data_url: input.logo_data_url || (projectType === "own" ? (s.companies.find((company) => company.id === companyId)?.logo_data_url ?? "") : ""),
         name,
         description: input.description ?? "",
         status: input.status ?? "planned",
@@ -2385,7 +3019,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     const s = load();
     requireAdminProjectManagement(s, token);
     const companyId = sessionCompanyId(s, token);
-    const proj = s.workProjects.find((p) => p.id === id && p.company_id === companyId);
+    const proj = s.workProjects.find((p) => p.id === id && (p.company_id === companyId || p.task_company_id === companyId));
     if (!proj) throw new Error("Proyecto no encontrado.");
     proj.status = "archived";
     proj.updated_at = now();
@@ -2397,15 +3031,16 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     const s = load();
     requireAdminProjectManagement(s, token);
     const companyId = sessionCompanyId(s, token);
-    const projectExists = s.workProjects.some(
-      (project) => project.id === projectId && project.company_id === companyId,
+    const project = s.workProjects.find(
+      (candidate) => candidate.id === projectId && (candidate.company_id === companyId || candidate.task_company_id === companyId),
     );
-    if (!projectExists) throw new Error("Proyecto no encontrado.");
+    if (!project) throw new Error("Proyecto no encontrado.");
+    const taskCompanyId = project.task_company_id ?? project.company_id;
 
     const selectedIds = itemIds?.length ? new Set(itemIds) : null;
     const idsToDelete = new Set<number>();
     for (const item of s.workItems) {
-      if (item.company_id !== companyId || item.project_id !== projectId) continue;
+      if (item.company_id !== taskCompanyId || item.project_id !== projectId) continue;
       if (selectedIds === null || selectedIds.has(item.id)) idsToDelete.add(item.id);
     }
     // A parent cannot be removed while leaving its subtasks orphaned.
@@ -2425,7 +3060,16 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
   async listWorkItems(filters?: WorkItemFilters, token?: string | null): Promise<WorkItem[]> {
     const s = load();
     const companyId = sessionCompanyId(s, token);
-    let items = s.workItems.filter((i) => i.company_id === companyId);
+    let workCompanyId = companyId;
+    if (typeof filters?.project_id === "number") {
+      const project = s.workProjects.find((candidate) =>
+        candidate.id === filters.project_id &&
+        (candidate.company_id === companyId || candidate.task_company_id === companyId)
+      );
+      if (!project) throw new Error("Proyecto no encontrado.");
+      workCompanyId = project.task_company_id ?? project.company_id;
+    }
+    let items = s.workItems.filter((i) => i.company_id === workCompanyId);
 
     if (filters) {
       if (filters.status) items = items.filter((i) => i.status === filters.status);
@@ -2440,8 +3084,14 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
           items = items.filter((i) => i.project_id === filters.project_id);
         }
       }
-      if (filters.assignee_id !== undefined)
-        items = items.filter((i) => i.assignee_id === filters.assignee_id);
+      if (filters.assignee_id !== undefined) {
+        items = items.filter((item) => {
+          const parent = item.parent_id != null
+            ? s.workItems.find((candidate) => candidate.id === item.parent_id)
+            : null;
+          return (item.assignee_id ?? parent?.assignee_id ?? null) === filters.assignee_id;
+        });
+      }
       if (filters.text && filters.text.trim()) {
         const q = filters.text.trim().toLowerCase();
         items = items.filter(
@@ -2504,7 +3154,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     }
 
     if (input.project_id != null) {
-      const proj = s.workProjects.find((p) => p.id === input.project_id && p.company_id === companyId);
+      const proj = s.workProjects.find((p) => p.id === input.project_id && (p.company_id === companyId || p.task_company_id === companyId));
       if (!proj) throw new Error("El proyecto no pertenece a esta empresa.");
       if (proj.status === "archived") throw new Error("No se pueden crear ni asignar tareas a un proyecto archivado.");
     }
@@ -2541,6 +3191,9 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     }
 
     const targetStatus = input.status ?? existingItem?.status ?? "inbox";
+    if (targetStatus === "done" && existingItem?.status !== "validation" && existingItem?.status !== "done") {
+      throw new Error("La tarea debe pasar por Validación antes de marcarla como hecha.");
+    }
     const sourceType = input.source_type !== undefined ? input.source_type : (existingItem?.source_type ?? null);
     const sourceKey = input.source_key !== undefined ? input.source_key : (existingItem?.source_key ?? null);
     const isActive = targetStatus !== "done" && targetStatus !== "archived";
@@ -2584,6 +3237,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       existingItem.source_type = sourceType;
       existingItem.source_key = sourceKey;
       if (input.source_href !== undefined) existingItem.source_href = input.source_href;
+      if (input.review_messages !== undefined) existingItem.review_messages = input.review_messages;
       existingItem.completed_at = completed_at;
       existingItem.updated_at = nowTs;
       savedItem = existingItem;
@@ -2609,6 +3263,7 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
         source_key: sourceKey,
         source_href: input.source_href ?? null,
         completed_at,
+        review_messages: input.review_messages ?? [],
         created_at: nowTs,
         updated_at: nowTs,
       };
@@ -2852,14 +3507,16 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     const existing = index >= 0 ? s.tenantPlugins[index] : null;
 
     let secretConfigured = existing?.secret_configured ?? false;
-    if (pluginKey === "stripe_mcp" && action) {
+    if ((pluginKey === "stripe_mcp" || pluginKey === "google_drive") && action) {
       if (action === "save" || action === "replace") {
         if (!rawSecret || !rawSecret.trim()) {
-          throw new Error("Debes proporcionar una credencial válida de Stripe");
+          throw new Error(`Debes proporcionar una credencial válida de ${pluginKey === "google_drive" ? "Google Drive" : "Stripe"}`);
         }
         secretConfigured = true;
+        setLocalPluginSecret(companyId, pluginKey, rawSecret.trim());
       } else if (action === "remove") {
         secretConfigured = false;
+        setLocalPluginSecret(companyId, pluginKey, null);
       }
     }
 
@@ -2880,12 +3537,13 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
     }
     save(s);
 
+    const secretLabel = pluginKey === "google_drive" ? "Google Drive" : "Stripe";
     const auditSummary = action === "remove"
-      ? "Credencial de Stripe eliminada"
+      ? `Credencial de ${secretLabel} eliminada`
       : action === "replace"
-        ? "Credencial de Stripe reemplazada"
+        ? `Credencial de ${secretLabel} reemplazada`
         : action === "save"
-          ? "Credencial de Stripe guardada"
+          ? `Credencial de ${secretLabel} guardada`
           : enabled
             ? "Configuración guardada y plugin activado"
             : "Plugin desactivado";
@@ -2926,8 +3584,8 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       throw new Error("Activa y guarda el plugin antes de probarlo");
     }
 
-    if (pluginKey === "stripe_mcp" && !plugin.secret_configured) {
-      const msg = "Ingresa y guarda la credencial de Stripe antes de probar la conexión";
+    if ((pluginKey === "stripe_mcp" || pluginKey === "google_drive") && !plugin.secret_configured) {
+      const msg = `Ingresa y guarda la credencial de ${pluginKey === "google_drive" ? "Google Drive" : "Stripe"} antes de probar la conexión`;
       pluginAuditLocal(
         s,
         companyId,
@@ -2949,6 +3607,12 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       stored.last_error = null;
       stored.updated_at = now();
       save(s);
+    }
+
+    if (pluginKey === "google_drive") {
+      const result = await testGoogleDrive(getLocalPluginSecret(companyId, pluginKey));
+      pluginAuditLocal(s, companyId, user.id, pluginKey, "connection_test_ok", null, "ok", result.message);
+      return result;
     }
 
     const testMsg =
@@ -2980,6 +3644,26 @@ No inventes datos fuera del contexto. Si falta info, dilo.`;
       message: testMsg,
       details: { mode: "local", simulation: true, environment: plugin.config.environment ?? "sandbox" },
     };
+  },
+
+  async upload_project_file(input: StorageUploadInput, token?: string | null): Promise<StorageUploadResult> {
+    const s = load();
+    const user = requireAdmin(s, token);
+    const companyId = sessionCompanyId(s, token);
+    const project = s.workProjects.find((item) => item.id === input.project_id && item.company_id === companyId);
+    if (!project) throw new Error("Proyecto no encontrado");
+    if (input.provider !== "google_drive") throw new Error("Proveedor de almacenamiento no soportado");
+    const plugin = tenantPluginLocal(s, companyId, "google_drive");
+    if (!plugin.enabled || !plugin.secret_configured) {
+      throw new Error("Configura y activa Google Drive en Ajustes → Plugins");
+    }
+    const result = await uploadToGoogleDrive(plugin.config, getLocalPluginSecret(companyId, "google_drive"), {
+      name: input.name,
+      mime_type: input.mime_type,
+      bytes: decodeBase64File(input.content_base64),
+    });
+    pluginAuditLocal(s, companyId, user.id, "google_drive", "file_uploaded", null, "ok", `${result.name} (${result.size} bytes)`);
+    return result;
   },
 
   async list_plugin_tools(pluginKey: PluginKey, token?: string | null): Promise<any[]> {

@@ -57,7 +57,7 @@
 <svelte:window onkeydown={open ? onKey : undefined} />
 
 {#if open}
-  <div use:portal class="fixed inset-0 z-[9999] flex items-center justify-center overflow-hidden p-3 sm:p-4 md:p-6">
+  <div use:portal class="modal-portal fixed inset-0 z-[9999] flex items-center justify-center overflow-hidden p-3 sm:p-4 md:p-6">
     <button
       class="absolute inset-0 bg-black/75 backdrop-blur-md"
       aria-label="Cerrar"
@@ -71,7 +71,7 @@
       aria-modal="true"
     >
       <!-- Header fijo -->
-      <div class="sticky top-0 z-20 flex shrink-0 items-center justify-between gap-3 border-b border-[var(--color-border-soft)] bg-[var(--color-surface-glass,#120e1b)]/95 px-6 py-4 backdrop-blur-md">
+      <div class="modal-header sticky top-0 z-20 flex shrink-0 items-center justify-between gap-3 border-b border-[var(--color-border-soft)] px-6 py-4 backdrop-blur-md">
         <h2 class="text-lg font-semibold tracking-tight text-[var(--color-text)] sm:text-xl">{title}</h2>
         <div class="flex items-center gap-2">
           {#if headerExtra}
@@ -94,7 +94,7 @@
 
       <!-- Footer opcional -->
       {#if footer}
-        <div class="sticky bottom-0 z-20 flex shrink-0 items-center justify-end gap-3 border-t border-[var(--color-border-soft)] bg-[var(--color-surface-glass,#120e1b)]/95 px-6 py-3.5 backdrop-blur-md">
+        <div class="modal-footer sticky bottom-0 z-20 flex shrink-0 items-center justify-end gap-3 border-t border-[var(--color-border-soft)] px-6 py-3.5 backdrop-blur-md">
           {@render footer()}
         </div>
       {/if}
@@ -103,6 +103,22 @@
 {/if}
 
 <style>
+  .modal-header,
+  .modal-footer {
+    color: var(--color-text);
+    background: color-mix(in srgb, var(--color-obsidian-panel) 96%, transparent);
+  }
+
+  .modal-footer {
+    background: color-mix(in srgb, var(--color-obsidian-elevated) 90%, transparent);
+    box-shadow: 0 -10px 28px color-mix(in srgb, var(--color-purple-glow) 14%, transparent);
+  }
+
+  .modal-footer :global(.button-ghost) {
+    border: 1px solid var(--color-border);
+    background: color-mix(in srgb, var(--color-obsidian-panel) 82%, transparent);
+  }
+
   :global(.modal-scroll-content > form) {
     min-height: 100%;
     display: flex;
@@ -119,9 +135,14 @@
     margin-top: auto;
     padding: 1rem 1.25rem;
     border-top: 1px solid var(--color-border);
-    background: color-mix(in srgb, var(--color-obsidian-panel) 94%, transparent);
-    box-shadow: 0 -14px 24px -20px rgb(0 0 0 / 0.8);
+    background: color-mix(in srgb, var(--color-obsidian-elevated) 90%, transparent);
+    box-shadow: 0 -12px 30px color-mix(in srgb, var(--color-purple-glow) 16%, transparent);
     backdrop-filter: blur(14px);
+  }
+
+  :global(.modal-scroll-content > form > :last-child .button-ghost) {
+    border: 1px solid var(--color-border);
+    background: color-mix(in srgb, var(--color-obsidian-panel) 82%, transparent);
   }
 
   @media (min-width: 640px) {

@@ -9,7 +9,7 @@ beforeEach(() => {
 });
 
 describe("PluginManager client API in local mode", () => {
-  it("api.listPlugins() returns 2 items without throwing unsupported command error", async () => {
+  it("api.listPlugins() returns catalog items without throwing unsupported command error", async () => {
     const login = await api.login("admin", "1234");
     setSession(login.user, login.token, {
       companies: login.companies,
@@ -19,8 +19,8 @@ describe("PluginManager client API in local mode", () => {
     const plugins = await api.listPlugins();
 
     expect(Array.isArray(plugins)).toBe(true);
-    expect(plugins.length).toBe(2);
-    expect(plugins.map((p) => p.plugin_key)).toEqual(["database_bridge", "stripe_mcp"]);
+    expect(plugins.length).toBe(3);
+    expect(plugins.map((p) => p.plugin_key)).toEqual(["database_bridge", "stripe_mcp", "google_drive"]);
   });
 
   it("api.updatePlugin() and api.testPlugin() work seamlessly via callLocal", async () => {

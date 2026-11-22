@@ -1,4 +1,5 @@
 import type { ProductInput, PublicationStatus, SalesPolicy, SupplierSourceStatus, SupplyStatus } from "../types";
+import { isVatRate } from "../vat";
 
 export interface ResolvedProductPublication {
   publication_status: PublicationStatus;
@@ -7,6 +8,34 @@ export interface ResolvedProductPublication {
   supply_status: SupplyStatus;
   supplier_last_verified_at: string | null;
   availability_eta: string | null;
+}
+
+/** Validate the numeric and identity fields before writing a catalogue item.
+ * The database columns are integers, but older schemas did not have CHECKs;
+ * keeping this at the API boundary prevents negative cents/stock and NaN
+ * values from reaching either PostgreSQL or the browser store. */
+export function validateProductFields(input: ProductInput, existing?: { stock?: number; min_stock?: number }): { valid: boolean; error?: string } {
+  const sku = String(input.sku ?? "").trim();
+  const name = String(input.name ?? "").trim();
+  if (!sku) return { valid: false, error: "El SKU es obligatorio" };
+  if (!name) return { valid: false, error: "El nombre del producto es obligatorio" };
+
+  const values: Array<[string, unknown, number]> = [
+    ["coste", input.cost_cents, 0],
+    ["precio", input.price_cents, 0],
+    ["stock", input.stock ?? existing?.stock ?? 0, 0],
+    ["stock mínimo", input.min_stock ?? existing?.min_stock ?? 0, 0],
+  ];
+  for (const [label, raw, minimum] of values) {
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < minimum) {
+      return { valid: false, error: `El ${label} debe ser un número entero igual o mayor que ${minimum}` };
+    }
+  }
+  if (!isVatRate(Number(input.vat_rate))) {
+    return { valid: false, error: "El IVA debe ser 0%, 4%, 10% o 21%" };
+  }
+  return { valid: true };
 }
 
 export function validateProductPublicationInvariants(

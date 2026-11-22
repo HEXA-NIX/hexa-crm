@@ -21,6 +21,7 @@
   import Badge from "$lib/components/Badge.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import Input from "$lib/components/Input.svelte";
+  import DatePicker from "$lib/components/DatePicker.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Select from "$lib/components/Select.svelte";
   import { showToast } from "$lib/stores/ui";
@@ -33,6 +34,8 @@
   import { estimateDaysOfCover, qtySoldForProduct } from "$lib/inventory/stock-cover";
   import { countsInBusinessTotals } from "$lib/sales/cancel-sale";
   import { planReorderSuggestions } from "$lib/inventory/reorder";
+  import SortableHeader from "$lib/components/SortableHeader.svelte";
+  import { sortedCopy, type SortDirection } from "$lib/list-sort";
 
   type TabType = "resumen" | "products" | "movements" | "locations" | "suppliers";
   let activeTab = $state<TabType>("resumen");
@@ -217,6 +220,11 @@
   ];
 
   let supplyStatusFilter = $state("");
+  type ProductSortKey = "product" | "category" | "supplier" | "supply" | "publication" | "status" | "stock" | "cover" | "price" | "vat" | "cost";
+  let productSortKey = $state<ProductSortKey>("product");
+  let productSortDirection = $state<SortDirection>("asc");
+  let movementSortKey = $state<"date" | "product" | "type" | "direction" | "quantity" | "reason" | "user" | "notes">("date");
+  let movementSortDirection = $state<SortDirection>("desc");
 
   const supplyStatusOptions = [
     { value: "not_applicable", label: "No aplica (Estándar/Local)" },
@@ -288,6 +296,20 @@
       return matchQ && matchCat && matchSupply && matchCondition && matchPub && matchSupplyStatus;
     })
   );
+  const displayedProducts = $derived(sortedCopy(filteredProducts, (product) => {
+    if (productSortKey === "product") return product.name;
+    if (productSortKey === "category") return product.category;
+    if (productSortKey === "supplier") return product.supplier_name;
+    if (productSortKey === "supply") return product.fulfillment_mode;
+    if (productSortKey === "publication") return product.publication_status;
+    if (productSortKey === "status") return product.supply_status;
+    if (productSortKey === "stock") return product.stock;
+    if (productSortKey === "cover") return coverFor(product) ?? Number.POSITIVE_INFINITY;
+    if (productSortKey === "price") return product.price_cents;
+    if (productSortKey === "vat") return product.vat_rate;
+    return product.cost_cents;
+  }, productSortDirection));
+  function sortProducts(key: ProductSortKey) { if (productSortKey === key) productSortDirection = productSortDirection === "asc" ? "desc" : "asc"; else { productSortKey = key; productSortDirection = "asc"; } }
 
   const HORIZON_DAYS = 14;
   const reorderSuggestions = $derived(planReorderSuggestions(products, sold14d, HORIZON_DAYS));
@@ -333,6 +355,8 @@
       return matchQ && matchType && matchProduct && matchLoc && matchFrom && matchTo;
     })
   );
+  const displayedInventoryMovements = $derived(sortedCopy(filteredMovements, (movement) => movementSortKey === "date" ? movement.created_at : movementSortKey === "product" ? movement.product_name : movementSortKey === "type" ? movement.movement_type : movementSortKey === "direction" ? movementDirectionText(movement) : movementSortKey === "quantity" ? movement.quantity : movementSortKey === "reason" ? movement.reason : movementSortKey === "notes" ? movement.notes : movement.created_by_name, movementSortDirection));
+  function sortInventoryMovements(key: typeof movementSortKey) { if (movementSortKey === key) movementSortDirection = movementSortDirection === "asc" ? "desc" : "asc"; else { movementSortKey = key; movementSortDirection = key === "date" ? "desc" : "asc"; } }
 
   function fulfillmentLabel(mode?: string) {
     return fulfillmentOptions.find((item) => item.value === mode)?.label ?? "Almacén propio";
@@ -1126,22 +1150,22 @@
             <table class="w-full min-w-[44rem] text-left text-sm">
               <thead class="border-b border-[var(--color-border-soft)] text-xs uppercase tracking-wide text-[var(--color-muted-dim)]">
                 <tr>
-                  <th class="px-4 py-3 font-medium">Producto</th>
-                  <th class="px-4 py-3 font-medium">Categoría</th>
-                  <th class="px-4 py-3 font-medium">Proveedor / contacto</th>
-                  <th class="px-4 py-3 font-medium">Abastecimiento</th>
-                  <th class="px-4 py-3 font-medium">Publicación</th>
-                  <th class="px-4 py-3 font-medium">Estado</th>
-                  <th class="px-4 py-3 font-medium">Stock</th>
-                  <th class="px-4 py-3 font-medium">Cobertura</th>
-                  <th class="px-4 py-3 font-medium">PVP</th>
-                  <th class="px-4 py-3 font-medium">IVA</th>
-                  <th class="px-4 py-3 font-medium">Coste</th>
+                  <SortableHeader label="Producto" active={productSortKey === "product"} direction={productSortDirection} onclick={() => sortProducts("product")} />
+                  <SortableHeader label="Categoría" active={productSortKey === "category"} direction={productSortDirection} onclick={() => sortProducts("category")} />
+                  <SortableHeader label="Proveedor / contacto" active={productSortKey === "supplier"} direction={productSortDirection} onclick={() => sortProducts("supplier")} />
+                  <SortableHeader label="Abastecimiento" active={productSortKey === "supply"} direction={productSortDirection} onclick={() => sortProducts("supply")} />
+                  <SortableHeader label="Publicación" active={productSortKey === "publication"} direction={productSortDirection} onclick={() => sortProducts("publication")} />
+                  <SortableHeader label="Estado" active={productSortKey === "status"} direction={productSortDirection} onclick={() => sortProducts("status")} />
+                  <SortableHeader label="Stock" active={productSortKey === "stock"} direction={productSortDirection} onclick={() => sortProducts("stock")} />
+                  <SortableHeader label="Cobertura" active={productSortKey === "cover"} direction={productSortDirection} onclick={() => sortProducts("cover")} />
+                  <SortableHeader label="PVP" active={productSortKey === "price"} direction={productSortDirection} onclick={() => sortProducts("price")} />
+                  <SortableHeader label="IVA" active={productSortKey === "vat"} direction={productSortDirection} onclick={() => sortProducts("vat")} />
+                  <SortableHeader label="Coste" active={productSortKey === "cost"} direction={productSortDirection} onclick={() => sortProducts("cost")} />
                   <th class="px-4 py-3 font-medium text-right">Acciones</th>
                 </tr>
               </thead>
               <tbody>
-                {#each filteredProducts as p (p.id)}
+                {#each displayedProducts as p (p.id)}
                   {@const cover = coverFor(p)}
                   {@const pubInfo = publicationBadge(p.publication_status, p.sales_policy)}
                   {@const supInfo = supplyBadge(p.supply_status)}
@@ -1248,9 +1272,9 @@
         />
         <div class="flex items-center gap-1.5 text-xs text-[var(--color-muted)]">
           <span>Desde</span>
-          <input type="date" bind:value={movementFromDate} class="field !py-1 !px-2 text-xs" />
+          <DatePicker bind:value={movementFromDate} class="w-40" ariaLabel="Movimientos desde" />
           <span>Hasta</span>
-          <input type="date" bind:value={movementToDate} class="field !py-1 !px-2 text-xs" />
+          <DatePicker bind:value={movementToDate} class="w-40" ariaLabel="Movimientos hasta" />
         </div>
         <div class="ml-auto flex gap-2">
           {#if movementQuery || movementTypeFilter || movementProductFilter || movementLocationFilter || movementFromDate || movementToDate}
@@ -1272,19 +1296,21 @@
             <table class="w-full min-w-[52rem] text-left text-sm">
               <thead class="border-b border-[var(--color-border-soft)] text-xs uppercase tracking-wide text-[var(--color-muted-dim)]">
                 <tr>
-                  <th class="px-4 py-3 font-medium">ID / Fecha y Hora</th>
-                  <th class="px-4 py-3 font-medium">Producto</th>
-                  <th class="px-4 py-3 font-medium">Tipo Movimiento</th>
+                  <SortableHeader label="ID / Fecha y Hora" active={movementSortKey === "date"} direction={movementSortDirection} onclick={() => sortInventoryMovements("date")} />
+                  <SortableHeader label="Producto" active={movementSortKey === "product"} direction={movementSortDirection} onclick={() => sortInventoryMovements("product")} />
+                  <SortableHeader label="Tipo Movimiento" active={movementSortKey === "type"} direction={movementSortDirection} onclick={() => sortInventoryMovements("type")} />
+                  <SortableHeader label="Dirección (Origen ➔ Destino)" active={movementSortKey === "direction"} direction={movementSortDirection} onclick={() => sortInventoryMovements("direction")} />
                   <th class="px-4 py-3 font-medium">Dirección (Origen ➔ Destino)</th>
-                  <th class="px-4 py-3 font-medium tabular">Cantidad</th>
-                  <th class="px-4 py-3 font-medium">Motivo</th>
-                  <th class="px-4 py-3 font-medium">Usuario / Actor</th>
+                  <SortableHeader label="Cantidad" active={movementSortKey === "quantity"} direction={movementSortDirection} onclick={() => sortInventoryMovements("quantity")} />
+                  <SortableHeader label="Motivo" active={movementSortKey === "reason"} direction={movementSortDirection} onclick={() => sortInventoryMovements("reason")} />
+                  <SortableHeader label="Usuario / Actor" active={movementSortKey === "user"} direction={movementSortDirection} onclick={() => sortInventoryMovements("user")} />
+                  <SortableHeader label="Notas / Ref" active={movementSortKey === "notes"} direction={movementSortDirection} onclick={() => sortInventoryMovements("notes")} />
                   <th class="px-4 py-3 font-medium">Notas / Ref</th>
                   <th class="px-4 py-3 font-medium text-right">Acción</th>
                 </tr>
               </thead>
               <tbody>
-                {#each filteredMovements as m (m.id)}
+                {#each displayedInventoryMovements as m (m.id)}
                   {@const badge = movementBadgeInfo(m)}
                   {@const isAlreadyReversed = m.is_reversal || m.movement_type === "reversal" || reversedMovementSet.has(m.id)}
                   <tr class="border-b border-[var(--color-border-soft)] transition hover:bg-[var(--color-purple-mist)]">

@@ -28,11 +28,10 @@ describe("worker local de Orca", () => {
     expect(WORKER).toContain('status: "done", source_type: SOURCE.completed');
   });
 
-  it("expone el despacho tanto para central como para el puente local", () => {
-    expect(DETAIL).toContain("supportsOrcaWorker()");
-    expect(DETAIL).toContain("Enviar a Orca");
-    expect(DETAIL).toContain("usesLocalOrcaBridge()");
-    expect(DETAIL).toContain("dispatchToLocalOrca");
-    expect(DETAIL).toContain('orcaExecutionState(editingTask) === "failed"');
+  it("no expone el despacho manual de Orca en el centro de proyectos", () => {
+    expect(DETAIL).not.toContain("supportsOrcaWorker()");
+    expect(DETAIL).not.toContain("Enviar a Orca");
+    expect(DETAIL).not.toContain("usesLocalOrcaBridge()");
+    expect(DETAIL).not.toContain("dispatchToLocalOrca");
   });
 });

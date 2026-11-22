@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { confirmDialog } from "$lib/stores/confirm-dialog";
   import { onMount } from "svelte";
   import { page } from "$app/stores";
   import { api } from "$lib/api/client";
@@ -8,6 +9,7 @@
   import Card from "$lib/components/Card.svelte";
   import Badge from "$lib/components/Badge.svelte";
   import Input from "$lib/components/Input.svelte";
+  import DatePicker from "$lib/components/DatePicker.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import KpiCard from "$lib/components/KpiCard.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
@@ -15,6 +17,8 @@
   import { showToast } from "$lib/stores/ui";
   import { buildDailyCloseReport } from "$lib/reports/daily-close";
   import { planCashReconcile, type CashReconcileResult } from "$lib/reports/cash-reconcile";
+  import SortableHeader from "$lib/components/SortableHeader.svelte";
+  import { sortedCopy, type SortDirection } from "$lib/list-sort";
 
   let movements = $state<CashMovement[]>([]);
   let balance = $state(0);
@@ -34,6 +38,19 @@
   /** Physical count for arqueo (€ string). */
   let countedStr = $state("");
   let reconcileBusy = $state(false);
+  let movementSortKey = $state<"date" | "type" | "category" | "description" | "amount">("date");
+  let movementSortDirection = $state<SortDirection>("desc");
+  const displayedMovements = $derived(sortedCopy(movements, (movement) => {
+    if (movementSortKey === "date") return movement.occurred_at;
+    if (movementSortKey === "type") return label(movement.kind);
+    if (movementSortKey === "category") return movement.category;
+    if (movementSortKey === "description") return movement.description;
+    return movement.kind === "expense" ? -movement.amount_cents : movement.amount_cents;
+  }, movementSortDirection));
+  function sortMovements(key: typeof movementSortKey) {
+    if (movementSortKey === key) movementSortDirection = movementSortDirection === "asc" ? "desc" : "asc";
+    else { movementSortKey = key; movementSortDirection = key === "date" ? "desc" : "asc"; }
+  }
 
   const categories = [
     "ventas",
@@ -126,8 +143,9 @@
     }
     const adj = reconcilePreview.suggested_adjustment;
     if (
-      !confirm(
+      !await confirmDialog(
         `¿Registrar ${adj.kind === "expense" ? "faltante" : "sobrante"} de ${formatEUR(adj.amount_cents)} en caja?`,
+        { title: "Confirmar ajuste de caja", confirmLabel: "Registrar ajuste" },
       )
     ) {
       return;
@@ -283,7 +301,7 @@
       </div>
       <label class="text-sm">
         <span class="mb-1 block text-[var(--color-muted)]">Día</span>
-        <input type="date" bind:value={closeDay} class="field" />
+        <DatePicker bind:value={closeDay} class="w-48" ariaLabel="Día del cierre" />
       </label>
     </div>
     <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -332,15 +350,15 @@
             class="border-b border-white/10 text-xs uppercase text-[var(--color-muted-dim)]"
           >
             <tr>
-              <th class="px-4 py-3">Fecha</th>
-              <th class="px-4 py-3">Tipo</th>
-              <th class="px-4 py-3">Categoría</th>
-              <th class="px-4 py-3">Descripción</th>
-              <th class="px-4 py-3 text-right">Importe</th>
+              <SortableHeader label="Fecha" active={movementSortKey === "date"} direction={movementSortDirection} onclick={() => sortMovements("date")} />
+              <SortableHeader label="Tipo" active={movementSortKey === "type"} direction={movementSortDirection} onclick={() => sortMovements("type")} />
+              <SortableHeader label="Categoría" active={movementSortKey === "category"} direction={movementSortDirection} onclick={() => sortMovements("category")} />
+              <SortableHeader label="Descripción" active={movementSortKey === "description"} direction={movementSortDirection} onclick={() => sortMovements("description")} />
+              <SortableHeader label="Importe" align="right" active={movementSortKey === "amount"} direction={movementSortDirection} onclick={() => sortMovements("amount")} />
             </tr>
           </thead>
           <tbody>
-            {#each movements as m}
+            {#each displayedMovements as m}
               <tr class="border-b border-white/5 hover:bg-white/[0.03]">
                 <td class="px-4 py-3 text-[var(--color-muted)]">
                   {new Date(m.occurred_at).toLocaleString("es-ES")}
@@ -386,14 +404,7 @@
     <Input label="Importe (€)" bind:value={form.amount} required />
     <div class="space-y-1.5 text-sm">
       <label for="cash-movement-date" class="font-medium text-[var(--color-muted)]">Fecha del movimiento</label>
-      <input
-        id="cash-movement-date"
-        type="date"
-        bind:value={form.date}
-        max={today}
-        class="field w-full"
-        required
-      />
+      <DatePicker bind:value={form.date} max={today} required ariaLabel="Fecha del movimiento" />
       <p class="text-[11px] text-[var(--color-muted-dim)]">Puedes registrar ingresos y gastos de fechas anteriores.</p>
     </div>
     <Select
