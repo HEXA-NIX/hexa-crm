@@ -204,6 +204,12 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 - Las columnas del kanban de proyecto igualan su altura con la columna más larga para facilitar el movimiento de tareas entre estados.
 - Las cabeceras de estado del kanban permanecen visibles durante el desplazamiento vertical.
 
+## [0.3.3] — 2026-11-22
+
+### Changed
+
+- Actualiza Marked, Svelte Check, los tipos de Node y Wrangler, junto con las versiones de Tauri, su plugin de apertura, Rand, Rusqlite y Thiserror fijadas para escritorio.
+
 ## [0.3.2] — 2026-08-04
 
 ### Fixed
