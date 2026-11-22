@@ -31,6 +31,7 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Changed
 
+- Actualiza Marked, Svelte Check, los tipos de Node y Wrangler, junto con las versiones de Tauri, su plugin de apertura, Rand, Rusqlite y Thiserror fijadas para escritorio.
 - El progreso de proyectos y del portafolio excluye las tareas archivadas del total para no penalizar artificialmente los porcentajes.
 - El portafolio excluye proyectos archivados de sus indicadores operativos; los formularios validan fechas e importes, y la planificación económica ofrece siempre 36 meses.
 - Proyectos conserva filtros y vista preferida, permite limpiar filtros, muestra archivados correctamente y adapta el Kanban a móvil y navegación sin arrastre.
