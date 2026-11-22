@@ -1,10 +1,13 @@
 <script lang="ts">
+  import { confirmDialog } from "$lib/stores/confirm-dialog";
   import { onMount } from "svelte";
   import { api } from "$lib/api/client";
   import type {
     Customer,
     CashMovement,
     DashboardStats,
+    CompanyFinancialSummary,
+    Invoice,
     Sale,
     Settings,
     WorkItem,
@@ -14,17 +17,23 @@
   import KpiCard from "$lib/components/KpiCard.svelte";
   import Card from "$lib/components/Card.svelte";
   import Badge from "$lib/components/Badge.svelte";
+  import Button from "$lib/components/Button.svelte";
   import { showToast } from "$lib/stores/ui";
   import { estimateDaysOfCover, qtySoldForProduct } from "$lib/inventory/stock-cover";
   import { countsInBusinessTotals } from "$lib/sales/cancel-sale";
   import { isOnboardingDone } from "$lib/onboarding/state";
   import { backupAgeDays, needsBackupReminder } from "$lib/backup/backup-status";
   import { dashboardHealth } from "$lib/dashboard/health";
-  import { activeCompany, session } from "$lib/stores/session";
-  import { PROJECT_COMPANY_CODE } from "$lib/company/context";
+  import { activeCompany, currentUser, session } from "$lib/stores/session";
+  import { isProjectCompany } from "$lib/company/context";
+  import { buildProjectRevenueProjection } from "$lib/projects/revenue-projection";
+  import { economicGoalProgress, monthlyEconomicGoal } from "$lib/projects/economic-goal";
+  import { buildTaskDigestMessages, upcomingTasksForDigest } from "$lib/whatsapp/task-digest";
+  import { isTaskPendingWork, taskDueDate } from "$lib/work/task-dates";
 
   let stats = $state<DashboardStats | null>(null);
   let sales = $state<Sale[]>([]);
+  let cashMovements = $state<CashMovement[]>([]);
   let sold14d = $state<Record<number, number>>({});
   let loading = $state(true);
   let onboardingPending = $state(false);
@@ -34,10 +43,13 @@
   let devTasks = $state<WorkItem[]>([]);
   let devCustomers = $state<Customer[]>([]);
   let devCashMovements = $state<CashMovement[]>([]);
+  let devInvoices = $state<Invoice[]>([]);
   let devLoading = $state(false);
+  let whatsappDigestSending = $state(false);
+  let groupSummary = $state<CompanyFinancialSummary[]>([]);
 
   let alertTasks = $state<Record<string, number>>({});
-  const isDevCompany = $derived($activeCompany?.code === PROJECT_COMPANY_CODE);
+  const isDevCompany = $derived(isProjectCompany($activeCompany));
 
   $effect(() => {
     const _companyId = $session.activeCompanyId;
@@ -49,12 +61,14 @@
       api.listWorkItems(),
       api.listCustomers(),
       api.listCashMovements(),
+      api.listInvoices(),
     ])
-      .then(([projects, tasks, customers, cashMovements]) => {
+      .then(([projects, tasks, customers, cashMovements, invoices]) => {
         devProjects = projects;
         devTasks = tasks;
         devCustomers = customers;
         devCashMovements = cashMovements;
+        devInvoices = invoices;
       })
       .catch((error) => {
         showToast(error instanceof Error ? error.message : "Error al cargar proyectos", "err");
@@ -67,10 +81,12 @@
   onMount(async () => {
     try {
       onboardingPending = !isOnboardingDone();
-      [stats, sales, settings] = await Promise.all([
+      [stats, sales, settings, cashMovements, groupSummary] = await Promise.all([
         api.dashboardStats(),
         api.listSales(),
         api.getSettings(),
+        api.listCashMovements().catch(() => []),
+        api.groupFinancialSummary().catch(() => []),
       ]);
       centralSynchronizedAt = $session.remote ? new Date().toISOString() : null;
 
@@ -142,6 +158,13 @@
   }
 
   const recent = $derived(sales.slice(0, 6));
+  const finance30d = $derived.by(() => {
+    const cutoff = Date.now() - 30 * 86400000;
+    const recentCash = cashMovements.filter((movement) => new Date(movement.occurred_at).getTime() >= cutoff);
+    const income = recentCash.filter((movement) => movement.kind === "income").reduce((sum, movement) => sum + movement.amount_cents, 0) + sales.filter((sale) => new Date(sale.sold_at).getTime() >= cutoff && countsInBusinessTotals(sale.status)).reduce((sum, sale) => sum + sale.total_cents, 0);
+    const expenses = recentCash.filter((movement) => movement.kind === "expense").reduce((sum, movement) => sum + movement.amount_cents, 0);
+    return { income, expenses, profit: income - expenses };
+  });
   const showBackupReminder = $derived(needsBackupReminder(settings?.last_backup_at));
   const backupDays = $derived(backupAgeDays(settings?.last_backup_at));
   const health = $derived(dashboardHealth(sales, stats?.low_stock ?? [], showBackupReminder));
@@ -151,42 +174,83 @@
     devProjects.filter((project) => project.status === "active" || project.status === "planned"),
   );
   const openDevTasks = $derived(
-    devTasks.filter((task) => !["done", "archived"].includes(task.status)),
+    devTasks.filter(isTaskPendingWork),
   );
   const blockedDevTasks = $derived(devTasks.filter((task) => task.status === "blocked"));
   const wonProjectValueCents = $derived(
     devProjects
-      .filter((project) => project.customer_id != null && project.status !== "archived")
+      .filter((project) => (project.project_type ?? (project.customer_id != null ? "client" : "own")) === "client" && project.status !== "archived")
       .reduce((sum, project) => sum + project.value_cents, 0),
   );
-  const ownMonthlyEstimateCents = $derived(
-    devProjects
-      .filter((project) => project.customer_id == null && project.status !== "archived")
-      .reduce(
-        (sum, project) =>
-          sum + project.revenue_milestones.reduce(
-            (projectSum, milestone) => projectSum + milestone.amount_cents,
-            0,
-          ),
-        0,
-      ),
+  const activeCompanyFinancialSummary = $derived(
+    groupSummary.find((company) => company.company_id === $session.activeCompanyId),
   );
-  const billedProjectCents = $derived(
+  const collectedGrantCents = $derived(
     devCashMovements
-      .filter((movement) => movement.project_id != null && movement.kind === "income")
+      .filter((movement) => movement.kind === "income" && movement.category === "subvencion_cobrada")
       .reduce((sum, movement) => sum + movement.amount_cents, 0),
   );
-  const spentProjectCents = $derived(
+  const receivedFinancingCents = $derived(
     devCashMovements
-      .filter((movement) => movement.project_id != null && movement.kind === "expense")
+      .filter((movement) => movement.kind === "income" && ["inversion_recibida", "prestamo_recibido"].includes(movement.category))
       .reduce((sum, movement) => sum + movement.amount_cents, 0),
+  );
+  const receivedInvestmentCents = $derived(devCashMovements.filter((movement) => movement.kind === "income" && movement.category === "inversion_recibida").reduce((sum, movement) => sum + movement.amount_cents, 0));
+  const receivedLoanCents = $derived(devCashMovements.filter((movement) => movement.kind === "income" && movement.category === "prestamo_recibido").reduce((sum, movement) => sum + movement.amount_cents, 0));
+  const billedProjectCents = $derived(activeCompanyFinancialSummary?.issued_total_cents ?? 0);
+  const collectedAndGrantedCents = $derived((activeCompanyFinancialSummary?.issued_paid_cents ?? 0) + collectedGrantCents);
+  const totalExpenseMovements = $derived(
+    devCashMovements.filter((movement) => movement.kind === "expense"),
+  );
+  const totalSpentCents = $derived(
+    totalExpenseMovements
+      .reduce((sum, movement) => sum + movement.amount_cents, 0),
+  );
+  const availableCashCents = $derived(collectedAndGrantedCents + receivedFinancingCents - totalSpentCents);
+  const projectRevenueProjection = $derived(
+    buildProjectRevenueProjection(devProjects, devCashMovements, new Date(), 5, 6, devInvoices),
+  );
+  const projectRevenuePositiveMax = $derived(
+    Math.max(
+      ...projectRevenueProjection.flatMap((month) => [
+        month.income_cents,
+        month.projection_cents,
+      ]),
+      0,
+    ),
+  );
+  const projectRevenueExpenseMax = $derived(
+    Math.max(...projectRevenueProjection.map((month) => month.expense_cents), 0),
+  );
+  const projectRevenueChartRange = $derived(
+    Math.max(projectRevenuePositiveMax + projectRevenueExpenseMax, 1),
+  );
+  const projectRevenuePositiveShare = $derived(
+    (projectRevenuePositiveMax / projectRevenueChartRange) * 100,
+  );
+  const projectRevenueExpenseShare = $derived(100 - projectRevenuePositiveShare);
+  const currentRevenueProjection = $derived(
+    projectRevenueProjection.find((month) => month.is_current),
+  );
+  const currentMonthKey = $derived(new Date().toISOString().slice(0, 7));
+  const currentEconomicGoalCents = $derived(
+    (currentRevenueProjection?.projection_cents ?? 0)
+      || monthlyEconomicGoal(settings?.monthly_economic_goals, $session.activeCompanyId, currentMonthKey),
+  );
+  const currentEconomicGoalProgress = $derived(
+    economicGoalProgress(currentRevenueProjection?.income_cents ?? 0, currentEconomicGoalCents),
+  );
+  const completedDevTasks = $derived(devTasks.filter((task) => task.status === "done").length);
+  const devTaskCompletion = $derived(
+    devTasks.length ? Math.round((completedDevTasks / devTasks.length) * 100) : 0,
   );
   const upcomingDevTasks = $derived(
     openDevTasks
-      .filter((task) => task.due_date)
-      .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)))
+      .filter((task) => taskDueDate(task))
+      .sort((a, b) => String(taskDueDate(a)).localeCompare(String(taskDueDate(b))))
       .slice(0, 6),
   );
+  const whatsappDigestTasks = $derived(upcomingTasksForDigest(openDevTasks));
   const recentDevProjects = $derived(
     [...devProjects]
       .filter((project) => project.status !== "archived")
@@ -200,10 +264,43 @@
       (projectTasks.filter((task) => task.status === "done").length / projectTasks.length) * 100,
     );
   };
-  const projectCustomerName = (customerId: number | null) =>
-    customerId
-      ? devCustomers.find((customer) => customer.id === customerId)?.name ?? "Cliente"
-      : "Proyecto propio";
+  const projectCustomerName = (project: (typeof devProjects)[number]) => {
+    const kind = project.project_type ?? (project.customer_id != null ? "client" : "own");
+    if (kind === "internal") {
+      return $session.companies.find((company) => company.id === project.client_company_id)?.trade_name ?? "Proyecto interno";
+    }
+    if (kind === "client") {
+      return $session.companies.find((company) => company.id === project.client_company_id)?.trade_name
+        ?? (project.customer_id ? devCustomers.find((customer) => customer.id === project.customer_id)?.name : null)
+        ?? "Cliente";
+    }
+    return "Proyecto propio";
+  };
+
+  async function sendUpcomingTasksByWhatsApp() {
+    const phone = $currentUser?.phone || "";
+    if (!phone) {
+      showToast("Añade el teléfono del admin en Ajustes → Equipo", "err");
+      return;
+    }
+    const messages = buildTaskDigestMessages(
+      devTasks,
+      devProjects,
+      new Date(),
+      import.meta.env.VITE_PUBLIC_APP_URL || window.location.origin,
+    );
+    const projectCount = new Set(whatsappDigestTasks.map((task) => task.project_id).filter(Boolean)).size;
+    if (!await confirmDialog(`Se enviará un resumen de ${projectCount} proyecto${projectCount === 1 ? "" : "s"} al WhatsApp del admin.`, { title: "Enviar resumen por WhatsApp", confirmLabel: "Enviar resumen" })) return;
+    whatsappDigestSending = true;
+    try {
+      for (const message of messages) await api.whatsappSend(phone, message, true);
+      showToast(`Resumen enviado por WhatsApp (${messages.length} mensaje${messages.length === 1 ? "" : "s"})`);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo enviar el resumen", "err");
+    } finally {
+      whatsappDigestSending = false;
+    }
+  }
 </script>
 
 {#if loading}
@@ -213,10 +310,43 @@
     {/each}
   </div>
 {:else if stats}
+  {#if groupSummary.length > 1}
+    {@const groupIssued = groupSummary.reduce((sum, company) => sum + company.issued_total_cents + company.grant_income_cents + company.investment_income_cents + company.loan_income_cents, 0)}
+    {@const groupInvestment = groupSummary.reduce((sum, company) => sum + company.investment_income_cents, 0)}
+    {@const groupLoans = groupSummary.reduce((sum, company) => sum + company.loan_income_cents, 0)}
+    {@const groupPending = groupSummary.reduce((sum, company) => sum + company.issued_pending_cents, 0)}
+    {@const groupReceived = groupSummary.reduce((sum, company) => sum + company.issued_paid_cents + company.grant_income_cents + company.investment_income_cents + company.loan_income_cents, 0)}
+    {@const groupSpent = groupSummary.reduce((sum, company) => sum + company.cash_expense_cents, 0)}
+    {@const groupAvailable = groupReceived - groupSpent}
+    <Card class="mb-5 border border-purple-400/20 bg-purple-500/[0.04]" lift={false}>
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p class="section-label mb-1">Visión de grupo</p>
+          <h2 class="text-lg font-semibold text-[var(--color-text)]">Todas tus empresas</h2>
+          <p class="mt-1 text-xs text-[var(--color-muted)]">Consulta consolidada de lectura. La contabilidad sigue separada por empresa.</p>
+        </div>
+        <div class="grid grid-cols-7 gap-3 text-right text-xs">
+          <div><p class="text-[var(--color-muted-dim)]">Ingresos totales</p><p class="mt-1 font-semibold tabular text-emerald-300">{formatEUR(groupIssued)}</p></div>
+          <div><p class="text-[var(--color-muted-dim)]">Inversión</p><p class="mt-1 font-semibold tabular text-purple-200">{formatEUR(groupInvestment)}</p></div>
+          <div><p class="text-[var(--color-muted-dim)]">Préstamos</p><p class="mt-1 font-semibold tabular text-cyan-200">{formatEUR(groupLoans)}</p></div>
+          <div><p class="text-[var(--color-muted-dim)]">Pendiente</p><p class="mt-1 font-semibold tabular text-amber-200">{formatEUR(groupPending)}</p></div>
+          <div><p class="text-[var(--color-muted-dim)]">Recibido</p><p class="mt-1 font-semibold tabular text-cyan-200">{formatEUR(groupReceived)}</p></div>
+          <div><p class="text-[var(--color-muted-dim)]">Gastado</p><p class="mt-1 font-semibold tabular text-rose-200">{formatEUR(groupSpent)}</p></div>
+          <div><p class="text-[var(--color-muted-dim)]">Disponible</p><p class={`mt-1 font-semibold tabular ${groupAvailable < 0 ? "text-rose-300" : "text-emerald-300"}`}>{formatEUR(groupAvailable)}</p></div>
+        </div>
+      </div>
+      <div class="mt-4 overflow-x-auto">
+        <table class="w-full min-w-[620px] text-left text-xs">
+          <thead><tr class="border-b border-[var(--color-border)] text-[var(--color-muted-dim)]"><th class="pb-2 font-medium">Empresa</th><th class="pb-2 text-right font-medium">Facturado</th><th class="pb-2 text-right font-medium">Subvenciones</th><th class="pb-2 text-right font-medium">Inversión</th><th class="pb-2 text-right font-medium">Préstamos</th><th class="pb-2 text-right font-medium">Ingresos</th><th class="pb-2 text-right font-medium">Pendiente</th><th class="pb-2 text-right font-medium">Recibido</th><th class="pb-2 text-right font-medium">Gastado</th><th class="pb-2 text-right font-medium">Disponible</th></tr></thead>
+          <tbody>{#each groupSummary as company}{@const companyReceived=company.issued_paid_cents+company.grant_income_cents+company.investment_income_cents+company.loan_income_cents}{@const companyAvailable=companyReceived-company.cash_expense_cents}<tr class="border-b border-white/[0.04] last:border-0"><td class="py-2.5"><span class="font-medium text-[var(--color-text)]">{company.trade_name}</span><span class="ml-2 text-[10px] uppercase tracking-wider text-[var(--color-muted-dim)]">{company.code}</span></td><td class="py-2.5 text-right tabular">{formatEUR(company.issued_total_cents)}</td><td class="py-2.5 text-right tabular text-purple-200">{formatEUR(company.grant_income_cents)}</td><td class="py-2.5 text-right tabular text-purple-200">{formatEUR(company.investment_income_cents)}</td><td class="py-2.5 text-right tabular text-cyan-200">{formatEUR(company.loan_income_cents)}</td><td class="py-2.5 text-right tabular text-emerald-300">{formatEUR(company.issued_total_cents + company.grant_income_cents + company.investment_income_cents + company.loan_income_cents)}</td><td class="py-2.5 text-right tabular text-amber-200">{formatEUR(company.issued_pending_cents)}</td><td class="py-2.5 text-right tabular">{formatEUR(companyReceived)}</td><td class="py-2.5 text-right tabular text-rose-200">{formatEUR(company.cash_expense_cents)}</td><td class={`py-2.5 text-right font-semibold tabular ${companyAvailable < 0 ? "text-rose-300" : "text-emerald-300"}`}>{formatEUR(companyAvailable)}</td></tr>{/each}</tbody>
+        </table>
+      </div>
+    </Card>
+  {/if}
   {#if isDevCompany}
   <section class="pulse-page">
     <div class="workspace-intro">
-      <p class="workspace-index">01 / PULSO DE PROYECTOS</p>
+      <p class="workspace-index">01 / DASHBOARD DE PROYECTOS</p>
       <div class="workspace-intro-row">
         <h2>Proyectos claros,<br /><em>prioridades visibles.</em></h2>
         <p>Una vista rápida de la cartera, las tareas pendientes y los clientes de HEXA.</p>
@@ -231,12 +361,20 @@
       </div>
     {:else}
       <p class="section-label mb-3">Estado de la cartera</p>
-      <div class="pulse-metrics grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+      <div class="pulse-metrics grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
         <KpiCard label="Valor conseguido" value={formatEUR(wonProjectValueCents)} hint={`${activeDevProjects.length} proyectos en cartera`} icon="◫" accent="violet" />
-        <KpiCard label="Facturado" value={formatEUR(billedProjectCents)} hint={`${openDevTasks.length} tareas abiertas`} icon="€" accent="emerald" />
-        <KpiCard label="Gastado" value={formatEUR(spentProjectCents)} hint={`${blockedDevTasks.length} tareas bloqueadas`} icon="−" accent="amber" />
-        <KpiCard label="Margen facturado" value={formatEUR(billedProjectCents - spentProjectCents)} hint={`${devCustomers.length} clientes`} icon="◇" accent="cyan" />
-        <KpiCard label="Hitos propios" value={formatEUR(ownMonthlyEstimateCents)} hint="Estimaciones por mes/año" icon="↗" accent="violet" />
+        <KpiCard label="Facturado" value={formatEUR(billedProjectCents)} hint={`${formatEUR(activeCompanyFinancialSummary?.issued_paid_cents ?? 0)} cobrado · ${formatEUR(activeCompanyFinancialSummary?.issued_pending_cents ?? 0)} pendiente`} icon="€" accent="emerald" />
+        <KpiCard label="Cobrado y ayudas" value={formatEUR(collectedAndGrantedCents)} hint={`${formatEUR(activeCompanyFinancialSummary?.issued_paid_cents ?? 0)} de clientes · ${formatEUR(collectedGrantCents)} subvenciones`} icon="↓" accent="emerald" />
+        <KpiCard label="Financiación recibida" value={formatEUR(receivedFinancingCents)} hint={`${formatEUR(receivedInvestmentCents)} inversión · ${formatEUR(receivedLoanCents)} préstamos`} icon="↗" accent="cyan" />
+        <KpiCard label="Gastado" value={formatEUR(totalSpentCents)} hint={`${totalExpenseMovements.length} gastos registrados en Caja`} icon="−" accent="amber" />
+        <KpiCard
+          label="Disponible"
+          value={formatEUR(availableCashCents)}
+          hint="Cobros, ayudas y financiación menos gastos de Caja"
+          icon="◇"
+          accent={availableCashCents < 0 ? "rose" : "cyan"}
+          valueTone={availableCashCents < 0 ? "danger" : "default"}
+        />
       </div>
 
       {#if devProjects.length === 0}
@@ -246,6 +384,149 @@
           <a href="/proyectos" class="mt-3 inline-block text-sm text-radiant hover:underline">Crear proyecto →</a>
         </Card>
       {/if}
+
+      <Card class="relative mt-4 overflow-visible" lift={false}>
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h2 class="section-label !normal-case !tracking-wide !text-sm">Facturación, ayudas y proyección propia</h2>
+            <p class="mt-1 max-w-2xl text-xs text-[var(--color-muted)]">
+              Los hitos de cada proyecto propio se mantienen mes a mes hasta que un nuevo hito cambia la estimación.
+            </p>
+          </div>
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px]">
+            <span class="inline-flex items-center gap-1.5 text-[var(--color-muted)]">
+              <span class="h-2.5 w-2.5 rounded-sm bg-emerald-400"></span>
+              Facturación y ayudas
+            </span>
+            <span class="inline-flex items-center gap-1.5 text-[var(--color-muted)]">
+              <span class="h-2.5 w-2.5 rounded-sm bg-gradient-to-t from-purple-600 to-violet-300"></span>
+              Hitos propios
+            </span>
+            <span class="inline-flex items-center gap-1.5 text-[var(--color-muted)]">
+              <span class="h-2.5 w-2.5 rounded-sm bg-rose-400"></span>
+              Gastos
+            </span>
+          </div>
+        </div>
+
+        <div class="mt-4 grid gap-3 sm:grid-cols-3">
+          <div class="rounded-xl border border-[var(--color-border)] bg-black/20 px-3 py-2.5">
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Facturado y ayudas este mes</p>
+            <p class="mt-1 text-lg font-semibold tabular text-emerald-300">
+              {formatEUR(currentRevenueProjection?.income_cents ?? 0)}
+            </p>
+          </div>
+          <div class="rounded-xl border border-purple-400/20 bg-purple-500/[0.07] px-3 py-2.5">
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Proyección propia este mes</p>
+            <p class="mt-1 text-lg font-semibold tabular text-[var(--color-purple-bright)]">
+              {formatEUR(currentRevenueProjection?.projection_cents ?? 0)}
+            </p>
+          </div>
+          <div class="rounded-xl border border-cyan-400/20 bg-cyan-500/[0.05] px-3 py-2.5">
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Ejecución de tareas</p>
+            <p class="mt-1 text-lg font-semibold tabular text-cyan-200">{devTaskCompletion}%</p>
+            <p class="mt-0.5 text-[11px] text-[var(--color-muted-dim)]">{completedDevTasks} de {devTasks.length} completadas</p>
+          </div>
+        </div>
+
+        {#if currentEconomicGoalCents}
+          <div class="mt-4 rounded-xl border border-[var(--color-border)] bg-black/20 p-3">
+            <div class="flex items-center justify-between gap-3 text-xs">
+              <span class="font-medium text-[var(--color-text)]">Objetivo económico del mes</span>
+              <span class="font-semibold tabular {currentEconomicGoalProgress >= 100 ? 'text-emerald-300' : 'text-[var(--color-purple-bright)]'}">{currentEconomicGoalProgress}%</span>
+            </div>
+            <div class="mt-2 h-2 overflow-hidden rounded-full bg-white/10">
+              <div class="h-full rounded-full bg-gradient-to-r from-purple-500 to-emerald-400" style={`width: ${Math.min(currentEconomicGoalProgress, 100)}%`}></div>
+            </div>
+            <p class="mt-2 text-[11px] text-[var(--color-muted-dim)]">
+              {currentEconomicGoalProgress >= 100 ? `Objetivo superado en ${formatEUR((currentRevenueProjection?.income_cents ?? 0) - currentEconomicGoalCents)}.` : `Faltan ${formatEUR(Math.max(currentEconomicGoalCents - (currentRevenueProjection?.income_cents ?? 0), 0))} para alcanzarlo.`}
+            </p>
+          </div>
+        {:else}
+          <a href="/proyectos" class="mt-4 flex items-center justify-between rounded-xl border border-dashed border-purple-400/30 bg-purple-500/[0.05] p-3 text-xs text-[var(--color-muted)] transition hover:bg-purple-500/10">
+            <span>Define un objetivo económico para medir el avance mensual.</span>
+            <strong class="text-[var(--color-purple-bright)]">Configurar →</strong>
+          </a>
+        {/if}
+
+        <div class="mt-5 overflow-x-auto pb-1">
+          <div class="flex h-64 min-w-[780px]" aria-label="Gráfica mensual de facturación, ayudas, proyección propia y gastos">
+            <div class="relative w-20 shrink-0 pb-9 pr-3 text-right">
+              <div class="absolute inset-x-0 bottom-9 top-0">
+                <span class="absolute right-3 top-0 text-[10px] tabular text-[var(--color-muted-dim)]">{formatEUR(projectRevenuePositiveMax)}</span>
+                <span class="absolute right-3 -translate-y-1/2 text-[10px] font-semibold tabular text-[var(--color-muted)]" style={`top: ${projectRevenuePositiveShare}%`}>0 €</span>
+                {#if projectRevenueExpenseShare >= 12}
+                  <span class="absolute bottom-0 right-3 text-[10px] tabular text-rose-300/70">{formatEUR(-projectRevenueExpenseMax)}</span>
+                {/if}
+              </div>
+            </div>
+
+            <div class="relative min-w-0 flex-1">
+              <div class="pointer-events-none absolute inset-x-0 top-0 h-[calc(100%-2.25rem)]">
+                <span class="block border-t border-[var(--color-border-soft)]"></span>
+                <span class="absolute inset-x-0 border-t border-dashed border-[var(--color-border-soft)]" style={`top: ${projectRevenuePositiveShare / 2}%`}></span>
+                <span class="absolute inset-x-0 border-t border-[var(--color-border-strong)]" style={`top: ${projectRevenuePositiveShare}%`}></span>
+                {#if projectRevenueExpenseMax > 0}
+                  <span class="absolute inset-x-0 bottom-0 border-t border-rose-400/20"></span>
+                {/if}
+              </div>
+
+              <div class="relative z-10 grid h-full grid-cols-12 gap-2 px-1">
+                {#each projectRevenueProjection as month, monthIndex (month.month)}
+                  <div class="group relative flex min-w-0 flex-col items-center hover:z-50">
+                    <div class="pointer-events-none absolute top-1 z-[100] hidden w-48 rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-obsidian-elevated)] p-3 text-left shadow-[0_18px_45px_rgba(0,0,0,0.55)] group-hover:block {monthIndex < 2 ? 'left-0' : monthIndex > projectRevenueProjection.length - 3 ? 'right-0' : 'left-1/2 -translate-x-1/2'}">
+                      <p class="text-[10px] font-bold uppercase tracking-wide text-[var(--color-purple-bright)]">
+                        {new Date(`${month.month}-01T12:00:00`).toLocaleDateString("es-ES", { month: "long", year: "numeric" })}
+                      </p>
+                      <div class="mt-2 space-y-1">
+                        <p class="flex items-center justify-between gap-2 text-[11px] text-[var(--color-muted)]">
+                          <span>Facturación y ayudas</span>
+                          <strong class="tabular text-emerald-300">{formatEUR(month.income_cents)}</strong>
+                        </p>
+                        <p class="flex items-center justify-between gap-2 text-[11px] text-[var(--color-muted)]">
+                          <span>Hitos propios</span>
+                          <strong class="tabular text-[var(--color-purple-bright)]">{formatEUR(month.projection_cents)}</strong>
+                        </p>
+                        <p class="flex items-center justify-between gap-2 text-[11px] text-[var(--color-muted)]">
+                          <span>Gastos</span>
+                          <strong class="tabular text-rose-300">{formatEUR(-month.expense_cents)}</strong>
+                        </p>
+                      </div>
+                    </div>
+
+                    <div class="relative min-h-0 w-full flex-1">
+                      <div class="absolute inset-x-0 top-0 flex items-end justify-center gap-1 pb-px" style={`height: ${projectRevenuePositiveShare}%`}>
+                        <div
+                          class="w-3 rounded-t-sm bg-emerald-400/90 transition-[height] duration-300 group-hover:bg-emerald-300"
+                          style={`height: ${month.income_cents && projectRevenuePositiveMax ? Math.max(4, (month.income_cents / projectRevenuePositiveMax) * 100) : 0}%`}
+                        ></div>
+                        <div
+                          class="w-3 rounded-t-sm bg-gradient-to-t from-purple-600 to-violet-300 transition-[height] duration-300 group-hover:from-purple-500 group-hover:to-violet-200"
+                          style={`height: ${month.projection_cents && projectRevenuePositiveMax ? Math.max(4, (month.projection_cents / projectRevenuePositiveMax) * 100) : 0}%`}
+                        ></div>
+                      </div>
+                      <div class="absolute inset-x-0 flex items-start justify-center pt-px" style={`top: ${projectRevenuePositiveShare}%; height: ${projectRevenueExpenseShare}%`}>
+                        <div
+                          class="w-3 rounded-b-sm bg-rose-500/90 transition-[height] duration-300 group-hover:bg-rose-400"
+                          style={`height: ${month.expense_cents && projectRevenueExpenseMax ? Math.max(4, (month.expense_cents / projectRevenueExpenseMax) * 100) : 0}%`}
+                        ></div>
+                      </div>
+                    </div>
+                    <div class="mt-2 flex h-8 flex-col items-center">
+                      <span class="text-[10px] font-medium uppercase {month.is_current ? 'text-[var(--color-purple-bright)]' : 'text-[var(--color-muted-dim)]'}">
+                        {month.label}
+                      </span>
+                      {#if month.is_current}
+                        <span class="mt-0.5 h-1 w-1 rounded-full bg-[var(--color-purple-bright)]"></span>
+                      {/if}
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          </div>
+        </div>
+      </Card>
 
       <div class="mt-4 grid gap-4 lg:grid-cols-3">
         <Card class="lg:col-span-2" lift={false}>
@@ -261,9 +542,14 @@
                 {@const progress = projectProgress(project.id)}
                 <a href="/proyectos/{project.uid}" class="block rounded-xl border border-[var(--color-border)] bg-black/20 p-3 transition hover:border-purple-400/35 hover:bg-purple-500/10">
                   <div class="flex items-start justify-between gap-3">
-                    <div class="min-w-0">
-                      <p class="truncate text-sm font-medium text-[var(--color-text)]">{project.name}</p>
-                      <p class="mt-0.5 text-[11px] text-[var(--color-muted-dim)]">{projectCustomerName(project.customer_id)}</p>
+                    <div class="flex min-w-0 items-center gap-2.5">
+                      {#if project.logo_data_url}
+                        <img src={project.logo_data_url} alt="" class="h-9 w-9 shrink-0 rounded-lg border border-white/10 object-cover" />
+                      {/if}
+                      <div class="min-w-0">
+                        <p class="truncate text-sm font-medium text-[var(--color-text)]">{project.name}</p>
+                        <p class="mt-0.5 text-[11px] text-[var(--color-muted-dim)]">{projectCustomerName(project)}</p>
+                      </div>
                     </div>
                     <span class="text-xs font-semibold text-[var(--color-purple-bright)]">{progress}%</span>
                   </div>
@@ -277,9 +563,14 @@
         </Card>
 
         <Card lift={false}>
-          <div class="mb-4 flex items-center justify-between">
+          <div class="mb-4 flex flex-wrap items-center justify-between gap-2">
             <h2 class="section-label !normal-case !tracking-wide !text-sm">Próximos vencimientos</h2>
-            <a href="/trabajo" class="text-xs text-radiant hover:underline">Ver trabajo</a>
+            <div class="flex items-center gap-2">
+              <Button variant="secondary" class="!px-3 !py-1.5 text-xs" disabled={whatsappDigestSending || whatsappDigestTasks.length === 0} onclick={sendUpcomingTasksByWhatsApp}>
+                {whatsappDigestSending ? "Enviando…" : "Enviar resumen por WhatsApp"}
+              </Button>
+              <a href="/trabajo" class="text-xs text-radiant hover:underline">Ver trabajo</a>
+            </div>
           </div>
           {#if upcomingDevTasks.length === 0}
             <p class="text-sm text-[var(--color-muted-dim)]">No hay tareas abiertas con fecha.</p>
@@ -289,7 +580,7 @@
                 <li class="rounded-xl border border-[var(--color-border)] bg-black/20 px-3 py-2.5">
                   <p class="truncate text-sm font-medium text-[var(--color-text)]">{task.title}</p>
                   <p class="mt-0.5 text-[11px] text-[var(--color-muted-dim)]">
-                    {task.due_date ? new Date(task.due_date).toLocaleDateString("es-ES") : ""}
+                    {taskDueDate(task) ? new Date(taskDueDate(task)!).toLocaleDateString("es-ES") : ""}
                   </p>
                 </li>
               {/each}
@@ -383,12 +674,19 @@
       accent="amber"
     />
   </div>
+  <Card class="mt-4" lift={false}>
+    <div class="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--color-border)] pb-3">
+      <div><h2 class="section-label !normal-case !tracking-wide !text-sm">Finanzas</h2><p class="mt-1 text-xs text-[var(--color-muted-dim)]">Últimos 30 días · ventas y movimientos de caja</p></div>
+      <a href="/caja" class="text-xs text-radiant hover:underline">Ver caja →</a>
+    </div>
+    <div class="mt-4 grid gap-4 sm:grid-cols-3"><div><p class="text-xs text-[var(--color-muted)]">Ingresos</p><p class="mt-1 text-2xl font-semibold text-emerald-300">{formatEUR(finance30d.income)}</p></div><div><p class="text-xs text-[var(--color-muted)]">Gastos</p><p class="mt-1 text-2xl font-semibold text-rose-300">{formatEUR(finance30d.expenses)}</p></div><div><p class="text-xs text-[var(--color-muted)]">Beneficio operativo</p><p class="mt-1 text-2xl font-semibold" class:text-emerald-300={finance30d.profit >= 0} class:text-rose-300={finance30d.profit < 0}>{formatEUR(finance30d.profit, { signed: true })}</p></div></div>
+  </Card>
 
   <div class="pulse-story mt-4 grid gap-4 lg:grid-cols-3" data-dashboard-health>
     <Card class="pulse-trend lg:col-span-2" lift={false}>
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 class="section-label !normal-case !tracking-wide !text-sm">Pulso de hoy</h2>
+          <h2 class="section-label !normal-case !tracking-wide !text-sm">Dashboard de hoy</h2>
           <p class="mt-1 text-sm text-[var(--color-muted)]">Ticket medio {formatEUR(health.average_ticket_cents)} · {deltaLabel(health.tickets_delta_percent)} en tickets</p>
         </div>
         <span class="text-xs text-[var(--color-muted-dim)]">Últimos 7 días</span>

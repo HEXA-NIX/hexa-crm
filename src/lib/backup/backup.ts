@@ -2,6 +2,7 @@
  * Versioned full-store backup / restore (browser localStorage path).
  * Pure helpers — no DOM side effects — for testable integrity.
  */
+import { sha256Hex as credentialSha256Hex } from "$lib/auth/pin";
 
 export const BACKUP_FORMAT = "hexa-crm-backup" as const;
 /** Pre-rename format still accepted on restore. */
@@ -27,11 +28,7 @@ function stableStringify(value: unknown): string {
 
 /** Browser-safe SHA-256 hex (Web Crypto). */
 export async function sha256Hex(text: string): Promise<string> {
-  const data = new TextEncoder().encode(text);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  return credentialSha256Hex(text);
 }
 
 export async function createBackupEnvelope(payload: unknown): Promise<BackupEnvelope> {

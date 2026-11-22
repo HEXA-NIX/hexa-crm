@@ -228,4 +228,33 @@ Implementar P0 como una épica “Abastecimiento y condición de inventario”, 
 5. Tests unitarios, API y flujo UI; build de Svelte + pruebas Rust/Tauri.
 ```
 
-La separación de ubicaciones, compras y unidades individuales queda diseñada desde ahora para que P0 no cree una deuda de modelo, pero se entrega en P1/P2 para mantener la primera experiencia rápida de tienda.
+231. La separación de ubicaciones, compras y unidades individuales queda diseñada desde ahora para que P0 no cree una deuda de modelo, pero se entrega en P1/P2 para mantener la primera experiencia rápida de tienda.
+
+## 10. Incremento P0 Implementado: Ciclo de Catálogo, Abastecimiento y Publicación
+
+**Fecha de implementación:** 2026-07-24  
+**Producto:** Hexa CRM (v0.2.1)  
+
+### 10.1 Resumen del cambio implementado
+
+El núcleo P0 del catálogo y ciclo de abastecimiento queda desplegado en los tres motores de persistencia (PostgreSQL, SQLite/Tauri, Browser Store) garantizando comportamiento *safe-by-default*:
+
+- **Nuevas altas:** Cualquier producto creado mediante UI o API nace en `publication_status = 'draft'`, `sales_policy = 'not_sellable'` y `supply_status = 'not_applicable'` (o `'negotiating'` en caso de dropshipping). No se muestra en la web pública ni en el TPV hasta su publicación explícita.
+- **Eje operativo de abastecimiento (`supply_status`):**
+  - Valores: `not_applicable` | `negotiating` | `ordered` | `in_transit` | `received` | `quality_hold`.
+  - **Bloqueo explícito:** Los artículos en estado `ordered`, `in_transit`, `negotiating` o `quality_hold` no pueden ser publicados ni vendidos como stock propio local, incluso si un payload de entrada intenta forzar `publication_status = 'published'`.
+  - **Transición a `received`:** Cambiar el estado a `received` (recibido en almacén) **no auto-publica** el producto; éste permanece en borrador (`draft`) hasta recibir existencias reales y una acción de publicación explícita por parte del operador.
+- **Invariantes del modelo:**
+  1. `published` exige una política comercial distinta de `not_sellable`.
+  2. `published` prohíbe estados de abastecimiento transitorios o en cuarentena (`ordered`, `in_transit`, `negotiating`, `quality_hold`).
+  3. `own_stock` exige existencias disponibles `stock > 0` para poder publicarse.
+  4. `dropship` exige proveedor aprobado (`supplier_source_status = 'approved'`) y fecha de verificación (`supplier_last_verified_at`).
+  5. `preorder` y `make_to_order` exigen fecha estimada de disponibilidad (`availability_eta`).
+- **Seguridad en ventas TPV:** Las modalidades `dropship`, `preorder` y `make_to_order` bloquean de forma segura el cobro directo en TPV local con mensaje explícito en español en lugar de descontar existencias inexistentes.
+- **Aislamiento multiempresa:** `create_inventory_movement` deriva estrictamente `company_id` de la sesión activa, ignorando cualquier `company_id` pasado en el payload.
+
+### 10.2 Backlog P1 (Próximo Incremento)
+
+1. Órdenes de compra (`purchase_orders`) y recepciones parciales/totales vinculadas a movimientos de stock.
+2. Relación N:M proveedor-producto (`supplier_products`) con tarifas, MOQs y plazos de entrega.
+3. Pedido automatizado a proveedor al vender líneas `dropship` o `make_to_order`.

@@ -1,29 +1,27 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { page } from "$app/stores";
+  import { goto } from "$app/navigation";
   import { api } from "$lib/api/client";
   import type {
-    FulfillmentMode,
     InventoryMovement,
     InventoryMovementType,
     InventoryReason,
     Product,
-    ProductCondition,
-    ProductInput,
     StockBalance,
     StockLocation,
     Supplier,
     Warehouse,
   } from "$lib/types";
   import { INVENTORY_REASON_LABELS } from "$lib/types";
-  import { formatEUR, parseEurosInput } from "$lib/money";
-  import { VAT_RATES, vatLabel, type VatRate } from "$lib/vat";
+  import { formatEUR } from "$lib/money";
   import Button from "$lib/components/Button.svelte";
   import Card from "$lib/components/Card.svelte";
   import KpiCard from "$lib/components/KpiCard.svelte";
   import Badge from "$lib/components/Badge.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import Input from "$lib/components/Input.svelte";
+  import DatePicker from "$lib/components/DatePicker.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Select from "$lib/components/Select.svelte";
   import { showToast } from "$lib/stores/ui";
@@ -36,12 +34,8 @@
   import { estimateDaysOfCover, qtySoldForProduct } from "$lib/inventory/stock-cover";
   import { countsInBusinessTotals } from "$lib/sales/cancel-sale";
   import { planReorderSuggestions } from "$lib/inventory/reorder";
-  import {
-    LEGACY_SUPPLIER,
-    NO_SUPPLIER,
-    productSupplierSelection,
-    supplierSnapshotForSelection,
-  } from "$lib/inventory/supplier-selection";
+  import SortableHeader from "$lib/components/SortableHeader.svelte";
+  import { sortedCopy, type SortDirection } from "$lib/list-sort";
 
   type TabType = "resumen" | "products" | "movements" | "locations" | "suppliers";
   let activeTab = $state<TabType>("resumen");
@@ -67,33 +61,9 @@
   let showReorder = $state(false);
   let reorderQty = $state<Record<number, number>>({});
 
-  // Product modal
-  let modalOpen = $state(false);
-  let editing = $state<Product | null>(null);
-  let form = $state({
-    sku: "",
-    name: "",
-    description: "",
-    category: "",
-    stock: "0",
-    min_stock: "5",
-    cost: "",
-    price: "",
-    vat_rate: "21" as string,
-    supplier_name: "",
-    supplier_contact: "",
-    supplier_email: "",
-    supplier_phone: "",
-    fulfillment_mode: "own_stock" as FulfillmentMode,
-    stock_location: "Almacén principal",
-    condition_code: "new" as ProductCondition,
-  });
-
   // Supplier modal
   let supplierModal = $state(false);
   let editingSupplier = $state<Supplier | null>(null);
-  let selectedSupplier = $state(NO_SUPPLIER);
-  let returnToProductAfterSupplier = $state(false);
   let supplierForm = $state({
     name: "",
     contact: "",
@@ -167,26 +137,7 @@
     { value: "other", label: "Otro motivo" },
   ];
 
-  const activeSuppliers = $derived(suppliers.filter((supplier) => supplier.active));
-  const selectedSupplierRecord = $derived(
-    activeSuppliers.find((supplier) => String(supplier.id) === selectedSupplier) ?? null,
-  );
 
-  const supplierOptions = $derived([
-    { value: NO_SUPPLIER, label: "Sin proveedor", hint: "El artículo se abastece sin un contacto asociado" },
-    ...activeSuppliers.map((supplier) => ({
-      value: String(supplier.id),
-      label: supplier.name,
-      hint: supplier.contact || supplier.email || supplier.phone || "Proveedor guardado",
-    })),
-    ...(selectedSupplier === LEGACY_SUPPLIER
-      ? [{
-          value: LEGACY_SUPPLIER,
-          label: `${form.supplier_name || "Proveedor anterior"} · histórico`,
-          hint: "No está en el directorio actual; elige otro para sustituirlo",
-        }]
-      : []),
-  ]);
 
   const productOptions = $derived([
     { value: "", label: "Seleccionar producto…" },
@@ -238,6 +189,88 @@
     })),
   ]);
 
+  let publicationFilter = $state("");
+
+  const publicationStatusOptions = [
+    { value: "draft", label: "Borrador" },
+    { value: "ready_for_review", label: "Listo para revisión" },
+    { value: "published", label: "Publicado" },
+    { value: "paused", label: "Pausado" },
+    { value: "archived", label: "Archivado" },
+  ];
+
+  const publicationFilterOptions = [
+    { value: "", label: "Todos los estados de publicación" },
+    ...publicationStatusOptions,
+  ];
+
+  const salesPolicyOptions = [
+    { value: "not_sellable", label: "No vendible (interno)" },
+    { value: "own_stock", label: "Stock propio (TPV/Web)" },
+    { value: "dropship", label: "Dropshipping" },
+    { value: "preorder", label: "Preventa" },
+    { value: "make_to_order", label: "Bajo pedido" },
+  ];
+
+  const supplierSourceStatusOptions = [
+    { value: "not_applicable", label: "No aplica" },
+    { value: "negotiating", label: "En negociación" },
+    { value: "approved", label: "Aprobado" },
+    { value: "suspended", label: "Suspendido" },
+  ];
+
+  let supplyStatusFilter = $state("");
+  type ProductSortKey = "product" | "category" | "supplier" | "supply" | "publication" | "status" | "stock" | "cover" | "price" | "vat" | "cost";
+  let productSortKey = $state<ProductSortKey>("product");
+  let productSortDirection = $state<SortDirection>("asc");
+  let movementSortKey = $state<"date" | "product" | "type" | "direction" | "quantity" | "reason" | "user" | "notes">("date");
+  let movementSortDirection = $state<SortDirection>("desc");
+
+  const supplyStatusOptions = [
+    { value: "not_applicable", label: "No aplica (Estándar/Local)" },
+    { value: "negotiating", label: "En negociación" },
+    { value: "ordered", label: "Pedido confirmado" },
+    { value: "in_transit", label: "En tránsito" },
+    { value: "received", label: "Recibido en almacén" },
+    { value: "quality_hold", label: "Cuarentena / Calidad" },
+  ];
+
+  const supplyStatusFilterOptions = [
+    { value: "", label: "Todos los estados de abastecimiento" },
+    ...supplyStatusOptions,
+  ];
+
+  function supplyBadge(status?: string) {
+    if (status === "ordered") return { label: "Pedido confirmado", tone: "warn" as const };
+    if (status === "in_transit") return { label: "En tránsito", tone: "warn" as const };
+    if (status === "received") return { label: "Recibido", tone: "ok" as const };
+    if (status === "quality_hold") return { label: "Cuarentena", tone: "danger" as const };
+    if (status === "negotiating") return { label: "En negociación", tone: "neutral" as const };
+    return null;
+  }
+
+  function salesPolicyLabel(policy?: string) {
+    return salesPolicyOptions.find((i) => i.value === policy)?.label ?? "Stock propio";
+  }
+
+  function publicationBadge(status?: string, policy?: string) {
+    const s = status ?? "published";
+    const p = policy ?? "own_stock";
+    if (s === "published") {
+      return { label: `Publicado · ${salesPolicyLabel(p)}`, tone: "ok" as const };
+    }
+    if (s === "draft") {
+      return { label: "Borrador", tone: "neutral" as const };
+    }
+    if (s === "ready_for_review") {
+      return { label: "En revisión", tone: "warn" as const };
+    }
+    if (s === "paused") {
+      return { label: "Pausado", tone: "warn" as const };
+    }
+    return { label: "Archivado", tone: "danger" as const };
+  }
+
   const categories = $derived(
     [...new Set(products.map((p) => p.category).filter(Boolean))].sort((a, b) =>
       a.localeCompare(b, "es")
@@ -258,9 +291,25 @@
       const matchSupply = !supplyFilter || (p.fulfillment_mode ?? "own_stock") === supplyFilter;
       const normalizedCondition = p.condition_code === "preowned" ? "used" : (p.condition_code ?? "used");
       const matchCondition = !conditionFilter || normalizedCondition === conditionFilter;
-      return matchQ && matchCat && matchSupply && matchCondition;
+      const matchPub = !publicationFilter || (p.publication_status ?? "published") === publicationFilter;
+      const matchSupplyStatus = !supplyStatusFilter || (p.supply_status ?? "not_applicable") === supplyStatusFilter;
+      return matchQ && matchCat && matchSupply && matchCondition && matchPub && matchSupplyStatus;
     })
   );
+  const displayedProducts = $derived(sortedCopy(filteredProducts, (product) => {
+    if (productSortKey === "product") return product.name;
+    if (productSortKey === "category") return product.category;
+    if (productSortKey === "supplier") return product.supplier_name;
+    if (productSortKey === "supply") return product.fulfillment_mode;
+    if (productSortKey === "publication") return product.publication_status;
+    if (productSortKey === "status") return product.supply_status;
+    if (productSortKey === "stock") return product.stock;
+    if (productSortKey === "cover") return coverFor(product) ?? Number.POSITIVE_INFINITY;
+    if (productSortKey === "price") return product.price_cents;
+    if (productSortKey === "vat") return product.vat_rate;
+    return product.cost_cents;
+  }, productSortDirection));
+  function sortProducts(key: ProductSortKey) { if (productSortKey === key) productSortDirection = productSortDirection === "asc" ? "desc" : "asc"; else { productSortKey = key; productSortDirection = "asc"; } }
 
   const HORIZON_DAYS = 14;
   const reorderSuggestions = $derived(planReorderSuggestions(products, sold14d, HORIZON_DAYS));
@@ -306,6 +355,8 @@
       return matchQ && matchType && matchProduct && matchLoc && matchFrom && matchTo;
     })
   );
+  const displayedInventoryMovements = $derived(sortedCopy(filteredMovements, (movement) => movementSortKey === "date" ? movement.created_at : movementSortKey === "product" ? movement.product_name : movementSortKey === "type" ? movement.movement_type : movementSortKey === "direction" ? movementDirectionText(movement) : movementSortKey === "quantity" ? movement.quantity : movementSortKey === "reason" ? movement.reason : movementSortKey === "notes" ? movement.notes : movement.created_by_name, movementSortDirection));
+  function sortInventoryMovements(key: typeof movementSortKey) { if (movementSortKey === key) movementSortDirection = movementSortDirection === "asc" ? "desc" : "asc"; else { movementSortKey = key; movementSortDirection = key === "date" ? "desc" : "asc"; } }
 
   function fulfillmentLabel(mode?: string) {
     return fulfillmentOptions.find((item) => item.value === mode)?.label ?? "Almacén propio";
@@ -478,129 +529,27 @@
 
   function closeSupplierModal() {
     supplierModal = false;
-    if (returnToProductAfterSupplier) {
-      returnToProductAfterSupplier = false;
-      modalOpen = true;
-    }
-  }
-
-  function openSupplierFromProduct() {
-    modalOpen = false;
-    returnToProductAfterSupplier = true;
-    openSupplier();
-  }
-
-  function chooseSupplier(value: string) {
-    selectedSupplier = value;
-    const snapshot = supplierSnapshotForSelection(value, suppliers, form);
-    form.supplier_name = snapshot.supplier_name ?? "";
-    form.supplier_contact = snapshot.supplier_contact ?? "";
-    form.supplier_email = snapshot.supplier_email ?? "";
-    form.supplier_phone = snapshot.supplier_phone ?? "";
   }
 
   async function saveSupplier() {
     if (!supplierForm.name.trim()) return showToast("El nombre del proveedor es obligatorio", "err");
     try {
-      const saved = await api.upsertSupplier({ id: editingSupplier?.id, ...supplierForm });
-      const shouldReturnToProduct = returnToProductAfterSupplier;
+      await api.upsertSupplier({ id: editingSupplier?.id, ...supplierForm });
       supplierModal = false;
-      returnToProductAfterSupplier = false;
       showToast(editingSupplier ? "Proveedor actualizado" : "Proveedor creado con éxito");
       await load();
-      if (shouldReturnToProduct) {
-        chooseSupplier(String(saved.id));
-        modalOpen = true;
-      }
     } catch (e) {
       showToast(e instanceof Error ? e.message : "Error al guardar proveedor", "err");
     }
   }
 
-  // Product functions
+  // Product navigation
   function openCreate() {
-    editing = null;
-    form = {
-      sku: "",
-      name: "",
-      description: "",
-      category: "",
-      stock: "0",
-      min_stock: "5",
-      cost: "",
-      price: "",
-      vat_rate: "21",
-      supplier_name: "",
-      supplier_contact: "",
-      supplier_email: "",
-      supplier_phone: "",
-      fulfillment_mode: "own_stock",
-      stock_location: "Almacén principal",
-      condition_code: "new",
-    };
-    selectedSupplier = NO_SUPPLIER;
-    modalOpen = true;
+    goto("/inventario/nuevo");
   }
 
   function openEdit(p: Product) {
-    editing = p;
-    form = {
-      sku: p.sku,
-      name: p.name,
-      description: p.description,
-      category: p.category || "",
-      stock: String(p.stock),
-      min_stock: String(p.min_stock),
-      cost: (p.cost_cents / 100).toFixed(2),
-      price: (p.price_cents / 100).toFixed(2),
-      vat_rate: String(p.vat_rate),
-      supplier_name: p.supplier_name ?? "",
-      supplier_contact: p.supplier_contact ?? "",
-      supplier_email: p.supplier_email ?? "",
-      supplier_phone: p.supplier_phone ?? "",
-      fulfillment_mode: p.fulfillment_mode ?? "own_stock",
-      stock_location: p.stock_location ?? "Almacén principal",
-      condition_code: p.condition_code === "preowned" ? "used" : (p.condition_code ?? "used"),
-    };
-    selectedSupplier = productSupplierSelection(p, suppliers);
-    modalOpen = true;
-  }
-
-  async function saveProduct() {
-    const cost = parseEurosInput(form.cost);
-    const price = parseEurosInput(form.price);
-    if (cost === null || price === null) {
-      showToast("Precio o coste no válidos", "err");
-      return;
-    }
-    const input: ProductInput = {
-      id: editing?.id,
-      sku: form.sku.trim(),
-      name: form.name.trim(),
-      description: form.description,
-      category: form.category.trim(),
-      stock: Number(form.stock) || 0,
-      min_stock: Number(form.min_stock) || 0,
-      cost_cents: cost,
-      price_cents: price,
-      vat_rate: Number(form.vat_rate) as VatRate,
-      supplier_name: form.supplier_name.trim(),
-      supplier_contact: form.supplier_contact.trim(),
-      supplier_email: form.supplier_email.trim(),
-      supplier_phone: form.supplier_phone.trim(),
-      fulfillment_mode: form.fulfillment_mode,
-      stock_location: form.stock_location.trim(),
-      condition_code: form.condition_code,
-      active: true,
-    };
-    try {
-      await api.upsertProduct(input);
-      modalOpen = false;
-      showToast(editing ? "Producto actualizado" : "Producto creado correctamente");
-      await load();
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : "Error al guardar producto", "err");
-    }
+    goto(`/inventario/${p.id}`);
   }
 
   // Reorder export
@@ -1105,6 +1054,16 @@
           bind:value={conditionFilter}
           options={[{ value: "", label: "Todo estado" }, ...conditionOptions.filter((item) => item.value !== "preowned")]}
         />
+        <Select
+          class="w-full max-w-[13rem]"
+          bind:value={publicationFilter}
+          options={publicationFilterOptions}
+        />
+        <Select
+          class="w-full max-w-[14rem]"
+          bind:value={supplyStatusFilter}
+          options={supplyStatusFilterOptions}
+        />
         <div class="ml-auto flex flex-wrap gap-2">
           <Button variant="secondary" onclick={downloadTemplate} disabled={importing}>
             Plantilla CSV
@@ -1191,22 +1150,25 @@
             <table class="w-full min-w-[44rem] text-left text-sm">
               <thead class="border-b border-[var(--color-border-soft)] text-xs uppercase tracking-wide text-[var(--color-muted-dim)]">
                 <tr>
-                  <th class="px-4 py-3 font-medium">Producto</th>
-                  <th class="px-4 py-3 font-medium">Categoría</th>
-                  <th class="px-4 py-3 font-medium">Proveedor / contacto</th>
-                  <th class="px-4 py-3 font-medium">Abastecimiento</th>
-                  <th class="px-4 py-3 font-medium">Estado</th>
-                  <th class="px-4 py-3 font-medium">Stock</th>
-                  <th class="px-4 py-3 font-medium">Cobertura</th>
-                  <th class="px-4 py-3 font-medium">PVP</th>
-                  <th class="px-4 py-3 font-medium">IVA</th>
-                  <th class="px-4 py-3 font-medium">Coste</th>
+                  <SortableHeader label="Producto" active={productSortKey === "product"} direction={productSortDirection} onclick={() => sortProducts("product")} />
+                  <SortableHeader label="Categoría" active={productSortKey === "category"} direction={productSortDirection} onclick={() => sortProducts("category")} />
+                  <SortableHeader label="Proveedor / contacto" active={productSortKey === "supplier"} direction={productSortDirection} onclick={() => sortProducts("supplier")} />
+                  <SortableHeader label="Abastecimiento" active={productSortKey === "supply"} direction={productSortDirection} onclick={() => sortProducts("supply")} />
+                  <SortableHeader label="Publicación" active={productSortKey === "publication"} direction={productSortDirection} onclick={() => sortProducts("publication")} />
+                  <SortableHeader label="Estado" active={productSortKey === "status"} direction={productSortDirection} onclick={() => sortProducts("status")} />
+                  <SortableHeader label="Stock" active={productSortKey === "stock"} direction={productSortDirection} onclick={() => sortProducts("stock")} />
+                  <SortableHeader label="Cobertura" active={productSortKey === "cover"} direction={productSortDirection} onclick={() => sortProducts("cover")} />
+                  <SortableHeader label="PVP" active={productSortKey === "price"} direction={productSortDirection} onclick={() => sortProducts("price")} />
+                  <SortableHeader label="IVA" active={productSortKey === "vat"} direction={productSortDirection} onclick={() => sortProducts("vat")} />
+                  <SortableHeader label="Coste" active={productSortKey === "cost"} direction={productSortDirection} onclick={() => sortProducts("cost")} />
                   <th class="px-4 py-3 font-medium text-right">Acciones</th>
                 </tr>
               </thead>
               <tbody>
-                {#each filteredProducts as p (p.id)}
+                {#each displayedProducts as p (p.id)}
                   {@const cover = coverFor(p)}
+                  {@const pubInfo = publicationBadge(p.publication_status, p.sales_policy)}
+                  {@const supInfo = supplyBadge(p.supply_status)}
                   <tr class="border-b border-[var(--color-border-soft)] transition hover:bg-[var(--color-purple-mist)]">
                     <td class="px-4 py-3">
                       <p class="font-medium text-[var(--color-text)]">{p.name}</p>
@@ -1224,6 +1186,14 @@
                       {/if}
                     </td>
                     <td class="px-4 py-3 text-xs text-[var(--color-muted)]">{fulfillmentLabel(p.fulfillment_mode)}</td>
+                    <td class="px-4 py-3">
+                      <div class="flex flex-col items-start gap-1">
+                        <Badge tone={pubInfo.tone}>{pubInfo.label}</Badge>
+                        {#if supInfo}
+                          <Badge tone={supInfo.tone}>{supInfo.label}</Badge>
+                        {/if}
+                      </div>
+                    </td>
                     <td class="px-4 py-3">
                       <Badge tone={p.condition_code === "new" ? "ok" : p.condition_code === "for_parts" ? "danger" : "warn"}>
                         {conditionLabel(p.condition_code)}
@@ -1302,9 +1272,9 @@
         />
         <div class="flex items-center gap-1.5 text-xs text-[var(--color-muted)]">
           <span>Desde</span>
-          <input type="date" bind:value={movementFromDate} class="field !py-1 !px-2 text-xs" />
+          <DatePicker bind:value={movementFromDate} class="w-40" ariaLabel="Movimientos desde" />
           <span>Hasta</span>
-          <input type="date" bind:value={movementToDate} class="field !py-1 !px-2 text-xs" />
+          <DatePicker bind:value={movementToDate} class="w-40" ariaLabel="Movimientos hasta" />
         </div>
         <div class="ml-auto flex gap-2">
           {#if movementQuery || movementTypeFilter || movementProductFilter || movementLocationFilter || movementFromDate || movementToDate}
@@ -1326,19 +1296,21 @@
             <table class="w-full min-w-[52rem] text-left text-sm">
               <thead class="border-b border-[var(--color-border-soft)] text-xs uppercase tracking-wide text-[var(--color-muted-dim)]">
                 <tr>
-                  <th class="px-4 py-3 font-medium">ID / Fecha y Hora</th>
-                  <th class="px-4 py-3 font-medium">Producto</th>
-                  <th class="px-4 py-3 font-medium">Tipo Movimiento</th>
+                  <SortableHeader label="ID / Fecha y Hora" active={movementSortKey === "date"} direction={movementSortDirection} onclick={() => sortInventoryMovements("date")} />
+                  <SortableHeader label="Producto" active={movementSortKey === "product"} direction={movementSortDirection} onclick={() => sortInventoryMovements("product")} />
+                  <SortableHeader label="Tipo Movimiento" active={movementSortKey === "type"} direction={movementSortDirection} onclick={() => sortInventoryMovements("type")} />
+                  <SortableHeader label="Dirección (Origen ➔ Destino)" active={movementSortKey === "direction"} direction={movementSortDirection} onclick={() => sortInventoryMovements("direction")} />
                   <th class="px-4 py-3 font-medium">Dirección (Origen ➔ Destino)</th>
-                  <th class="px-4 py-3 font-medium tabular">Cantidad</th>
-                  <th class="px-4 py-3 font-medium">Motivo</th>
-                  <th class="px-4 py-3 font-medium">Usuario / Actor</th>
+                  <SortableHeader label="Cantidad" active={movementSortKey === "quantity"} direction={movementSortDirection} onclick={() => sortInventoryMovements("quantity")} />
+                  <SortableHeader label="Motivo" active={movementSortKey === "reason"} direction={movementSortDirection} onclick={() => sortInventoryMovements("reason")} />
+                  <SortableHeader label="Usuario / Actor" active={movementSortKey === "user"} direction={movementSortDirection} onclick={() => sortInventoryMovements("user")} />
+                  <SortableHeader label="Notas / Ref" active={movementSortKey === "notes"} direction={movementSortDirection} onclick={() => sortInventoryMovements("notes")} />
                   <th class="px-4 py-3 font-medium">Notas / Ref</th>
                   <th class="px-4 py-3 font-medium text-right">Acción</th>
                 </tr>
               </thead>
               <tbody>
-                {#each filteredMovements as m (m.id)}
+                {#each displayedInventoryMovements as m (m.id)}
                   {@const badge = movementBadgeInfo(m)}
                   {@const isAlreadyReversed = m.is_reversal || m.movement_type === "reversal" || reversedMovementSet.has(m.id)}
                   <tr class="border-b border-[var(--color-border-soft)] transition hover:bg-[var(--color-purple-mist)]">
@@ -1547,79 +1519,7 @@
   {/if}
 </section>
 
-<!-- MODAL: Crear/Editar Producto -->
-<Modal open={modalOpen} title={editing ? "Editar producto" : "Nuevo producto"} onclose={() => (modalOpen = false)}>
-  <form
-    class="grid gap-3"
-    onsubmit={(e) => {
-      e.preventDefault();
-      saveProduct();
-    }}
-  >
-    <div class="grid gap-3 sm:grid-cols-2">
-      <Input label="SKU" bind:value={form.sku} required />
-      <Select
-        label="IVA"
-        bind:value={form.vat_rate}
-        options={VAT_RATES.map((r) => ({ value: String(r), label: vatLabel(r) }))}
-      />
-    </div>
-    <Input label="Nombre" bind:value={form.name} required />
-    <Input label="Categoría" bind:value={form.category} placeholder="Alimentación, Tecnología…" />
-    <Input label="Descripción" bind:value={form.description} />
-    <div class="grid gap-3 sm:grid-cols-2">
-      <Input label="PVP (€, IVA incl.)" bind:value={form.price} required />
-      <Input label="Coste (€)" bind:value={form.cost} required />
-    </div>
-    <div class="grid gap-3 sm:grid-cols-2">
-      <Input label="Stock" type="number" bind:value={form.stock} />
-      <Input label="Stock mínimo" type="number" bind:value={form.min_stock} />
-    </div>
-    <div class="mt-2 border-t border-[var(--color-border-soft)] pt-3">
-      <p class="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted-dim)]">Abastecimiento y estado</p>
-      <div class="grid gap-3 sm:grid-cols-2">
-        <Select label="Cómo se sirve" bind:value={form.fulfillment_mode} options={fulfillmentOptions} />
-        <Select label="Condición" bind:value={form.condition_code} options={conditionOptions.filter((item) => item.value !== "preowned")} />
-        <div class="grid gap-2 sm:col-span-2">
-          <div class="flex flex-col items-stretch gap-2 sm:flex-row sm:items-end">
-            <Select
-              class="min-w-0 flex-1"
-              label="Proveedor guardado"
-              value={selectedSupplier}
-              options={supplierOptions}
-              onvaluechange={chooseSupplier}
-            />
-            <Button type="button" variant="secondary" class="w-full shrink-0 sm:w-auto" onclick={openSupplierFromProduct}>
-              + Nuevo proveedor
-            </Button>
-          </div>
-          {#if selectedSupplierRecord}
-            <div class="rounded-xl border border-[var(--color-border-soft)] bg-white/[0.025] px-3 py-2.5 text-xs text-[var(--color-muted)]">
-              <p class="font-medium text-[var(--color-text)]">{selectedSupplierRecord.name}</p>
-              <p class="mt-1">
-                {[selectedSupplierRecord.contact, selectedSupplierRecord.email, selectedSupplierRecord.phone].filter(Boolean).join(" · ") || "Sin datos de contacto"}
-              </p>
-            </div>
-          {:else if selectedSupplier === LEGACY_SUPPLIER}
-            <p class="rounded-xl border border-amber-400/20 bg-amber-400/[0.06] px-3 py-2 text-xs text-amber-100">
-              Este artículo conserva un proveedor histórico que no está en el directorio. Puedes mantenerlo o elegir uno de la lista.
-            </p>
-          {:else if activeSuppliers.length === 0}
-            <p class="text-xs text-[var(--color-muted-dim)]">Aún no hay proveedores guardados. Créalo aquí y volverás al artículo sin perder los datos.</p>
-          {/if}
-        </div>
-        <Input label="Ubicación / origen" bind:value={form.stock_location} placeholder="Almacén principal, proveedor…" />
-      </div>
-      {#if form.fulfillment_mode === "supplier_dropship"}
-        <p class="mt-2 text-xs text-amber-200">Dropshipping: el proveedor envía al cliente; no uses este dato como stock propio disponible.</p>
-      {/if}
-    </div>
-    <div class="mt-2 flex justify-end gap-2">
-      <Button variant="ghost" type="button" onclick={() => (modalOpen = false)}>Cancelar</Button>
-      <Button type="submit">Guardar</Button>
-    </div>
-  </form>
-</Modal>
+
 
 <!-- MODAL: Crear/Editar Proveedor -->
 <Modal open={supplierModal} title={editingSupplier ? "Editar proveedor" : "Nuevo proveedor"} onclose={closeSupplierModal}>

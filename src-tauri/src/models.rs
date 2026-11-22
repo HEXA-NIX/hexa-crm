@@ -19,6 +19,12 @@ pub struct Product {
     pub fulfillment_mode: String,
     pub stock_location: String,
     pub condition_code: String,
+    pub publication_status: Option<String>,
+    pub sales_policy: Option<String>,
+    pub supplier_source_status: Option<String>,
+    pub supply_status: Option<String>,
+    pub supplier_last_verified_at: Option<String>,
+    pub availability_eta: Option<String>,
     pub active: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -43,6 +49,12 @@ pub struct ProductInput {
     pub fulfillment_mode: Option<String>,
     pub stock_location: Option<String>,
     pub condition_code: Option<String>,
+    pub publication_status: Option<String>,
+    pub sales_policy: Option<String>,
+    pub supplier_source_status: Option<String>,
+    pub supply_status: Option<String>,
+    pub supplier_last_verified_at: Option<String>,
+    pub availability_eta: Option<String>,
     pub active: Option<bool>,
 }
 
@@ -172,6 +184,7 @@ pub struct Settings {
     pub default_vat: i32,
     pub idle_timeout_minutes: i32,
     pub last_backup_at: Option<String>,
+    pub monthly_economic_goals: std::collections::HashMap<String, i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,6 +211,8 @@ pub struct AuthUser {
     pub id: i64,
     pub username: String,
     pub display_name: String,
+    pub phone: String,
+    pub avatar_data_url: String,
     pub role: String,
     pub active: bool,
     pub created_at: String,
@@ -210,6 +225,8 @@ pub struct UserInput {
     pub id: Option<i64>,
     pub username: String,
     pub display_name: String,
+    pub phone: Option<String>,
+    pub avatar_data_url: Option<String>,
     pub role: String,
     pub pin: Option<String>,
     pub active: Option<bool>,

@@ -61,6 +61,7 @@ html[data-theme="light"] {
   --color-purple-glow: rgba(109, 40, 217, 0.25);
   --color-purple-soft: rgba(109, 40, 217, 0.12);
   --color-purple-mist: rgba(109, 40, 217, 0.07);
+  --color-primary-contrast: #ffffff;
 }
 
 html[data-theme="light"] body {
@@ -142,6 +143,98 @@ html[data-theme="light"] .text-radiant-bright,
 html[data-theme="light"] .section-label {
   text-shadow: none;
 }
+
+/* Utility colours in the original dark UI are intentionally pale. In the
+   light theme their darker counterparts keep alerts, totals and links legible. */
+html[data-theme="light"] [class~="text-purple-100"],
+html[data-theme="light"] [class~="text-purple-200"],
+html[data-theme="light"] [class~="text-purple-300"],
+html[data-theme="light"] [class*="text-purple-1"],
+html[data-theme="light"] [class*="text-purple-2"],
+html[data-theme="light"] [class*="text-purple-3"],
+html[data-theme="light"] [class*="text-violet-1"],
+html[data-theme="light"] [class*="text-violet-2"],
+html[data-theme="light"] [class*="text-violet-3"] { color: #5b21b6 !important; }
+html[data-theme="light"] [class~="text-emerald-100"],
+html[data-theme="light"] [class~="text-emerald-200"],
+html[data-theme="light"] [class~="text-emerald-300"],
+html[data-theme="light"] [class*="text-emerald-1"],
+html[data-theme="light"] [class*="text-emerald-2"],
+html[data-theme="light"] [class*="text-emerald-3"] { color: #047857 !important; }
+html[data-theme="light"] [class~="text-rose-100"],
+html[data-theme="light"] [class~="text-rose-200"],
+html[data-theme="light"] [class~="text-rose-300"],
+html[data-theme="light"] [class*="text-rose-1"],
+html[data-theme="light"] [class*="text-rose-2"],
+html[data-theme="light"] [class*="text-rose-3"] { color: #be123c !important; }
+html[data-theme="light"] [class~="text-amber-100"],
+html[data-theme="light"] [class~="text-amber-200"],
+html[data-theme="light"] [class~="text-amber-300"],
+html[data-theme="light"] [class*="text-amber-1"],
+html[data-theme="light"] [class*="text-amber-2"],
+html[data-theme="light"] [class*="text-amber-3"] { color: #92400e !important; }
+html[data-theme="light"] [class~="text-cyan-100"],
+html[data-theme="light"] [class~="text-cyan-200"],
+html[data-theme="light"] [class~="text-cyan-300"],
+html[data-theme="light"] [class~="text-sky-100"],
+html[data-theme="light"] [class~="text-sky-200"],
+html[data-theme="light"] [class*="text-cyan-1"],
+html[data-theme="light"] [class*="text-cyan-2"],
+html[data-theme="light"] [class*="text-cyan-3"],
+html[data-theme="light"] [class*="text-sky-1"],
+html[data-theme="light"] [class*="text-sky-2"] { color: #0369a1 !important; }
+html[data-theme="light"] [class~="text-slate-400"],
+html[data-theme="light"] [class~="text-slate-500"] { color: var(--color-muted) !important; }
+
+html[data-theme="light"] [class~="bg-white/5"],
+html[data-theme="light"] [class~="bg-white/10"],
+html[data-theme="light"] [class~="bg-white/[0.018]"],
+html[data-theme="light"] [class~="bg-white/[0.025]"],
+html[data-theme="light"] [class~="bg-white/[0.03]"],
+html[data-theme="light"] [class~="bg-white/[0.04]"],
+html[data-theme="light"] [class~="bg-white/[0.05]"] {
+  background-color: rgba(76, 29, 149, 0.055) !important;
+}
+
+html[data-theme="light"] .modal-editorial > .sticky,
+html[data-theme="light"] .ai-panel-editorial > header {
+  background: rgba(250, 248, 253, 0.96) !important;
+}
+
+html[data-theme="light"] .button-primary {
+  color: #ffffff !important;
+}
+
+html[data-theme="light"] .workspace-tabs,
+html[data-theme="light"] .sales-switcher,
+html[data-theme="light"] [data-ajustes-shell] > nav {
+  background: rgba(255, 255, 255, 0.82) !important;
+}
+
+html[data-theme="light"] .workspace-toolbar,
+html[data-theme="light"] .workspace-page .crm-card,
+html[data-theme="light"] .pulse-page .crm-card,
+html[data-theme="light"] .sales-page .crm-card,
+html[data-theme="light"] .pulse-trend,
+html[data-theme="light"] .pulse-ai-note,
+html[data-theme="light"] .cart-line,
+html[data-theme="light"] .cart-totals,
+html[data-theme="light"] .cash-page [data-daily-close],
+html[data-theme="light"] .empty-editorial {
+  background: rgba(255, 255, 255, 0.82) !important;
+  box-shadow: 0 12px 34px rgba(57, 32, 91, 0.08);
+}
+
+html[data-theme="light"] .ai-launcher {
+  background: linear-gradient(135deg, #ffffff, #eee8f7);
+  box-shadow: 0 14px 34px rgba(57, 32, 91, 0.2);
+}
+
+html[data-theme="light"] .ai-launcher-orb {
+  background: radial-gradient(circle at 34% 28%, #ffffff, #d8c7ef 55%, #b99cde);
+}
+
+html[data-theme="light"] .ai-launcher-status { border-color: #ffffff; }
 
 body {
   margin: 0;
@@ -456,7 +549,7 @@ textarea {
 }
 
 .header-company-select .select-trigger {
-  min-height: 1.8rem;
+  min-height: 2.55rem;
   padding: 0.12rem 0.55rem 0.12rem 0;
   border: 0;
   border-radius: 0;
@@ -468,8 +561,15 @@ textarea {
 .header-company-select .select-menu {
   right: -0.7rem;
   left: -0.7rem;
-  min-width: 13rem;
-  border-radius: 0.3rem;
+  min-width: 17rem;
+  border-radius: 0.7rem;
+  padding: 0.35rem;
+}
+
+.header-company-select .select-option {
+  min-height: 3.7rem;
+  border-radius: 0.55rem;
+  padding: 0.55rem 0.65rem;
 }
 
 .app-header-company-static {
@@ -903,6 +1003,28 @@ html[data-theme="light"] .app-header-icon-button {
   background: rgba(192, 132, 252, 0.4);
 }
 
+/* Native date controls must remain legible in both themes. Chromium paints
+   the calendar glyph as an image, so its contrast cannot inherit currentColor. */
+html[data-theme="dark"] input:is([type="date"], [type="datetime-local"], [type="month"], [type="time"]) {
+  color-scheme: dark;
+}
+html[data-theme="light"] input:is([type="date"], [type="datetime-local"], [type="month"], [type="time"]) {
+  color-scheme: light;
+}
+html[data-theme="dark"] input:is([type="date"], [type="datetime-local"], [type="month"], [type="time"])::-webkit-calendar-picker-indicator {
+  filter: invert(1) brightness(1.35);
+  opacity: .82;
+  cursor: pointer;
+}
+html[data-theme="light"] input:is([type="date"], [type="datetime-local"], [type="month"], [type="time"])::-webkit-calendar-picker-indicator {
+  filter: none;
+  opacity: .68;
+  cursor: pointer;
+}
+input:is([type="date"], [type="datetime-local"], [type="month"], [type="time"])::-webkit-calendar-picker-indicator:hover {
+  opacity: 1;
+}
+
 :focus-visible {
   outline: 2px solid rgba(192, 132, 252, 0.65);
   outline-offset: 2px;
@@ -996,6 +1118,13 @@ html[data-theme="light"] .app-header-icon-button {
   box-shadow:
     0 0 0 3px rgba(168, 85, 247, 0.14),
     0 0 24px rgba(168, 85, 247, 0.12);
+}
+
+.company-logo-frame {
+  border: 1px solid rgba(192, 132, 252, 0.72);
+  background: linear-gradient(145deg, rgba(35, 20, 54, 0.98), rgba(11, 9, 17, 0.98));
+  padding: 0;
+  box-shadow: 0 0 14px rgba(168, 85, 247, 0.2);
 }
 
 .select-menu {

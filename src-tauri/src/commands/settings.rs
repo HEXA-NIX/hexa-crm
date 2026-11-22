@@ -43,6 +43,12 @@ pub fn settings_from_conn(conn: &rusqlite::Connection) -> Settings {
             let value = get_setting(conn, "last_backup_at", "");
             (!value.is_empty()).then_some(value)
         },
+        monthly_economic_goals: serde_json::from_str(&get_setting(
+            conn,
+            "monthly_economic_goals",
+            "{}",
+        ))
+        .unwrap_or_default(),
     }
 }
 
@@ -104,6 +110,18 @@ pub fn update_settings(
                     "El bloqueo automático debe estar entre 0 y 480 minutos".to_string()
                 })?;
             set_setting(&conn, "idle_timeout_minutes", &minutes.to_string())?;
+        }
+        if let Some(v) = partial.get("monthly_economic_goals") {
+            let goals = v.as_object().ok_or_else(|| {
+                "Los objetivos económicos mensuales no son válidos".to_string()
+            })?;
+            if goals
+                .values()
+                .any(|goal| goal.as_i64().map_or(true, |amount| amount < 0))
+            {
+                return Err("Los objetivos económicos deben ser importes positivos".into());
+            }
+            set_setting(&conn, "monthly_economic_goals", &v.to_string())?;
         }
     }
     get_settings(db, token)

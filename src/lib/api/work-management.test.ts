@@ -91,6 +91,15 @@ describe("Trabajo Backend & API Tests", () => {
       );
       expect(item.completed_at).toBeNull();
 
+      await expect(browserApi.upsertWorkItem(
+        { id: item.id, title: "Revisar stock", status: "done" },
+        adminToken,
+      )).rejects.toThrow(/Validación/);
+      await browserApi.upsertWorkItem(
+        { id: item.id, title: "Revisar stock", status: "validation" },
+        adminToken,
+      );
+
       const doneItem = await browserApi.upsertWorkItem(
         { id: item.id, title: "Revisar stock", status: "done" },
         adminToken
@@ -102,6 +111,186 @@ describe("Trabajo Backend & API Tests", () => {
         adminToken
       );
       expect(reopenedItem.completed_at).toBeNull();
+    });
+
+    it("derives the parent status from its subtasks", async () => {
+      const parent = await browserApi.upsertWorkItem(
+        { title: "Preparar lanzamiento" },
+        adminToken,
+      );
+      const first = await browserApi.upsertWorkItem(
+        { title: "Diseñar portada", parent_id: parent.id, status: "in_progress" },
+        adminToken,
+      );
+
+      let items = await browserApi.listWorkItems({}, adminToken);
+      expect(items.find((item) => item.id === parent.id)?.status).toBe("in_progress");
+
+      const second = await browserApi.upsertWorkItem(
+        { title: "Publicar web", parent_id: parent.id, status: "blocked" },
+        adminToken,
+      );
+      items = await browserApi.listWorkItems({}, adminToken);
+      expect(items.find((item) => item.id === parent.id)?.status).toBe("blocked");
+
+      await browserApi.upsertWorkItem(
+        { id: second.id, title: second.title, status: "validation" },
+        adminToken,
+      );
+      await browserApi.upsertWorkItem(
+        { id: second.id, title: second.title, status: "done" },
+        adminToken,
+      );
+      items = await browserApi.listWorkItems({}, adminToken);
+      expect(items.find((item) => item.id === parent.id)?.status).toBe("in_progress");
+
+      await browserApi.upsertWorkItem(
+        { id: first.id, title: first.title, status: "validation" },
+        adminToken,
+      );
+      await browserApi.upsertWorkItem(
+        { id: first.id, title: first.title, status: "done" },
+        adminToken,
+      );
+      items = await browserApi.listWorkItems({}, adminToken);
+      expect(items.find((item) => item.id === parent.id)?.status).toBe("done");
+      expect(items.find((item) => item.id === parent.id)?.completed_at).not.toBeNull();
+
+      await browserApi.upsertWorkItem(
+        { id: first.id, title: first.title, status: "planned" },
+        adminToken,
+      );
+      items = await browserApi.listWorkItems({}, adminToken);
+      expect(items.find((item) => item.id === parent.id)?.status).toBe("planned");
+      expect(items.find((item) => item.id === parent.id)?.completed_at).toBeNull();
+    });
+
+    it("inherits the parent assignee and due date when a subtask leaves them empty", async () => {
+      const members = await browserApi.listWorkMembers(adminToken);
+      const admin = members.find((member) => member.display_name === "Administrador") ?? members[0];
+      const parent = await browserApi.upsertWorkItem(
+        {
+          title: "Lanzamiento",
+          assignee_id: admin.id,
+          due_date: "2026-08-20",
+        },
+        adminToken,
+      );
+      const child = await browserApi.upsertWorkItem(
+        { title: "Publicar campaña", parent_id: parent.id },
+        adminToken,
+      );
+
+      expect(child.assignee_id).toBeNull();
+      expect(child.effective_assignee_id).toBe(admin.id);
+      expect(child.assignee_name).toBe(admin.display_name);
+      expect(child.due_date).toBeNull();
+      expect(child.effective_due_date?.slice(0, 10)).toBe("2026-08-20");
+
+      await browserApi.upsertWorkItem(
+        { id: parent.id, title: parent.title, due_date: "2026-08-22" },
+        adminToken,
+      );
+      const inherited = (await browserApi.listWorkItems({}, adminToken))
+        .find((item) => item.id === child.id);
+      expect(inherited?.due_date).toBeNull();
+      expect(inherited?.effective_due_date?.slice(0, 10)).toBe("2026-08-22");
+
+      const filtered = await browserApi.listWorkItems({ assignee_id: admin.id }, adminToken);
+      expect(filtered.some((item) => item.id === child.id)).toBe(true);
+    });
+
+    it("keeps explicit subtask planning values instead of inheriting them", async () => {
+      const members = await browserApi.listWorkMembers(adminToken);
+      const parent = await browserApi.upsertWorkItem(
+        { title: "Pare", assignee_id: members[0].id, due_date: "2026-08-20" },
+        adminToken,
+      );
+      const child = await browserApi.upsertWorkItem(
+        {
+          title: "Filla",
+          parent_id: parent.id,
+          assignee_id: members.at(-1)!.id,
+          due_date: "2026-08-18",
+        },
+        adminToken,
+      );
+
+      expect(child.assignee_id).toBe(members.at(-1)!.id);
+      expect(child.due_date?.slice(0, 10)).toBe("2026-08-18");
+    });
+
+    it("prevents nested subtasks", async () => {
+      const parent = await browserApi.upsertWorkItem({ title: "Padre" }, adminToken);
+      const child = await browserApi.upsertWorkItem(
+        { title: "Hija", parent_id: parent.id },
+        adminToken,
+      );
+      await expect(
+        browserApi.upsertWorkItem(
+          { title: "Nieta", parent_id: child.id },
+          adminToken,
+        ),
+      ).rejects.toThrow("Las subtareas no pueden tener otras subtareas.");
+    });
+
+    it("moves a task between parents and can promote it back to a main task", async () => {
+      const firstParent = await browserApi.upsertWorkItem(
+        { title: "Primer padre" },
+        adminToken,
+      );
+      const secondParent = await browserApi.upsertWorkItem(
+        { title: "Segundo padre" },
+        adminToken,
+      );
+      const task = await browserApi.upsertWorkItem(
+        { title: "Tarea movible", status: "in_progress" },
+        adminToken,
+      );
+
+      const asSubtask = await browserApi.upsertWorkItem(
+        { id: task.id, title: task.title, parent_id: firstParent.id },
+        adminToken,
+      );
+      expect(asSubtask.parent_id).toBe(firstParent.id);
+
+      const moved = await browserApi.upsertWorkItem(
+        { id: task.id, title: task.title, parent_id: secondParent.id },
+        adminToken,
+      );
+      expect(moved.parent_id).toBe(secondParent.id);
+
+      const promoted = await browserApi.upsertWorkItem(
+        { id: task.id, title: task.title, parent_id: null },
+        adminToken,
+      );
+      expect(promoted.parent_id).toBeNull();
+    });
+
+    it("does not allow moving a task that already has subtasks under another task", async () => {
+      const targetParent = await browserApi.upsertWorkItem(
+        { title: "Padre destino" },
+        adminToken,
+      );
+      const parentWithChildren = await browserApi.upsertWorkItem(
+        { title: "Padre con hijas" },
+        adminToken,
+      );
+      await browserApi.upsertWorkItem(
+        { title: "Hija existente", parent_id: parentWithChildren.id },
+        adminToken,
+      );
+
+      await expect(
+        browserApi.upsertWorkItem(
+          {
+            id: parentWithChildren.id,
+            title: parentWithChildren.title,
+            parent_id: targetParent.id,
+          },
+          adminToken,
+        ),
+      ).rejects.toThrow("Una tarea con subtareas no puede convertirse en subtarea.");
     });
 
     it("enforces single active task per (company_id, source_type, source_key)", async () => {
@@ -303,6 +492,55 @@ describe("Trabajo Backend & API Tests", () => {
   });
 
   describe("Work Project CRUD & Tri-state Filtering", () => {
+    it("creates an independent company and keeps it available for project relations", async () => {
+      const company = browserApi.create_company({
+        legal_name: "Voura Labs, S.L.",
+        trade_name: "Voura",
+        nif: "B12345678",
+        kind: "software_studio",
+        entity_type: "sl",
+      }, adminToken);
+      expect(company.trade_name).toBe("Voura");
+      expect(company.code).toBe("VOURA");
+      expect(company.kind).toBe("software_studio");
+      expect(browserApi.list_companies(adminToken).some((item) => item.id === company.id)).toBe(true);
+
+      const project = await browserApi.upsertWorkProject({
+        name: "Voura producto",
+        project_type: "internal",
+        client_company_id: company.id,
+      }, adminToken);
+      expect(project.project_type).toBe("internal");
+      expect(project.client_company_id).toBe(company.id);
+      expect(project.task_company_id).toBe(company.id);
+
+      const switched = browserApi.set_active_company(company.id, adminToken);
+      expect(switched.id).toBe(company.id);
+      const projectsInOwnerWorkspace = await browserApi.listWorkProjects(undefined, adminToken);
+      expect(projectsInOwnerWorkspace.some((item) => item.id === project.id)).toBe(true);
+      const task = await browserApi.upsertWorkItem({ title: "Tarea de Voura", project_id: project.id }, adminToken);
+      expect(task.company_id).toBe(company.id);
+      expect((await browserApi.listWorkItems({ project_id: project.id }, adminToken)).some((item) => item.id === task.id)).toBe(true);
+
+      browserApi.set_active_company(project.company_id, adminToken);
+      const tasksFromPortfolio = await browserApi.listWorkItems({ project_id: project.id }, adminToken);
+      expect(tasksFromPortfolio.some((item) => item.id === task.id)).toBe(true);
+      expect((await browserApi.listWorkItems({}, adminToken)).some((item) => item.id === task.id)).toBe(false);
+    });
+
+    it("permite corregir el tipo de empresa desde su ficha", () => {
+      const company = browserApi.create_company({
+        legal_name: "NIU Desarrollo, S.L.",
+        trade_name: "NIU",
+        kind: "retail_secondhand",
+      }, adminToken);
+      browserApi.set_active_company(company.id, adminToken);
+
+      const updated = browserApi.update_company_profile({ kind: "software_studio" }, adminToken);
+      expect(updated.kind).toBe("software_studio");
+      expect(browserApi.get_active_company(adminToken)?.kind).toBe("software_studio");
+    });
+
     it("upsertWorkProject requires admin session", async () => {
       await expect(
         browserApi.upsertWorkProject({ name: "Proyecto Cajero" }, cajeroToken)
@@ -326,6 +564,28 @@ describe("Trabajo Backend & API Tests", () => {
           adminToken
         )
       ).rejects.toThrow("La fecha de fin no puede ser anterior a la fecha de inicio.");
+    });
+
+    it("does not retain client data when a project becomes an own product", async () => {
+      const [customer] = browserApi.list_customers(adminToken);
+      const clientProject = await browserApi.upsertWorkProject({
+        name: "Servicio HEXA",
+        project_type: "client",
+        customer_id: customer.id,
+      }, adminToken);
+      expect(clientProject.customer_id).toBe(customer.id);
+      expect(clientProject.client_company_id).toBeNull();
+
+      const ownProduct = await browserApi.upsertWorkProject({
+        id: clientProject.id,
+        name: "Producto propio",
+        project_type: "own",
+        client_company_id: null,
+        customer_id: customer.id,
+      }, adminToken);
+      expect(ownProduct.project_type).toBe("own");
+      expect(ownProduct.client_company_id).toBeNull();
+      expect(ownProduct.customer_id).toBeNull();
     });
 
     it("supports project lifecycle: create, get, list with status filter, update, archive", async () => {
@@ -429,6 +689,24 @@ describe("Trabajo Backend & API Tests", () => {
           adminToken,
         )
       ).toThrow("Los proyectos propios no admiten movimientos de pago.");
+
+      const grantIncome = browserApi.sync_project_grant_income(
+        { project_id: ownProject.id, beneficiary_company_id: ownProject.company_id, grant_id: "grant-1", amount_cents: 150000, description: "Subvención innovación", occurred_at: "2026-08-20" },
+        adminToken,
+      );
+      expect(grantIncome).toMatchObject({ project_id: ownProject.id, kind: "income", amount_cents: 150000, category: "subvencion_cobrada" });
+      browserApi.sync_project_grant_income(
+        { project_id: ownProject.id, beneficiary_company_id: ownProject.company_id, grant_id: "grant-1", amount_cents: 175000, description: "Subvención innovación actualizada", occurred_at: "2026-08-21" },
+        adminToken,
+      );
+      expect(browserApi.list_cash_movements(adminToken).filter((movement) => movement.category === "subvencion_cobrada")).toEqual([
+        expect.objectContaining({ amount_cents: 175000, occurred_at: "2026-08-21" }),
+      ]);
+      browserApi.sync_project_grant_income(
+        { project_id: ownProject.id, beneficiary_company_id: ownProject.company_id, grant_id: "grant-1", amount_cents: 0, description: "", occurred_at: null },
+        adminToken,
+      );
+      expect(browserApi.list_cash_movements(adminToken).some((movement) => movement.category === "subvencion_cobrada")).toBe(false);
 
       const archived = await browserApi.archiveWorkProject(proj.id, adminToken);
       expect(archived.status).toBe("archived");

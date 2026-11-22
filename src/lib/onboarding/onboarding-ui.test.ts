@@ -13,6 +13,7 @@ describe("onboarding wizard (#11)", () => {
     const wiz = readFileSync(WIZARD, "utf8");
     expect(layout).toContain("OnboardingWizard");
     expect(layout).toContain("isOnboardingDone");
+    expect(layout).toContain('WEB_DATA_MODE !== "central"');
     expect(wiz).toContain("data-onboarding-wizard");
     expect(wiz).toContain("markOnboardingDone");
     expect(wiz).toMatch(/Saltar y usar demo/);

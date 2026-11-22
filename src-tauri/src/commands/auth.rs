@@ -12,6 +12,8 @@ type LoginRow = (
     String,
     String,
     String,
+    String,
+    String,
     i64,
     String,
     String,
@@ -24,15 +26,17 @@ fn map_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuthUser> {
         id: row.get(0)?,
         username: row.get(1)?,
         display_name: row.get(2)?,
-        role: row.get(3)?,
-        active: row.get::<_, i64>(4)? == 1,
-        created_at: row.get(5)?,
-        must_change_password: row.get::<_, i64>(6).unwrap_or(0) == 1,
-        temp_password_issued_at: row.get::<_, Option<String>>(7)?,
+        phone: row.get(3)?,
+        avatar_data_url: row.get(4)?,
+        role: row.get(5)?,
+        active: row.get::<_, i64>(6)? == 1,
+        created_at: row.get(7)?,
+        must_change_password: row.get::<_, i64>(8).unwrap_or(0) == 1,
+        temp_password_issued_at: row.get::<_, Option<String>>(9)?,
     })
 }
 
-const USER_SELECT: &str = "SELECT id, username, display_name, role, active, created_at,
+const USER_SELECT: &str = "SELECT id, username, display_name, phone, avatar_data_url, role, active, created_at,
        COALESCE(must_change_password, 0), temp_password_issued_at FROM users";
 
 fn random_token() -> String {
@@ -50,7 +54,7 @@ pub fn require_session(
         .filter(|t| !t.is_empty())
         .ok_or_else(|| "Sesión no iniciada".to_string())?;
     conn.query_row(
-        "SELECT u.id, u.username, u.display_name, u.role, u.active, u.created_at,
+        "SELECT u.id, u.username, u.display_name, u.phone, u.avatar_data_url, u.role, u.active, u.created_at,
                 COALESCE(u.must_change_password, 0), u.temp_password_issued_at
          FROM sessions s
          JOIN users u ON u.id = s.user_id
@@ -84,7 +88,7 @@ pub fn login(
         .ok_or_else(|| "Usuario o contraseña incorrectos".to_string())?;
     let conn = db.lock();
     let row: Result<LoginRow, _> = conn.query_row(
-        "SELECT id, username, display_name, role, active, created_at, pin_hash,
+        "SELECT id, username, display_name, phone, avatar_data_url, role, active, created_at, pin_hash,
                 COALESCE(must_change_password, 0), temp_password_issued_at
          FROM users WHERE lower(username) = lower(?1) AND active = 1",
         params![username.trim()],
@@ -99,11 +103,13 @@ pub fn login(
                 r.get(6)?,
                 r.get(7)?,
                 r.get(8)?,
+                r.get(9)?,
+                r.get(10)?,
             ))
         },
     );
 
-    let (id, uname, display, role, active, created, pin_hash, must_change, temp_issued) =
+    let (id, uname, display, phone, avatar_data_url, role, active, created, pin_hash, must_change, temp_issued) =
         row.map_err(|_| "Usuario o contraseña incorrectos".to_string())?;
 
     if !verify_pin(secret.trim(), &pin_hash) {
@@ -130,6 +136,8 @@ pub fn login(
             id,
             username: uname,
             display_name: display,
+            phone,
+            avatar_data_url,
             role,
             active: active == 1,
             created_at: created,
@@ -236,8 +244,8 @@ pub fn upsert_user(
 
         let active = input.active.unwrap_or(true) as i64;
         conn.execute(
-            "UPDATE users SET username=?1, display_name=?2, role=?3, active=?4 WHERE id=?5",
-            params![username, display, role, active, id],
+            "UPDATE users SET username=?1, display_name=?2, phone=?3, avatar_data_url=?4, role=?5, active=?6 WHERE id=?7",
+            params![username, display, input.phone.unwrap_or_default(), input.avatar_data_url.unwrap_or_default(), role, active, id],
         )
         .map_err(|e| e.to_string())?;
 
@@ -277,9 +285,9 @@ pub fn upsert_user(
         let now = now_iso();
         let active = input.active.unwrap_or(true) as i64;
         conn.execute(
-            "INSERT INTO users (username, display_name, role, pin_hash, active, created_at, must_change_password, temp_password_issued_at)
-             VALUES (?1,?2,?3,?4,?5,?6,1,?6)",
-            params![username, display, role, hash, active, now],
+            "INSERT INTO users (username, display_name, phone, avatar_data_url, role, pin_hash, active, created_at, must_change_password, temp_password_issued_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,1,?8)",
+            params![username, display, input.phone.unwrap_or_default(), input.avatar_data_url.unwrap_or_default(), role, hash, active, now],
         )
         .map_err(|e| {
             if e.to_string().contains("UNIQUE") {

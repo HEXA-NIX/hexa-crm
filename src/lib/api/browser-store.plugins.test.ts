@@ -6,11 +6,16 @@ beforeEach(() => {
 });
 
 describe("tenant plugin management (browser-store)", () => {
-  it("loads both catalog plugins for active session with default states", async () => {
+  it("loads catalog plugins for active session with default states", async () => {
     const login = await browserApi.login("admin", "1234");
     const plugins = await browserApi.list_plugins(login.token);
 
-    expect(plugins.length).toBe(2);
+    expect(plugins.length).toBe(3);
+    expect(plugins.find((p) => p.plugin_key === "google_drive")).toMatchObject({
+      enabled: false,
+      secret_configured: false,
+      category: "almacenamiento",
+    });
 
     const dbPlugin = plugins.find((p) => p.plugin_key === "database_bridge");
     const stripePlugin = plugins.find((p) => p.plugin_key === "stripe_mcp");
@@ -155,7 +160,7 @@ describe("tenant plugin management (browser-store)", () => {
 
     // Listing plugins works for cajero session
     const list = await browserApi.list_plugins(cajeroToken);
-    expect(list.length).toBe(2);
+    expect(list.length).toBe(3);
 
     // Updating plugin requires admin
     await expect(

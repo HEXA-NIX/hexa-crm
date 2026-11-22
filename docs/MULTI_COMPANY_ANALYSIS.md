@@ -5,6 +5,14 @@
 **Producto base:** hexa-crm — CRM/TPV local-first, control interno de ventas/caja/IVA  
 **Fiscal:** ver [ADR-001 VeriFactu](./ADR-001-verifactu-plan.md) — **no** se reclama facturación electrónica homologada
 
+> **Nota de vigencia (2026-08-05):** este documento conserva el diseño y el
+> roadmap original. El Worker/D1 posterior ya implementa una parte del modelo
+> (`companies`, membresías y `active_company_id`), pero no una administración
+> completa de tenants. Para el estado ejecutable y sus límites, consulta
+> [`SESSION_HANDOFF.md`](./SESSION_HANDOFF.md), las migraciones
+> `workers/cloudflare/migrations/` y el Worker actual; no uses este análisis
+> histórico como prueba de paridad.
+
 ---
 
 ## 1. Dos negocios reales: qué separar y qué puede compartirse
@@ -137,7 +145,7 @@ Feature flags por `company.kind` evitan forzar un TPV de compraventa al estudio 
 
 ## 3. Gaps priorizados vs hexa-crm **actual**
 
-### 3.1 Realidad del producto hoy (verificación en código)
+### 3.1 Estado histórico al redactar este análisis (verificación original)
 
 | Hecho en repo | Evidencia |
 |---------------|-----------|

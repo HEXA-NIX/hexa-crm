@@ -26,7 +26,7 @@ describe("AJUSTES_SECTIONS catalog", () => {
     }
     // Labels readable for humans (not stack jargon)
     expect(AJUSTES_SECTIONS.find((s) => s.id === "cuenta")?.label).toMatch(/Cuenta/i);
-    expect(AJUSTES_SECTIONS.find((s) => s.id === "tienda")?.label).toMatch(/Tienda/i);
+    expect(AJUSTES_SECTIONS.find((s) => s.id === "tienda")?.label).toMatch(/Empresa/i);
     expect(AJUSTES_SECTIONS.find((s) => s.id === "equipo")?.label).toMatch(/Equipo/i);
     expect(AJUSTES_SECTIONS.find((s) => s.id === "ia")?.label).toMatch(/IA|Asistente/i);
     expect(AJUSTES_SECTIONS.find((s) => s.id === "actualizaciones")?.label).toMatch(

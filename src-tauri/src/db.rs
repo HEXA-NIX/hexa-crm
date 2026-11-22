@@ -101,6 +101,8 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT NOT NULL UNIQUE,
             display_name TEXT NOT NULL,
+            phone TEXT NOT NULL DEFAULT '',
+            avatar_data_url TEXT NOT NULL DEFAULT '',
             role TEXT NOT NULL DEFAULT 'cajero',
             pin_hash TEXT NOT NULL,
             active INTEGER NOT NULL DEFAULT 1,
@@ -199,6 +201,8 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         "ALTER TABLE users ADD COLUMN temp_password_issued_at TEXT",
         [],
     );
+    let _ = conn.execute("ALTER TABLE users ADD COLUMN phone TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE users ADD COLUMN avatar_data_url TEXT NOT NULL DEFAULT ''", []);
     let _ = conn.execute(
         "ALTER TABLE products ADD COLUMN category TEXT NOT NULL DEFAULT ''",
         [],
@@ -210,6 +214,12 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     let _ = conn.execute("ALTER TABLE products ADD COLUMN fulfillment_mode TEXT NOT NULL DEFAULT 'own_stock'", []);
     let _ = conn.execute("ALTER TABLE products ADD COLUMN stock_location TEXT NOT NULL DEFAULT 'Almacén principal'", []);
     let _ = conn.execute("ALTER TABLE products ADD COLUMN condition_code TEXT NOT NULL DEFAULT 'used'", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN publication_status TEXT NOT NULL DEFAULT 'published'", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN sales_policy TEXT NOT NULL DEFAULT 'own_stock'", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN supplier_source_status TEXT NOT NULL DEFAULT 'not_applicable'", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN supply_status TEXT NOT NULL DEFAULT 'not_applicable'", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN supplier_last_verified_at TEXT", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN availability_eta TEXT", []);
 
     seed_users_if_empty(conn)?;
     Ok(())
@@ -310,6 +320,7 @@ fn seed_if_empty(conn: &Connection) -> Result<(), String> {
         ("default_vat", "21"),
         ("idle_timeout_minutes", "15"),
         ("last_backup_at", ""),
+        ("monthly_economic_goals", "{}"),
     ];
     for (k, v) in defaults {
         conn.execute(

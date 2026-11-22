@@ -1,0 +1,63 @@
+From: HEXA-NIX
+Subject: [PATCH] Forward decrypted WhatsApp poll selections
+
+Base: aldinokemal/go-whatsapp-web-multidevice v9.0.1
+
+WhatsApp encrypts poll votes in `PollUpdateMessage`. GOWA forwarded the
+message envelope but omitted the vote, so webhook consumers could not know
+which option was selected. This patch decrypts the vote and adds
+`selected_option_hashes` plus the original poll message id to the existing
+`message` webhook payload. Option hashes are SHA-256 values by design; the
+consumer maps them to the labels it sent in the poll.
+
+--- a/src/infrastructure/whatsapp/event_message.go
++++ b/src/infrastructure/whatsapp/event_message.go
+@@
+ import (
+ 	"context"
++	"encoding/hex"
+ 	"fmt"
+@@
+ 	// Add optional fields
+ 	if err := buildOptionalFields(ctx, client, evt, msg, payload); err != nil {
+ 		return "", nil, err
+ 	}
++
++	// Poll votes are encrypted by WhatsApp and are otherwise invisible to
++	// webhook consumers. Decrypt the vote here and expose the selected option
++	// hashes so downstream applications can map them to their own poll labels.
++	// Keep this best-effort: a poll decryption failure must not drop the message
++	// webhook or affect normal text/media delivery.
++	buildPollVoteFields(ctx, client, evt, msg, payload)
+ 
+ 	return EventTypeMessage, payload, nil
+ }
++
++func buildPollVoteFields(ctx context.Context, client *whatsmeow.Client, evt *events.Message, msg *waE2E.Message, payload map[string]any) {
++	if msg == nil || msg.GetPollUpdateMessage() == nil {
++		return
++	}
++	update := msg.GetPollUpdateMessage()
++	payload["poll_update"] = true
++	if key := update.GetPollCreationMessageKey(); key != nil {
++		payload["poll_creation_message_id"] = key.GetID()
++	}
++	if client == nil || evt == nil || update.GetVote() == nil {
++		return
++	}
++	vote, err := client.DecryptPollVote(ctx, evt)
++	if err != nil {
++		logrus.Warnf("Failed to decrypt poll vote %s: %v", evt.Info.ID, err)
++		payload["poll_vote_error"] = err.Error()
++		return
++	}
++	selected := make([]string, 0, len(vote.GetSelectedOptions()))
++	for _, hash := range vote.GetSelectedOptions() {
++		if len(hash) > 0 {
++			selected = append(selected, hex.EncodeToString(hash))
++		}
++	}
++	if len(selected) > 0 {
++		payload["selected_option_hashes"] = selected
++	}
++}

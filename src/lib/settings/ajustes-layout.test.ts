@@ -24,11 +24,18 @@ describe("ajustes layout — category navigation", () => {
     expect(src).toContain("data-ajustes-shell");
   });
 
+  it("permite arrastrar una foto al editor de usuario", () => {
+    expect(src).toContain("data-user-avatar-dropzone");
+    expect(src).toContain("dropUserAvatar");
+    expect(src).toContain("userAvatarDragActive");
+  });
+
   it("exposes one active panel at a time (not all sections stacked)", () => {
     // Conditional branches per section — not a flat monoblock of every Card at once
     expect(src).toMatch(/activeSection === ["']cuenta["']/);
     expect(src).toMatch(/activeSection === ["']tienda["']/);
     expect(src).toMatch(/activeSection === ["']ia["']/);
+    expect(src).toMatch(/activeSection === ["']orca["']/);
     expect(src).toMatch(/activeSection === ["']actualizaciones["']/);
     expect(src).toMatch(/activeSection === ["']sistema["']/);
     expect(src).toMatch(/activeSection === ["']equipo["']/);
@@ -45,9 +52,11 @@ describe("ajustes layout — category navigation", () => {
     // Labels come from catalog; page iterates navSections
     expect(src).toMatch(/sec\.label/);
     // Catalog itself has Spanish labels
-    for (const label of ["Cuenta", "Tienda", "Equipo", "Asistente IA", "Actualizaciones", "Sistema"]) {
+    for (const label of ["Cuenta", "Empresa", "Equipo", "Asistente IA", "Actualizaciones", "Sistema"]) {
       expect(AJUSTES_SECTIONS.some((s) => s.label === label)).toBe(true);
     }
+    expect(visibleAjustesSections(true).some((s) => s.id === "whatsapp")).toBe(false);
+    expect(src).toContain("<PluginManager />");
   });
 
   it("separates danger zone from everyday save", () => {
@@ -93,6 +102,14 @@ describe("ajustes layout — category navigation", () => {
     expect(ollamaCall).toBeGreaterThanOrEqual(0);
     expect(usersCall).toBeGreaterThan(ollamaCall);
     expect(load.slice(0, usersCall)).toMatch(/try \{\s*health = await api\.ollamaHealth\(\);\s*\} catch \{\s*health = null;\s*\}/);
+  });
+
+  it("configura el worker Orca sin persistir el token de sesión", () => {
+    expect(src).toContain("data-orca-settings");
+    expect(src).toContain("copyOrcaCommand");
+    expect(src).toContain("HEXA_CRM_AGENT_TOKEN");
+    expect(src).toContain("El token no se guarda");
+    expect(src).not.toMatch(/localStorage\.setItem\([^\n]*token/i);
   });
 
   it("admin-only equipo matches catalog filter", () => {

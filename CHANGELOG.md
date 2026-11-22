@@ -9,6 +9,73 @@ y este proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+---
+
+## [0.4.0] — 2026-11-22
+
+Release mayor que consolida **Proyectos** (cartera multiempresa, subtareas, documentación, solicitudes, sprints híbridos, economía, hitos y portal de cliente), **Facturación emitida y recibida**, **Presupuestos PDF**, **Gastos/WhatsApp OCR**, **Google Drive**, **Personal/nóminas**, **Financiación**, preparación local VERI\*FACTU e integración con **Orca**.
+
+### Added
+
+- **Proyectos y Trabajo:**
+  - Portafolio integral de Proyectos con indicadores de salud, resumen de riesgos, bloqueos, entregas próximas, búsqueda y orden por atención, fecha, progreso o valor, además de actualización periódica de cartera.
+  - Ficha de proyecto estructurada (Resumen, Plan/Información, Trabajo, Gestión, Solicitudes, Economía, Documentos y Actividad) con URLs compartibles (`/proyectos/[id]`), portada de salud/progreso, logo propio (PNG/JPG/WebP) o heredado y PRD/definición ampliada.
+  - Catálogo visual de stack tecnológico con categorías (incluyendo App móvil/escritorio y Plugins/streaming: Twitch, YouTube, OBS) y valores personalizados.
+  - Registro de solicitudes y sugerencias por proyecto con tipo, solicitante, impacto, prioridad, responsable, estados de revisión, conversación y conversión trazable a tarea.
+  - Subtareas agrupadas bajo su tarea padre con expansión/plegado, progreso agregado, arrastre en Kanban y herencia de alertas y valores efectivos (responsable/vencimiento) sin sobrescribir datos propios.
+  - Columna **Validación** entre *En progreso* y *Hecho* (y separación entre «Validación» interna y «Validar cliente» con aviso por WhatsApp y aprobación/solicitud de cambios desde el portal).
+  - Sprints híbridos en Trabajo: backlog y Kanban del sprint, refinamiento, Sprint Poker asistido por IA, capacidad humana/IA, revisor humano obligatorio, activación, revisión, retrospectiva, cierre e historial.
+  - Documentación vinculada a cada proyecto (enlaces, rutas de archivos, notas internas) y capa extensible de almacenamiento documental con **Google Drive** (OAuth de un clic, renovación automática, credencial cifrada, carpeta configurable y subida drag & drop de hasta 20 MB).
+  - Importación masiva de tareas y subtareas desde Markdown (ChatGPT) con fechas heredables/sobrescribibles y copia de tareas en formato encargo Markdown para IA.
+  - Portal aislado para clientes (`/portal`) donde consultar resumen, hitos, facturas enviadas y tareas en lectura, validar entregables y crear o responder sus propias solicitudes.
+  - Objetivo económico mensual por empresa/hito y gráfica mensual acumulada de facturación prevista vs registrada con hitos y márgenes (incluyendo saldo negativo).
+  - Integración de tareas con **Orca** (`tools/orca-worker.mjs`): despacho desde ficha, cola RPC autenticada, worktree local y puente loopback para modo browser.
+- **Facturación, Presupuestos y Finanzas:**
+  - Facturación emitida separada de facturas recibidas: series por empresa, borradores editables, emisión inmutable con fecha de operación/vencimiento, cobros parciales en popup por método, anulación, rectificativas/abonos e impresión PDF con plantilla comercial.
+  - Presupuestos (`/presupuestos`) con editor modal a pantalla completa, descuentos por línea y generales (% o fijo), ahorro mostrado en PDF comercial, conversión a factura y reapertura segura al anular facturas sin cobros ni abonos.
+  - Bandeja de gastos y facturas recibidas (`/gastos`) con adjuntos PDF/imagen, revisión, pagos parciales y movimiento automático de Caja.
+  - Módulo empresarial **Financiación** (`/financiacion`): subvenciones (a fondo perdido / reembolsables, comisión de gestión, sincronización de cobros con Caja), inversores, rondas pre-money/post-money con dilución del *cap table* y préstamos por empresa.
+  - Cuestionario y perfil fiscal por empresa en Ajustes + cálculo real de modelos fiscales aplicables y borrador revisable del modelo 303 con exportación CSV (sin presentación ante la AEAT).
+  - Preparación VERI\*FACTU local por empresa: registros de alta/anulación encadenados con SHA-256, URL de QR de pruebas, exportación JSON y comprobación local de integridad (no homologado ni conectado con AEAT).
+  - Área administrativa **Personal** (`/personal`): fichas laborales aisladas por empresa y restringidas a administradores, registro de nóminas por periodo con documentación y pago conectado a Caja.
+- **WhatsApp (GOWA), OCR y Recepción Documental:**
+  - Integración por empresa/usuario mediante GOWA (QR por empresa, reutilización de sesión compartida, envío confirmado, resúmenes semanales y de tareas vencidas/próximas de 7 días).
+  - Webhook firmado (`POST /api/whatsapp/webhook`) para clasificar documentos por encuesta/voto o texto y crear borradores de gastos o solicitudes de proyecto desde teléfonos autorizados, con transcripción de notas de voz (Whisper) y lectura OCR con modelo visual Ollama independiente.
+  - Enlace público temporal `/recibir/[token]` (30 min, un solo uso, Open Graph) para confirmar tipo de documento y empresa destino desde WhatsApp.
+- **Organización, Empresa y UI:**
+  - Alta de empresas independientes desde Ajustes, ficha completa de Empresa (razón social, NIF/CIF, entidad, dirección, logo con marco Hexa), visión consolidada en Dashboard y foto de perfil de usuarios del equipo.
+  - Selector de fechas HEXA unificado, selector de rango de dos meses en Facturas, ordenación en cabeceras de tablas principales (`SortableHeader`), inputs monetarios con separadores de miles en formato español, submenú lateral de Ventas (Facturas, Presupuestos, Servicios) y diálogos visuales que reemplazan `alert`/`confirm`/`prompt` nativos.
+  - Zonas de carga con arrastrar y soltar en documentos, logos de proyecto y fotos de usuario.
+
+### Changed
+
+- `/proyectos`, la ficha de proyecto y el menú mantienen siempre visible la cartera completa aunque solo exista un proyecto (eliminada la redirección automática); el acceso a Proyectos pasa a depender del rol (usuarios internos también en empresas `shop`; clientes limitados a `/portal`).
+- El Dashboard financiero separa valor de cartera, facturación por fecha de operación, cobros y subvenciones, financiación, gastos de Caja y disponible; los gastos de Caja no vinculados a proyecto computan en «Gastado».
+- La configuración que antes era global (IVA, Ollama, objetivos, nombre de tienda y copias) se almacena por empresa con compatibilidad de lectura heredada y copias limitadas al tenant activo; el arranque central bloquea cualquier restauración destructiva.
+- La navegación y las vistas distinguen entre productos propios, trabajos para cliente (catálogo de contactos de HEXA) y proyectos internos de grupo (empresa propietaria y herencia de logo).
+- Los estados y tarjetas de Kanban muestran `inbox` como **Backlog**, Validación en azul, subtareas plegadas por defecto, ordenación por fecha de vencimiento (ISO completo), avatares de responsable y alertas heredadas amarillo/rojo; las tareas archivadas dejan de computar en el progreso.
+- Cobertura completa de modo claro en modales, paneles de IA, tarjetas editoriales y superficies de Ventas, Trabajo, Caja y Ajustes; la carga diferida de pestañas de proyecto distingue entre «cargando» y «vacío».
+- El asistente de puesta en marcha deja de abrirse automáticamente en cada navegador en modo central.
+- Ventas sincroniza el libro de stock legado con `stock_balances` y refuerza validaciones de cantidades, precios, IVA, inventario, Caja (permitiendo fecha pasada) y estados de gastos.
+
+### Fixed
+
+- Corrige la tipificación de `$props()` en `src/routes/recibir/[token]/+page.svelte` para `svelte-check` 4.7.5 y alinea el campo `avatar_data_url` en `AuthUser`/`UserInput` de Tauri (`src-tauri/src/models.rs`), restaurando la compilación limpia de `cargo test --locked`.
+- La ruta dinámica `/proyectos/[id]` queda registrada en el servidor Node sin prerenderado para que la recarga directa devuelva HTTP 200 en vez de 404/500.
+- La recepción de facturas por WhatsApp funciona sin sesión web activa, tolera reintentos del webhook sin duplicar, conserva archivos originales en lecturas fallidas y caduca enlaces a los 30 minutos.
+- La cartera de proyectos consulta las tareas desde la empresa propietaria/de tareas de cada proyecto interno (VOURA y empresas del grupo) y corrige tareas históricas asociadas al tenant incorrecto.
+- Trabajo preselecciona al usuario conectado al filtrar y crear tareas/subtareas; los hitos económicos impiden repetir mes y siempre ofrecen 36 meses.
+- Las tareas en Validación dejan de contarse como vencidas del responsable; el Kanban mantiene seis columnas visibles/desplazables, altura uniforme y cabeceras adherentes.
+- Editar el teléfono propio actualiza la disponibilidad de WhatsApp QR al instante; las subidas a Google Drive muestran el documento arriba y limpian el selector al terminar; el resumen WhatsApp excluye registros sin fecha válida.
+
+### Migration & Ops notes
+
+- **PostgreSQL y browser store:** las migraciones del esquema PostgreSQL y del almacenamiento local se aplican automáticamente al iniciar; en PostgreSQL se crean perfiles fiscales y ajustes por defecto para todas las empresas activas.
+- **Cloudflare D1 (`crm.nix-0.com`):** esta versión mantiene el despliegue estático + Worker D1 existente para salud, operador, usuarios y TPV/ventas básicas; los comandos RPC de `/proyectos`, `/trabajo`, facturación, gastos, personal y WhatsApp aún no están implementados en `workers/cloudflare/src/index.ts` (operan en modo local y Node+PostgreSQL central).
+- **VERI\*FACTU:** el módulo incluido es exclusivamente preparación local (encadenado SHA-256 y QR de pruebas) y **no** sustituye una certificación ni realiza remisión automática a la AEAT.
+
+---
+
 ## [0.3.3] — 2026-11-22
 
 ### Changed
@@ -152,7 +219,10 @@ Primera release pública (tag `v0.1.0`).
 
 ---
 
-[Unreleased]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.3.3...v0.4.0
+[0.3.3]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.2.1-rc.2...v0.3.0
 [0.2.1-rc.2]: https://github.com/HEXA-NIX/hexa-crm/compare/v0.2.1-rc.1...v0.2.1-rc.2
